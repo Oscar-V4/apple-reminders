@@ -29,7 +29,7 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 6. When a list, section, or reminder is referenced indirectly, search the bounded relevant state before asking the user for details.
 7. For image attachments, resolve the exact target reminder first, attach the explicit file path, then read back the reminder or attachment row to verify the attachment.
 8. For sections, preserve list-level section membership and ordering. Do not treat a section name as global unless the data proves it is unique.
-9. For bulk edits, inspect a reasonable bounded set first and restate the qualifying reminders before applying changes.
+9. For bulk edits, inspect a reasonable bounded set first. If the current user has granted standing delegation, apply the change and report the exact affected set afterward; otherwise restate the qualifying reminders before applying changes.
 10. Use foreground UI automation only as a fallback for verification or unsupported flows. Prefer public APIs and the local background Reminders adapter for normal operation.
 11. Surface conflicts, duplicate matches, missing target lists, sync uncertainty, and destructive effects before writing.
 12. If the request is still ambiguous after checking for precedent or scanning a reasonable bounded scope, summarize the candidate targets or exact diff before writing anything.
@@ -38,12 +38,14 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 
 - Preserve title, notes, due date, reminder alert date, priority, flag, list, section, completion state, tags, URL, and attachments unless the user asked to change them.
 - Treat deletes, bulk completion, broad moves, and attachment removal as high-impact actions.
-- For high-impact writes, restate the qualifying reminder set and scope before applying the change.
+- When standing delegation applies, high-impact writes may be executed without a separate confirmation, but they must be bounded, logged, and verified with a read-back.
+- When standing delegation does not apply, restate the qualifying reminder set and scope before applying high-impact writes.
 - If multiple similarly named reminders, lists, or sections exist, identify the intended one explicitly before editing.
 - Prefer structured local adapter calls over free-form AppleScript or UI gestures.
 - Prefer EventKit or AppleScript for public reminder fields.
 - Use the SQLite-backed adapter only for Reminders surfaces not exposed through public APIs, such as image attachments and sections.
 - The SQLite-backed adapter must run schema checks, use transactions, update related cloud-state rows, and verify with a read-back.
+- Deletion must use native Reminders delete behavior so deleted reminders go through Reminders' Recently Deleted flow. Never hard-delete rows directly from the database.
 - Do not make direct database writes outside the Reminders group container discovered on the user's machine.
 - Keep iCloud sync caveats explicit when a change relies on private storage details.
 
