@@ -26,8 +26,10 @@ Calendar concepts map to Reminders concepts like this:
 
 ## Required Tool Backing
 
-The Google Calendar skill depends on a connector. Apple Reminders needs the same split:
+The Google Calendar skill depends on a connector declared in `.app.json`. Apple Reminders needs the same split between "agent behavior" and "actual operations", but not necessarily the same connector mechanism:
 
 - public adapter: AppleScript/EventKit for lists, reminders, dates, notes, completion, priority, and flags
 - private adapter: SQLite-backed operations for image attachments, sections, and membership ordering
 - verification adapter: post-write read-back, store backup, and schema doctor
+
+An MCP server is optional. If used, it should be a thin shim over the local adapter, not the core implementation.

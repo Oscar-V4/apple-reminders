@@ -12,8 +12,9 @@ Apple Reminders plugin prototype for Codex. The goal is a local assistant layer 
 ## Intended Shape
 
 - Skill layer: planning, safety, output conventions, bounded reads, and write policy.
-- Local tool layer: AppleScript/EventKit for public reminder fields; SQLite adapter for Reminders-only surfaces such as image attachments and sections.
+- Local adapter layer: AppleScript/EventKit for public reminder fields; SQLite adapter for Reminders-only surfaces such as image attachments and sections.
 - Verification layer: schema checks, transaction backups, dry-run previews, and post-write reads.
+- Optional MCP shim: a thin wrapper only if Codex needs first-class tool calls. The adapter should work without it.
 
 ## Reference
 
@@ -23,6 +24,8 @@ This plugin intentionally follows the structure of the Google Calendar plugin:
 - a primary skill that encodes workflow and write safety
 - future purpose-specific skills for review, capture, cleanup, and daily task briefs
 - connector/tool backing for actual reads and writes
+
+Google Calendar gets its tool backing from a hosted Codex app connector. Apple Reminders should use a local background adapter instead, because it is a native macOS app and the useful data is already on the user's machine.
 
 ## Safety Notes
 
