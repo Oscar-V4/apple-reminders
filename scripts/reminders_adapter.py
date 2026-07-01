@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gzip
 import hashlib
 import json
 import os
@@ -76,6 +77,43 @@ def normalize_uuid(value: str) -> str:
 
 def uuid_blob(value: str) -> bytes:
     return uuid.UUID(value).bytes
+
+
+def varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def length_field(tag: int, payload: bytes) -> bytes:
+    return bytes([tag]) + varint(len(payload)) + payload
+
+
+def reminder_text_document(text: str) -> bytes:
+    text_bytes = text.encode("utf-8")
+    n = len(text_bytes)
+    inner = (
+        length_field(0x12, text_bytes)
+        + b"\x1a\x10\x0a\x04\x08\x00\x10\x00\x10\x00\x1a\x04\x08\x00\x10\x00\x28\x01"
+        + b"\x1a\x10\x0a\x04\x08\x01\x10\x00\x10"
+        + varint(n)
+        + b"\x1a\x04\x08\x01\x10\x00\x28\x02"
+        + b"\x1a\x16\x0a\x08\x08\x00\x10\xff\xff\xff\xff\x0f\x10\x00\x1a\x08\x08\x00\x10\xff\xff\xff\xff\x0f"
+        + b"\x22\x1c\x0a\x1a\x0a\x10"
+        + os.urandom(16)
+        + b"\x12\x02\x08"
+        + varint(n)
+        + b"\x12\x02\x08\x01\x2a\x02\x08"
+        + varint(n)
+    )
+    raw = b"\x08\x00" + length_field(0x12, b"\x08\x00\x10\x00" + length_field(0x1A, inner))
+    return gzip.compress(raw, mtime=0)
 
 
 def connect(db: Path) -> sqlite3.Connection:
@@ -340,8 +378,83 @@ def membership_payload(mapping: dict[str, str]) -> str:
     )
 
 
+def reminder_order(raw: str | bytes | None) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item).upper() for item in payload if item]
+
+
+def reminder_order_payload(order: list[str]) -> str:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in order:
+        uid = item.upper()
+        if uid not in seen:
+            unique.append(uid)
+            seen.add(uid)
+    return json.dumps(unique, separators=(",", ":"))
+
+
+def resolution_map(keys: list[str], now: float) -> str:
+    return json.dumps(
+        {
+            "map": {
+                key: {
+                    "counter": 1,
+                    "modificationTime": now,
+                    "replicaID": str(uuid.uuid4()).upper(),
+                }
+                for key in keys
+            }
+        },
+        separators=(",", ":"),
+    )
+
+
 def update_primary_key(con: sqlite3.Connection, ent: int, new_max: int) -> None:
     con.execute("update Z_PRIMARYKEY set Z_MAX=max(Z_MAX, ?) where Z_ENT=?", (new_max, ent))
+
+
+def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) -> None:
+    if cloud_pk is None:
+        return
+    con.execute(
+        """
+        update ZREMCKCLOUDSTATE
+        set Z_OPT=coalesce(Z_OPT,0)+1,
+            ZCURRENTLOCALVERSION=coalesce(ZCURRENTLOCALVERSION,0)+1,
+            ZLOCALVERSIONDATE=?
+        where Z_PK=?
+        """,
+        (now, cloud_pk),
+    )
+
+
+def update_list_order(con: sqlite3.Connection, list_row: dict[str, Any], reminder_id: str, add: bool, now: float) -> None:
+    order = reminder_order(list_row.get("ZREMINDERIDSMERGEABLEORDERING_V2_JSON"))
+    uid = reminder_id.upper()
+    if add and uid not in order:
+        order.append(uid)
+    if not add:
+        order = [item for item in order if item != uid]
+    con.execute(
+        """
+        update ZREMCDBASELIST
+        set ZREMINDERIDSMERGEABLEORDERING_V2_JSON=?,
+            Z_OPT=coalesce(Z_OPT,0)+1
+        where Z_PK=?
+        """,
+        (reminder_order_payload(order), list_row["Z_PK"]),
+    )
+    bump_cloud_state(con, list_row.get("ZCKCLOUDSTATE"), now)
 
 
 def reminder_payload(
@@ -589,6 +702,92 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
 
 
 def cmd_create_reminder(args: argparse.Namespace) -> int:
+    if args.backend == "db":
+        db = Path(args.db).expanduser() if args.db else main_db()
+        con = connect(db)
+        try:
+            list_row = find_list(con, name=args.list)
+            now = core_now()
+            reminder_id = str(uuid.uuid4()).upper()
+            con.execute("begin immediate")
+            reminder_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=39").fetchone()[0]
+            cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=45").fetchone()[0]
+            fok = con.execute(
+                "select coalesce(max(coalesce(Z_FOK_LIST,0)),0)+1024 from ZREMCDREMINDER where ZLIST=?",
+                (list_row["Z_PK"],),
+            ).fetchone()[0]
+            con.execute(
+                """
+                insert into ZREMCDREMINDER (
+                  Z_PK,Z_ENT,Z_OPT,ZALLDAY,ZCKDIRTYFLAGS,ZCOMPLETED,
+                  ZDISPLAYDATEUPDATEDFORSECONDSFROMGMT,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
+                  ZFLAGGED,ZICSDISPLAYORDER,ZISURGENTSTATEENABLEDFORCURRENTUSER,
+                  ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZPRIORITY,ZSPOTLIGHTINDEXCOUNT,
+                  ZACCOUNT,ZCKCLOUDSTATE,ZLIST,Z_FOK_LIST,ZCREATIONDATE,ZLASTMODIFIEDDATE,
+                  ZCKIDENTIFIER,ZDACALENDARITEMUNIQUEIDENTIFIER,ZNOTES,ZTITLE,ZIDENTIFIER,
+                  ZNOTESDOCUMENT,ZTITLEDOCUMENT,ZRESOLUTIONTOKENMAP_V3_JSONDATA
+                ) values (
+                  ?,39,1,0,0,0,
+                  0,0,
+                  0,0,0,
+                  0,0,0,1,
+                  ?,?,?,?,?,?,
+                  ?,?,?,?,?,?,?,?
+                )
+                """,
+                (
+                    reminder_pk,
+                    list_row["ZACCOUNT"],
+                    cloud_pk,
+                    list_row["Z_PK"],
+                    fok,
+                    now,
+                    now,
+                    reminder_id,
+                    reminder_id,
+                    args.notes,
+                    args.title,
+                    sqlite3.Binary(uuid_blob(reminder_id)),
+                    sqlite3.Binary(reminder_text_document(args.notes)) if args.notes else None,
+                    sqlite3.Binary(reminder_text_document(args.title)),
+                    resolution_map(
+                        [
+                            "allDay",
+                            "completed",
+                            "creationDate",
+                            "lastModifiedDate",
+                            "list",
+                            "minimumSupportedVersion",
+                            "notesDocument",
+                            "titleDocument",
+                        ],
+                        now,
+                    ),
+                ),
+            )
+            con.execute(
+                """
+                insert into ZREMCKCLOUDSTATE (
+                  Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+                  ZREMINDER,ZLOCALVERSIONDATE
+                ) values (?,45,1,1,0,?,?)
+                """,
+                (cloud_pk, reminder_pk, now),
+            )
+            update_list_order(con, list_row, reminder_id, add=True, now=now)
+            update_primary_key(con, 39, reminder_pk)
+            update_primary_key(con, 45, cloud_pk)
+            con.commit()
+            rem_url = f"x-apple-reminder://{reminder_id}"
+            log_action("create_reminder_db", {"id": rem_url, "list": args.list, "title": args.title, "db": str(db)})
+            json_out({"ok": True, "backend": "db", "id": rem_url, "title": args.title, "list": args.list, "pk": reminder_pk})
+            return 0
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     script = """
 on run argv
   set listName to item 1 of argv
@@ -603,12 +802,54 @@ on run argv
 end run
 """
     rem_id = run_osascript(script, [args.list, args.title, args.notes or ""])
-    log_action("create_reminder", {"id": rem_id, "list": args.list, "title": args.title})
-    json_out({"ok": True, "id": rem_id, "title": args.title, "list": args.list})
+    log_action("create_reminder_applescript", {"id": rem_id, "list": args.list, "title": args.title})
+    json_out({"ok": True, "backend": "applescript", "id": rem_id, "title": args.title, "list": args.list})
     return 0
 
 
 def cmd_update_reminder(args: argparse.Namespace) -> int:
+    if args.backend == "db":
+        db = Path(args.db).expanduser() if args.db else main_db()
+        con = connect(db)
+        try:
+            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+            updates: list[str] = []
+            params: list[Any] = []
+            if args.new_title is not None:
+                updates.append("ZTITLE=?")
+                params.append(args.new_title)
+                updates.append("ZTITLEDOCUMENT=?")
+                params.append(sqlite3.Binary(reminder_text_document(args.new_title)))
+            if args.notes is not None:
+                updates.append("ZNOTES=?")
+                params.append(args.notes)
+                updates.append("ZNOTESDOCUMENT=?")
+                params.append(sqlite3.Binary(reminder_text_document(args.notes)) if args.notes else None)
+            if args.flagged is not None:
+                updates.append("ZFLAGGED=?")
+                params.append(1 if args.flagged else 0)
+            if args.priority is not None:
+                updates.append("ZPRIORITY=?")
+                params.append(args.priority)
+            if not updates:
+                raise AdapterError("No update fields provided")
+            now = core_now()
+            updates.extend(["ZLASTMODIFIEDDATE=?", "Z_OPT=coalesce(Z_OPT,0)+1"])
+            params.extend([now, reminder["Z_PK"]])
+            con.execute("begin immediate")
+            con.execute(f"update ZREMCDREMINDER set {', '.join(updates)} where Z_PK=?", params)
+            bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            con.commit()
+            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
+            log_action("update_reminder_db", {"id": rem_url, "db": str(db), "fields": [item.split('=')[0] for item in updates]})
+            json_out({"ok": True, "backend": "db", "id": rem_url})
+            return 0
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     rem_id = args.id
     if not rem_id:
         db = main_db()
@@ -644,12 +885,42 @@ end run
             str(args.priority) if args.priority is not None else "__NO_CHANGE__",
         ],
     )
-    log_action("update_reminder", {"id": out, "new_title": args.new_title, "notes_changed": args.notes is not None})
-    json_out({"ok": True, "id": out})
+    log_action("update_reminder_applescript", {"id": out, "new_title": args.new_title, "notes_changed": args.notes is not None})
+    json_out({"ok": True, "backend": "applescript", "id": out})
     return 0
 
 
 def cmd_complete_reminder(args: argparse.Namespace) -> int:
+    if args.backend == "db":
+        db = Path(args.db).expanduser() if args.db else main_db()
+        con = connect(db)
+        try:
+            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+            now = core_now()
+            con.execute("begin immediate")
+            con.execute(
+                """
+                update ZREMCDREMINDER
+                set ZCOMPLETED=1,
+                    ZCOMPLETIONDATE=?,
+                    ZLASTMODIFIEDDATE=?,
+                    Z_OPT=coalesce(Z_OPT,0)+1
+                where Z_PK=?
+                """,
+                (now, now, reminder["Z_PK"]),
+            )
+            bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            con.commit()
+            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
+            log_action("complete_reminder_db", {"id": rem_url, "db": str(db)})
+            json_out({"ok": True, "backend": "db", "id": rem_url, "completed": True})
+            return 0
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     rem_id = args.id
     if not rem_id:
         db = main_db()
@@ -669,12 +940,61 @@ on run argv
 end run
 """
     out = run_osascript(script, [rem_id])
-    log_action("complete_reminder", {"id": out})
-    json_out({"ok": True, "id": out, "completed": True})
+    log_action("complete_reminder_applescript", {"id": out})
+    json_out({"ok": True, "backend": "applescript", "id": out, "completed": True})
     return 0
 
 
 def cmd_delete_reminder(args: argparse.Namespace) -> int:
+    if args.backend == "db":
+        db = Path(args.db).expanduser() if args.db else main_db()
+        con = connect(db)
+        try:
+            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+            list_row = None
+            if reminder.get("ZLIST"):
+                list_row = row_dict(con.execute("select * from ZREMCDBASELIST where Z_PK=?", (reminder["ZLIST"],)).fetchone())
+            now = core_now()
+            con.execute("begin immediate")
+            if list_row:
+                update_list_order(con, list_row, reminder["ZCKIDENTIFIER"], add=False, now=now)
+                mapping = membership_map(list_row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
+                if reminder["ZCKIDENTIFIER"].upper() in mapping:
+                    mapping.pop(reminder["ZCKIDENTIFIER"].upper(), None)
+                    con.execute(
+                        """
+                        update ZREMCDBASELIST
+                        set ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA=?,
+                            Z_OPT=coalesce(Z_OPT,0)+1
+                        where Z_PK=?
+                        """,
+                        (membership_payload(mapping), list_row["Z_PK"]),
+                    )
+                    bump_cloud_state(con, list_row.get("ZCKCLOUDSTATE"), now)
+            con.execute(
+                """
+                update ZREMCDREMINDER
+                set ZMARKEDFORDELETION=1,
+                    ZLIST=null,
+                    Z_FOK_LIST=null,
+                    ZLASTMODIFIEDDATE=?,
+                    Z_OPT=coalesce(Z_OPT,0)+1
+                where Z_PK=?
+                """,
+                (now, reminder["Z_PK"]),
+            )
+            bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            con.commit()
+            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
+            log_action("delete_reminder_db_soft", {"id": rem_url, "db": str(db)})
+            json_out({"ok": True, "backend": "db", "id": rem_url, "deleted_via": "db_soft_delete"})
+            return 0
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     rem_id = args.id
     if not rem_id:
         db = main_db()
@@ -693,8 +1013,8 @@ on run argv
 end run
 """
     out = run_osascript(script, [rem_id])
-    log_action("delete_reminder_native", {"id": out})
-    json_out({"ok": True, "id": out, "deleted_via": "native_reminders"})
+    log_action("delete_reminder_applescript_native", {"id": out})
+    json_out({"ok": True, "backend": "applescript", "id": out, "deleted_via": "native_reminders"})
     return 0
 
 
@@ -976,12 +1296,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_read_reminder)
 
     p = sub.add_parser("create_reminder")
+    add_common_db(p)
+    p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--list", required=True)
     p.add_argument("--title", required=True)
     p.add_argument("--notes")
     p.set_defaults(func=cmd_create_reminder)
 
     p = sub.add_parser("update_reminder")
+    add_common_db(p)
+    p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")
@@ -992,12 +1316,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_update_reminder)
 
     p = sub.add_parser("complete_reminder")
+    add_common_db(p)
+    p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")
     p.set_defaults(func=cmd_complete_reminder)
 
     p = sub.add_parser("delete_reminder")
+    add_common_db(p)
+    p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")

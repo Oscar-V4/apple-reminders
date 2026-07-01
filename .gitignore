@@ -9,3 +9,4 @@ build/
 *.sqlite-wal
 reminders-container-backup-*.tgz
 *.tgz
+db-first-*-ui.png

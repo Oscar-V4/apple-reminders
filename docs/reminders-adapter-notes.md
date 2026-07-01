@@ -40,6 +40,13 @@ Section proof:
 - Update list section membership JSON so reminder UUIDs map to section UUIDs.
 - Restart/read Reminders and verify native section rendering.
 
+Reminder creation proof:
+
+- A reminder row can be inserted directly with `REMCDReminder` plus a matching `REMCKCloudState` row.
+- The list's reminder ordering JSON should include the new reminder UUID.
+- `ZTITLE` and `ZNOTES` alone are not enough for native list rendering. Reminders also expects gzip-compressed rich text document blobs in `ZTITLEDOCUMENT` and `ZNOTESDOCUMENT`.
+- Once those document blobs are present, DB-created reminders render title and notes correctly in the native Reminders UI.
+
 ## Adapter Rules
 
 - Always run a schema doctor before private writes.
