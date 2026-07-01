@@ -30,6 +30,9 @@ STORES = GROUP / "Stores"
 FILES = GROUP / "Files"
 APP_SUPPORT = HOME / "Library/Application Support/apple-reminders-codex"
 JOURNAL = APP_SUPPORT / "actions.jsonl"
+CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
+CACHE_FILE = CACHE_DIR / "cache.json"
+CACHE_VERSION = 1
 APPLE_EPOCH_OFFSET = 978307200
 
 REQUIRED_TABLES = {
@@ -503,6 +506,272 @@ def reminder_payload(
         ).fetchall()
         payload["attachments"] = [dict(item) for item in attachments]
     return payload
+
+
+def cache_notes_metadata(notes: Any) -> dict[str, Any]:
+    if not notes:
+        return {"notes_length": 0, "notes_sha256": None}
+    text = str(notes)
+    return {
+        "notes_length": len(text),
+        "notes_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def source_file_info(db: Path) -> dict[str, Any]:
+    info: dict[str, Any] = {"db": str(db)}
+    if db.exists():
+        stat = db.stat()
+        info.update(
+            {
+                "db_size": stat.st_size,
+                "db_mtime_unix": stat.st_mtime,
+                "db_mtime": dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+            }
+        )
+    return info
+
+
+def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
+    list_rows = [
+        dict(row)
+        for row in con.execute(
+            """
+            select l.Z_PK,l.ZCKIDENTIFIER,l.ZNAME,l.ZISGROUP,l.ZPARENTLIST,
+                   l.ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA,
+                   count(r.Z_PK) as reminder_count
+            from ZREMCDBASELIST l
+            left join ZREMCDREMINDER r on r.ZLIST=l.Z_PK and coalesce(r.ZMARKEDFORDELETION,0)=0
+            where coalesce(l.ZMARKEDFORDELETION,0)=0 and l.ZNAME is not null
+            group by l.Z_PK
+            order by lower(l.ZNAME)
+            """
+        )
+    ]
+    list_id_by_pk = {row["Z_PK"]: row["ZCKIDENTIFIER"] for row in list_rows}
+    memberships_by_list_pk = {
+        row["Z_PK"]: membership_map(row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
+        for row in list_rows
+    }
+    lists = [
+        {
+            "id": row["ZCKIDENTIFIER"],
+            "name": row["ZNAME"],
+            "is_group": bool(row["ZISGROUP"]),
+            "parent_list_id": list_id_by_pk.get(row["ZPARENTLIST"]),
+            "reminder_count": row["reminder_count"],
+        }
+        for row in list_rows
+    ]
+
+    section_rows = [
+        dict(row)
+        for row in con.execute(
+            """
+            select s.Z_PK,s.ZCKIDENTIFIER,s.ZDISPLAYNAME,s.ZLIST,l.ZNAME as list_name,
+                   l.ZCKIDENTIFIER as list_id,s.Z_FOK_LIST
+            from ZREMCDBASESECTION s
+            left join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where coalesce(s.ZMARKEDFORDELETION,0)=0
+            order by lower(l.ZNAME), s.Z_FOK_LIST, lower(s.ZDISPLAYNAME)
+            """
+        )
+    ]
+    sections_by_key = {
+        (row["ZLIST"], (row["ZCKIDENTIFIER"] or "").upper()): row
+        for row in section_rows
+    }
+    sections = [
+        {
+            "id": row["ZCKIDENTIFIER"],
+            "name": row["ZDISPLAYNAME"],
+            "list_id": row["list_id"],
+            "list": row["list_name"],
+            "order": row["Z_FOK_LIST"],
+        }
+        for row in section_rows
+    ]
+
+    reminder_rows = [
+        dict(row)
+        for row in con.execute(
+            """
+            select r.Z_PK,r.ZCKIDENTIFIER,r.ZTITLE,r.ZNOTES,r.ZLIST,r.ZCOMPLETED,
+                   r.ZFLAGGED,r.ZPRIORITY,r.ZCREATIONDATE,r.ZLASTMODIFIEDDATE,
+                   r.ZDUEDATE,r.ZDISPLAYDATEDATE,r.ZCOMPLETIONDATE,
+                   l.ZNAME as list_name,l.ZCKIDENTIFIER as list_id,
+                   coalesce(a.attachment_count,0) as attachment_count
+            from ZREMCDREMINDER r
+            left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+            left join (
+                select ZREMINDER2, count(*) as attachment_count
+                from ZREMCDOBJECT
+                where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0
+                group by ZREMINDER2
+            ) a on a.ZREMINDER2=r.Z_PK
+            where coalesce(r.ZMARKEDFORDELETION,0)=0
+            order by coalesce(r.ZDUEDATE, 999999999), lower(l.ZNAME), r.Z_FOK_LIST, lower(r.ZTITLE)
+            """
+        )
+    ]
+    reminders: list[dict[str, Any]] = []
+    for row in reminder_rows:
+        reminder_id = (row["ZCKIDENTIFIER"] or "").upper()
+        section_id = memberships_by_list_pk.get(row["ZLIST"], {}).get(reminder_id)
+        section = sections_by_key.get((row["ZLIST"], section_id)) if section_id else None
+        reminders.append(
+            {
+                "id": row["ZCKIDENTIFIER"],
+                "url": f"x-apple-reminder://{row['ZCKIDENTIFIER']}",
+                "title": row["ZTITLE"],
+                **cache_notes_metadata(row["ZNOTES"]),
+                "list": row["list_name"],
+                "list_id": row["list_id"],
+                "section": section["ZDISPLAYNAME"] if section else None,
+                "section_id": section_id,
+                "completed": bool(row["ZCOMPLETED"]),
+                "flagged": bool(row["ZFLAGGED"]),
+                "priority": row["ZPRIORITY"],
+                "created_at": core_to_iso(row["ZCREATIONDATE"]),
+                "modified_at": core_to_iso(row["ZLASTMODIFIEDDATE"]),
+                "due_at": core_to_iso(row["ZDUEDATE"]),
+                "display_at": core_to_iso(row["ZDISPLAYDATEDATE"]),
+                "completed_at": core_to_iso(row["ZCOMPLETIONDATE"]),
+                "attachment_count": int(row["attachment_count"] or 0),
+            }
+        )
+
+    attachment_count = con.execute(
+        """
+        select count(*)
+        from ZREMCDOBJECT
+        where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0
+        """
+    ).fetchone()[0]
+    return {
+        "version": CACHE_VERSION,
+        "generated_at": dt.datetime.now().astimezone().isoformat(),
+        "source": source_file_info(db),
+        "counts": {
+            "lists": len(lists),
+            "sections": len(sections),
+            "reminders": len(reminders),
+            "image_attachments": attachment_count,
+        },
+        "lists": lists,
+        "sections": sections,
+        "reminders": reminders,
+    }
+
+
+def write_cache_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+        tmp.replace(path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def load_cache_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise AdapterError(f"Cache not found: {path}. Run cache_rebuild first.")
+    with path.open("r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if not isinstance(payload, dict):
+        raise AdapterError(f"Cache is not a JSON object: {path}")
+    if payload.get("version") != CACHE_VERSION:
+        raise AdapterError(
+            f"Unsupported cache version: {payload.get('version')}. Run cache_rebuild."
+        )
+    return payload
+
+
+def cache_info_payload(path: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "cache_dir": str(path.parent),
+        "cache_path": str(path),
+        "exists": path.exists(),
+    }
+    if not path.exists():
+        return payload
+
+    cache = load_cache_file(path)
+    stat = path.stat()
+    source = cache.get("source") if isinstance(cache.get("source"), dict) else {}
+    source_db = Path(source["db"]) if source and source.get("db") else None
+    payload.update(
+        {
+            "bytes": stat.st_size,
+            "cache_mtime": dt.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+            "version": cache.get("version"),
+            "generated_at": cache.get("generated_at"),
+            "source": source,
+            "counts": cache.get("counts", {}),
+        }
+    )
+    if source_db and source_db.exists():
+        current_mtime = source_db.stat().st_mtime
+        payload["source_db_current_mtime_unix"] = current_mtime
+        payload["stale"] = abs(current_mtime - float(source.get("db_mtime_unix", current_mtime))) > 0.001
+    else:
+        payload["stale"] = None
+    return payload
+
+
+def cache_field_matches(value: Any, expected: str | None) -> bool:
+    if expected is None:
+        return True
+    return str(value or "").casefold() == expected.casefold()
+
+
+def cached_reminder_matches_query(reminder: dict[str, Any], query: str | None) -> bool:
+    if not query:
+        return True
+    needle = query.casefold()
+    for key in ("id", "title", "list", "section", "due_at", "display_at", "modified_at"):
+        value = reminder.get(key)
+        if value is not None and needle in str(value).casefold():
+            return True
+    return False
+
+
+def filter_cached_reminders(
+    payload: dict[str, Any],
+    query: str | None = None,
+    list_name: str | None = None,
+    section_name: str | None = None,
+    include_completed: bool = False,
+    flagged: bool | None = None,
+    priority: int | None = None,
+    limit: int = 20,
+) -> tuple[list[dict[str, Any]], int]:
+    matches: list[dict[str, Any]] = []
+    for reminder in payload.get("reminders", []):
+        if not isinstance(reminder, dict):
+            continue
+        if not include_completed and reminder.get("completed"):
+            continue
+        if flagged is not None and bool(reminder.get("flagged")) != flagged:
+            continue
+        if priority is not None and reminder.get("priority") != priority:
+            continue
+        if not cache_field_matches(reminder.get("list"), list_name):
+            continue
+        if not cache_field_matches(reminder.get("section"), section_name):
+            continue
+        if not cached_reminder_matches_query(reminder, query):
+            continue
+        matches.append(reminder)
+    total = len(matches)
+    return matches[:limit], total
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
@@ -1249,8 +1518,93 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cache_path_from_args(args: argparse.Namespace) -> Path:
+    return Path(args.cache).expanduser() if getattr(args, "cache", None) else CACHE_FILE
+
+
+def cmd_cache_rebuild(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    cache_path = cache_path_from_args(args)
+    con = connect(db)
+    try:
+        payload = build_cache_payload(con, db)
+        write_cache_file(cache_path, payload)
+        json_out(
+            {
+                "ok": True,
+                "cache": str(cache_path),
+                "db": str(db),
+                "generated_at": payload["generated_at"],
+                "counts": payload["counts"],
+            }
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def cmd_cache_info(args: argparse.Namespace) -> int:
+    json_out({"ok": True, **cache_info_payload(cache_path_from_args(args))})
+    return 0
+
+
+def cached_query_response(args: argparse.Namespace, query: str | None) -> dict[str, Any]:
+    cache_path = cache_path_from_args(args)
+    payload = load_cache_file(cache_path)
+    matches, total = filter_cached_reminders(
+        payload,
+        query=query,
+        list_name=args.list,
+        section_name=args.section,
+        include_completed=args.include_completed,
+        flagged=args.flagged,
+        priority=args.priority,
+        limit=args.limit,
+    )
+    return {
+        "ok": True,
+        "cache": str(cache_path),
+        "cache_generated_at": payload.get("generated_at"),
+        "query": query,
+        "matches": matches,
+        "total_matches": total,
+        "truncated": total > len(matches),
+    }
+
+
+def cmd_cache_search(args: argparse.Namespace) -> int:
+    json_out(cached_query_response(args, args.query))
+    return 0
+
+
+def cmd_cache_query(args: argparse.Namespace) -> int:
+    json_out(cached_query_response(args, args.query))
+    return 0
+
+
 def add_common_db(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", help="Specific Reminders sqlite database path")
+
+
+def add_common_cache(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cache",
+        help=f"Cache JSON path (default: {CACHE_FILE})",
+    )
+
+
+def add_cache_query_args(parser: argparse.ArgumentParser, include_positional_query: bool) -> None:
+    add_common_cache(parser)
+    if include_positional_query:
+        parser.add_argument("query")
+    else:
+        parser.add_argument("--query")
+    parser.add_argument("--list")
+    parser.add_argument("--section")
+    parser.add_argument("--include-completed", action="store_true")
+    parser.add_argument("--flagged", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--priority", type=int)
+    parser.add_argument("--limit", type=int, default=20)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1263,6 +1617,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup_store")
     p.add_argument("--output")
     p.set_defaults(func=cmd_backup_store)
+
+    p = sub.add_parser("cache_rebuild")
+    add_common_db(p)
+    add_common_cache(p)
+    p.set_defaults(func=cmd_cache_rebuild)
+
+    p = sub.add_parser("cache_info")
+    add_common_cache(p)
+    p.set_defaults(func=cmd_cache_info)
+
+    p = sub.add_parser("cache_search")
+    add_cache_query_args(p, include_positional_query=True)
+    p.set_defaults(func=cmd_cache_search)
+
+    p = sub.add_parser("cache_query")
+    add_cache_query_args(p, include_positional_query=False)
+    p.set_defaults(func=cmd_cache_query)
 
     p = sub.add_parser("list_lists")
     add_common_db(p)

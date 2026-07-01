@@ -72,6 +72,10 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 - `create_section`
 - `attach_image`
 - `backup_store`
+- `cache_rebuild`
+- `cache_info`
+- `cache_search`
+- `cache_query`
 - `doctor`
 
 ## Example Requests

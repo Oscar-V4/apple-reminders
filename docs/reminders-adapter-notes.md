@@ -47,6 +47,23 @@ Reminder creation proof:
 - `ZTITLE` and `ZNOTES` alone are not enough for native list rendering. Reminders also expects gzip-compressed rich text document blobs in `ZTITLEDOCUMENT` and `ZNOTESDOCUMENT`.
 - Once those document blobs are present, DB-created reminders render title and notes correctly in the native Reminders UI.
 
+## Disposable Cache
+
+The adapter has a rebuildable JSON cache under:
+
+`~/Library/Caches/apple-reminders-codex/cache.json`
+
+Cache commands:
+
+- `cache_rebuild`: read the selected Reminders SQLite store and atomically rewrite the disposable cache.
+- `cache_info`: report cache path, size, source database metadata, counts, and stale status when the source database still exists.
+- `cache_search`: search active cached reminders by cached lightweight fields.
+- `cache_query`: filter cached reminders without requiring a search term.
+
+The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, completion, priority, flagged state, due/display/completion/modified timestamps, attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
+
+Cache searches do not search note bodies because the cache does not keep them. Use `search_reminders` when full note text must be searched from the source database.
+
 ## Adapter Rules
 
 - Always run a schema doctor before private writes.

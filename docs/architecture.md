@@ -49,9 +49,14 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `list_sections`
 - `search_reminders`
 - `read_reminder`
+- `cache_rebuild`
+- `cache_info`
+- `cache_search`
+- `cache_query`
 - `create_reminder`
 - `update_reminder`
 - `complete_reminder`
+- `delete_reminder`
 - `create_section`
 - `move_to_section`
 - `attach_image`
@@ -65,5 +70,6 @@ The real product quality comes from:
 
 - the skill's operating contract
 - the adapter's schema checks and transactions
+- the disposable cache's narrow, rebuildable full-grasp index
 - careful post-write verification
 - summaries and diffs that are useful to a personal assistant workflow
