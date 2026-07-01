@@ -34,6 +34,36 @@ class ReminderTextDocumentTests(unittest.TestCase):
         self.assertIn(text.encode("utf-8"), raw)
 
 
+class ScheduleHelperTests(unittest.TestCase):
+    def test_timed_schedule_values_use_same_due_and_display_date(self) -> None:
+        values = reminders_adapter.schedule_values(due_at="2026-07-03T14:30:00+09:00")
+
+        self.assertEqual(values["ZALLDAY"], 0)
+        self.assertEqual(values["ZDISPLAYDATEISALLDAY"], 0)
+        self.assertEqual(values["ZDUEDATE"], values["ZDISPLAYDATEDATE"])
+        self.assertIsInstance(values["ZTIMEZONE"], str)
+
+    def test_all_day_schedule_values_mark_all_day(self) -> None:
+        values = reminders_adapter.schedule_values(all_day_due_date="2026-07-03")
+
+        self.assertEqual(values["ZALLDAY"], 1)
+        self.assertEqual(values["ZDISPLAYDATEISALLDAY"], 1)
+        self.assertIsNone(values["ZTIMEZONE"])
+        self.assertIsNotNone(values["ZDUEDATE"])
+        self.assertIsNotNone(values["ZDISPLAYDATEDATE"])
+
+    def test_schedule_values_reject_conflicting_date_options(self) -> None:
+        with self.assertRaises(reminders_adapter.AdapterError):
+            reminders_adapter.schedule_values(
+                due_at="2026-07-03T14:30:00+09:00",
+                all_day_due_date="2026-07-03",
+            )
+
+    def test_normalized_url_requires_scheme(self) -> None:
+        with self.assertRaises(reminders_adapter.AdapterError):
+            reminders_adapter.normalized_url("example.com/no-scheme")
+
+
 class CacheHelperTests(unittest.TestCase):
     def test_build_cache_payload_uses_only_lightweight_reminder_fields(self) -> None:
         con = sqlite3.connect(":memory:")
@@ -72,6 +102,9 @@ class CacheHelperTests(unittest.TestCase):
                     ZDUEDATE real,
                     ZDISPLAYDATEDATE real,
                     ZCOMPLETIONDATE real,
+                    ZALLDAY integer,
+                    ZDISPLAYDATEISALLDAY integer,
+                    ZTIMEZONE text,
                     ZMARKEDFORDELETION integer,
                     Z_FOK_LIST integer
                 );
@@ -103,12 +136,16 @@ class CacheHelperTests(unittest.TestCase):
                 insert into ZREMCDREMINDER (
                     Z_PK,ZCKIDENTIFIER,ZTITLE,ZNOTES,ZLIST,ZCOMPLETED,ZFLAGGED,
                     ZPRIORITY,ZCREATIONDATE,ZLASTMODIFIEDDATE,ZDUEDATE,
-                    ZDISPLAYDATEDATE,ZCOMPLETIONDATE,ZMARKEDFORDELETION,Z_FOK_LIST
-                ) values (1,'REM-1','Pay bill','Sensitive body text',1,0,1,9,1,2,3,4,null,0,1024)
+                    ZDISPLAYDATEDATE,ZCOMPLETIONDATE,ZALLDAY,ZDISPLAYDATEISALLDAY,
+                    ZTIMEZONE,ZMARKEDFORDELETION,Z_FOK_LIST
+                ) values (1,'REM-1','Pay bill','Sensitive body text',1,0,1,9,1,2,3,4,null,0,0,'Asia/Seoul',0,1024)
                 """
             )
             con.execute(
                 "insert into ZREMCDOBJECT (ZREMINDER2,Z_ENT,ZMARKEDFORDELETION) values (1,25,0)"
+            )
+            con.execute(
+                "insert into ZREMCDOBJECT (ZREMINDER2,Z_ENT,ZMARKEDFORDELETION) values (1,26,0)"
             )
 
             payload = reminders_adapter.build_cache_payload(
@@ -121,8 +158,14 @@ class CacheHelperTests(unittest.TestCase):
         reminder = payload["reminders"][0]
         self.assertEqual(payload["counts"]["reminders"], 1)
         self.assertEqual(payload["counts"]["image_attachments"], 1)
+        self.assertEqual(payload["counts"]["url_attachments"], 1)
+        self.assertEqual(payload["counts"]["attachments"], 2)
         self.assertEqual(reminder["section"], "This Week")
-        self.assertEqual(reminder["attachment_count"], 1)
+        self.assertEqual(reminder["image_attachment_count"], 1)
+        self.assertEqual(reminder["url_attachment_count"], 1)
+        self.assertEqual(reminder["attachment_count"], 2)
+        self.assertFalse(reminder["all_day"])
+        self.assertEqual(reminder["timezone"], "Asia/Seoul")
         self.assertEqual(reminder["notes_length"], len("Sensitive body text"))
         self.assertIn("notes_sha256", reminder)
         self.assertNotIn("notes", reminder)

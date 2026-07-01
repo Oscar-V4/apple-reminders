@@ -21,6 +21,7 @@ Read and diagnostics:
 
 Writes:
 
+- `create_list`
 - `create_reminder`
 - `update_reminder`
 - `complete_reminder`
@@ -28,6 +29,7 @@ Writes:
 - `create_section`
 - `move_to_section`
 - `attach_image`
+- `attach_url`
 
 Safety and support:
 

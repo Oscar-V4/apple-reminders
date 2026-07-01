@@ -51,6 +51,9 @@ def inspect_db(path: Path) -> dict:
             "image_attachments": cur.execute(
                 "select count(*) from ZREMCDOBJECT where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0"
             ).fetchone()[0],
+            "url_attachments": cur.execute(
+                "select count(*) from ZREMCDOBJECT where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0"
+            ).fetchone()[0],
         }
     con.close()
     return result

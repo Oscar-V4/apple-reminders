@@ -53,6 +53,7 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `cache_info`
 - `cache_search`
 - `cache_query`
+- `create_list`
 - `create_reminder`
 - `update_reminder`
 - `complete_reminder`
@@ -60,6 +61,7 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `create_section`
 - `move_to_section`
 - `attach_image`
+- `attach_url`
 - `backup_store`
 
 ## Implementation Rule

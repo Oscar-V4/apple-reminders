@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,102 @@ def core_to_iso(value: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     return dt.datetime.fromtimestamp(timestamp).astimezone().isoformat()
+
+
+def local_timezone_name() -> str:
+    try:
+        resolved = Path("/etc/localtime").resolve()
+        parts = resolved.parts
+        if "zoneinfo" in parts:
+            idx = parts.index("zoneinfo")
+            name = "/".join(parts[idx + 1 :])
+            if name:
+                return name
+    except OSError:
+        pass
+    return time.tzname[0] if time.tzname else "UTC"
+
+
+def parse_local_datetime(value: str) -> dt.datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise AdapterError(f"Invalid datetime: {value}. Use ISO format like 2026-07-03T14:30:00+09:00.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def core_from_datetime(value: dt.datetime) -> float:
+    return value.timestamp() - APPLE_EPOCH_OFFSET
+
+
+def schedule_values(
+    due_at: str | None = None,
+    remind_at: str | None = None,
+    all_day_due_date: str | None = None,
+    clear_due: bool = False,
+) -> dict[str, Any] | None:
+    provided = [item is not None for item in (due_at, remind_at, all_day_due_date)].count(True)
+    if clear_due and provided:
+        raise AdapterError("--clear-due cannot be combined with due date options")
+    if provided > 1:
+        raise AdapterError("Use only one of --due-at, --remind-at, or --all-day-due-date")
+    if clear_due:
+        return {
+            "ZALLDAY": 0,
+            "ZDISPLAYDATEISALLDAY": 0,
+            "ZDUEDATE": None,
+            "ZDISPLAYDATEDATE": None,
+            "ZTIMEZONE": None,
+            "ZDISPLAYDATETIMEZONE": None,
+        }
+    if all_day_due_date is not None:
+        try:
+            day = dt.date.fromisoformat(all_day_due_date.strip())
+        except ValueError as exc:
+            raise AdapterError(f"Invalid all-day date: {all_day_due_date}. Use YYYY-MM-DD.") from exc
+        local_midnight = dt.datetime.combine(
+            day,
+            dt.time.min,
+            tzinfo=dt.datetime.now().astimezone().tzinfo,
+        )
+        utc_midnight = dt.datetime.combine(day, dt.time.min, tzinfo=dt.timezone.utc)
+        return {
+            "ZALLDAY": 1,
+            "ZDISPLAYDATEISALLDAY": 1,
+            "ZDUEDATE": core_from_datetime(utc_midnight),
+            "ZDISPLAYDATEDATE": core_from_datetime(local_midnight),
+            "ZTIMEZONE": None,
+            "ZDISPLAYDATETIMEZONE": None,
+        }
+    timestamp_text = due_at if due_at is not None else remind_at
+    if timestamp_text is not None:
+        parsed = parse_local_datetime(timestamp_text)
+        core_value = core_from_datetime(parsed)
+        timezone_name = local_timezone_name()
+        return {
+            "ZALLDAY": 0,
+            "ZDISPLAYDATEISALLDAY": 0,
+            "ZDUEDATE": core_value,
+            "ZDISPLAYDATEDATE": core_value,
+            "ZTIMEZONE": timezone_name,
+            "ZDISPLAYDATETIMEZONE": timezone_name,
+        }
+    return None
+
+
+def normalized_url(value: str) -> str:
+    url = value.strip()
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme:
+        raise AdapterError(f"Invalid URL: {value}. Include a scheme such as https://.")
+    if parsed.scheme in {"http", "https"} and not parsed.netloc:
+        raise AdapterError(f"Invalid URL: {value}. Include a host.")
+    return url
 
 
 def normalize_uuid(value: str) -> str:
@@ -163,6 +260,9 @@ def db_counts(db: Path) -> dict[str, int]:
             ).fetchone()[0],
             "image_attachments": con.execute(
                 "select count(*) from ZREMCDOBJECT where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0"
+            ).fetchone()[0],
+            "url_attachments": con.execute(
+                "select count(*) from ZREMCDOBJECT where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0"
             ).fetchone()[0],
         }
     finally:
@@ -492,10 +592,14 @@ def reminder_payload(
         "modified_at": core_to_iso(row["ZLASTMODIFIEDDATE"]),
         "due_at": core_to_iso(row["ZDUEDATE"]),
         "display_at": core_to_iso(row["ZDISPLAYDATEDATE"]),
+        "all_day": bool(row["ZALLDAY"]),
+        "display_date_is_all_day": bool(row["ZDISPLAYDATEISALLDAY"]),
+        "timezone": row["ZTIMEZONE"],
+        "ics_url": row["ZICSURL"],
         "marked_for_deletion": bool(row["ZMARKEDFORDELETION"]),
     }
     if include_attachments:
-        attachments = con.execute(
+        image_attachments = con.execute(
             """
             select Z_PK,ZCKIDENTIFIER,ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZMARKEDFORDELETION
             from ZREMCDOBJECT
@@ -504,7 +608,17 @@ def reminder_payload(
             """,
             (row["Z_PK"],),
         ).fetchall()
-        payload["attachments"] = [dict(item) for item in attachments]
+        url_attachments = con.execute(
+            """
+            select Z_PK,ZCKIDENTIFIER,ZURL,ZHOSTURL,ZUTI,ZMARKEDFORDELETION
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0
+            order by Z_FOK_REMINDER1, Z_PK
+            """,
+            (row["Z_PK"],),
+        ).fetchall()
+        payload["attachments"] = [dict(item) for item in image_attachments]
+        payload["url_attachments"] = [dict(item) for item in url_attachments]
     return payload
 
 
@@ -599,16 +713,24 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
             select r.Z_PK,r.ZCKIDENTIFIER,r.ZTITLE,r.ZNOTES,r.ZLIST,r.ZCOMPLETED,
                    r.ZFLAGGED,r.ZPRIORITY,r.ZCREATIONDATE,r.ZLASTMODIFIEDDATE,
                    r.ZDUEDATE,r.ZDISPLAYDATEDATE,r.ZCOMPLETIONDATE,
+                   r.ZALLDAY,r.ZDISPLAYDATEISALLDAY,r.ZTIMEZONE,
                    l.ZNAME as list_name,l.ZCKIDENTIFIER as list_id,
-                   coalesce(a.attachment_count,0) as attachment_count
+                   coalesce(i.image_attachment_count,0) as image_attachment_count,
+                   coalesce(u.url_attachment_count,0) as url_attachment_count
             from ZREMCDREMINDER r
             left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
             left join (
-                select ZREMINDER2, count(*) as attachment_count
+                select ZREMINDER2, count(*) as image_attachment_count
                 from ZREMCDOBJECT
                 where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0
                 group by ZREMINDER2
-            ) a on a.ZREMINDER2=r.Z_PK
+            ) i on i.ZREMINDER2=r.Z_PK
+            left join (
+                select ZREMINDER2, count(*) as url_attachment_count
+                from ZREMCDOBJECT
+                where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0
+                group by ZREMINDER2
+            ) u on u.ZREMINDER2=r.Z_PK
             where coalesce(r.ZMARKEDFORDELETION,0)=0
             order by coalesce(r.ZDUEDATE, 999999999), lower(l.ZNAME), r.Z_FOK_LIST, lower(r.ZTITLE)
             """
@@ -636,16 +758,29 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
                 "modified_at": core_to_iso(row["ZLASTMODIFIEDDATE"]),
                 "due_at": core_to_iso(row["ZDUEDATE"]),
                 "display_at": core_to_iso(row["ZDISPLAYDATEDATE"]),
+                "all_day": bool(row["ZALLDAY"]),
+                "display_date_is_all_day": bool(row["ZDISPLAYDATEISALLDAY"]),
+                "timezone": row["ZTIMEZONE"],
                 "completed_at": core_to_iso(row["ZCOMPLETIONDATE"]),
-                "attachment_count": int(row["attachment_count"] or 0),
+                "image_attachment_count": int(row["image_attachment_count"] or 0),
+                "url_attachment_count": int(row["url_attachment_count"] or 0),
+                "attachment_count": int(row["image_attachment_count"] or 0)
+                + int(row["url_attachment_count"] or 0),
             }
         )
 
-    attachment_count = con.execute(
+    image_attachment_count = con.execute(
         """
         select count(*)
         from ZREMCDOBJECT
         where Z_ENT=25 and coalesce(ZMARKEDFORDELETION,0)=0
+        """
+    ).fetchone()[0]
+    url_attachment_count = con.execute(
+        """
+        select count(*)
+        from ZREMCDOBJECT
+        where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0
         """
     ).fetchone()[0]
     return {
@@ -656,7 +791,9 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
             "lists": len(lists),
             "sections": len(sections),
             "reminders": len(reminders),
-            "image_attachments": attachment_count,
+            "image_attachments": image_attachment_count,
+            "url_attachments": url_attachment_count,
+            "attachments": image_attachment_count + url_attachment_count,
         },
         "lists": lists,
         "sections": sections,
@@ -970,6 +1107,54 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cmd_create_list(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    con = connect(db)
+    try:
+        existing = con.execute(
+            """
+            select Z_PK,ZCKIDENTIFIER,ZNAME,ZISGROUP,ZBADGEEMBLEM,ZCOLOR
+            from ZREMCDBASELIST
+            where ZNAME=? and coalesce(ZMARKEDFORDELETION,0)=0
+            order by Z_PK
+            """,
+            (args.name,),
+        ).fetchone()
+        if existing:
+            json_out({"ok": True, "created": False, "db": str(db), "list": dict(existing)})
+            return 0
+    finally:
+        con.close()
+
+    script = """
+on run argv
+  set listName to item 1 of argv
+  set listColor to item 2 of argv
+  set listEmblem to item 3 of argv
+  tell application "Reminders"
+    set newList to make new list with properties {name:listName}
+    if listColor is not "" then set color of newList to listColor
+    if listEmblem is not "" then set emblem of newList to listEmblem
+    return (id of newList) & linefeed & (name of newList) & linefeed & ((color of newList) as text) & linefeed & ((emblem of newList) as text)
+  end tell
+end run
+"""
+    out = run_osascript(script, [args.name, args.color or "", args.emblem or ""])
+    lines = out.splitlines()
+    payload = {
+        "ok": True,
+        "created": True,
+        "backend": "applescript",
+        "id": lines[0] if len(lines) > 0 else None,
+        "name": lines[1] if len(lines) > 1 else args.name,
+        "color": lines[2] if len(lines) > 2 else args.color,
+        "emblem": lines[3] if len(lines) > 3 else args.emblem,
+    }
+    log_action("create_list_applescript", payload)
+    json_out(payload)
+    return 0
+
+
 def cmd_create_reminder(args: argparse.Namespace) -> int:
     if args.backend == "db":
         db = Path(args.db).expanduser() if args.db else main_db()
@@ -978,6 +1163,27 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
             list_row = find_list(con, name=args.list)
             now = core_now()
             reminder_id = str(uuid.uuid4()).upper()
+            sched = schedule_values(
+                due_at=args.due_at,
+                remind_at=args.remind_at,
+                all_day_due_date=args.all_day_due_date,
+            ) or {}
+            resolution_keys = [
+                "allDay",
+                "completed",
+                "creationDate",
+                "lastModifiedDate",
+                "list",
+                "minimumSupportedVersion",
+                "notesDocument",
+                "titleDocument",
+                "flagged",
+                "priority",
+            ]
+            if sched:
+                resolution_keys.append("dueDate")
+                if sched.get("ZTIMEZONE"):
+                    resolution_keys.append("timeZone")
             con.execute("begin immediate")
             reminder_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=39").fetchone()[0]
             cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=45").fetchone()[0]
@@ -985,54 +1191,81 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
                 "select coalesce(max(coalesce(Z_FOK_LIST,0)),0)+1024 from ZREMCDREMINDER where ZLIST=?",
                 (list_row["Z_PK"],),
             ).fetchone()[0]
+            columns = [
+                "Z_PK",
+                "Z_ENT",
+                "Z_OPT",
+                "ZALLDAY",
+                "ZCKDIRTYFLAGS",
+                "ZCOMPLETED",
+                "ZDISPLAYDATEISALLDAY",
+                "ZDISPLAYDATEUPDATEDFORSECONDSFROMGMT",
+                "ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION",
+                "ZFLAGGED",
+                "ZICSDISPLAYORDER",
+                "ZISURGENTSTATEENABLEDFORCURRENTUSER",
+                "ZMARKEDFORDELETION",
+                "ZMINIMUMSUPPORTEDAPPVERSION",
+                "ZPRIORITY",
+                "ZSPOTLIGHTINDEXCOUNT",
+                "ZACCOUNT",
+                "ZCKCLOUDSTATE",
+                "ZLIST",
+                "Z_FOK_LIST",
+                "ZCREATIONDATE",
+                "ZDISPLAYDATEDATE",
+                "ZDUEDATE",
+                "ZLASTMODIFIEDDATE",
+                "ZCKIDENTIFIER",
+                "ZDACALENDARITEMUNIQUEIDENTIFIER",
+                "ZDISPLAYDATETIMEZONE",
+                "ZNOTES",
+                "ZTIMEZONE",
+                "ZTITLE",
+                "ZIDENTIFIER",
+                "ZNOTESDOCUMENT",
+                "ZTITLEDOCUMENT",
+                "ZRESOLUTIONTOKENMAP_V3_JSONDATA",
+            ]
+            values = [
+                reminder_pk,
+                39,
+                1,
+                sched.get("ZALLDAY", 0),
+                0,
+                0,
+                sched.get("ZDISPLAYDATEISALLDAY", 0),
+                0,
+                0,
+                1 if args.flagged else 0,
+                0,
+                0,
+                0,
+                0,
+                args.priority if args.priority is not None else 0,
+                1,
+                list_row["ZACCOUNT"],
+                cloud_pk,
+                list_row["Z_PK"],
+                fok,
+                now,
+                sched.get("ZDISPLAYDATEDATE"),
+                sched.get("ZDUEDATE"),
+                now,
+                reminder_id,
+                reminder_id,
+                sched.get("ZDISPLAYDATETIMEZONE"),
+                args.notes,
+                sched.get("ZTIMEZONE"),
+                args.title,
+                sqlite3.Binary(uuid_blob(reminder_id)),
+                sqlite3.Binary(reminder_text_document(args.notes)) if args.notes else None,
+                sqlite3.Binary(reminder_text_document(args.title)),
+                resolution_map(resolution_keys, now),
+            ]
             con.execute(
-                """
-                insert into ZREMCDREMINDER (
-                  Z_PK,Z_ENT,Z_OPT,ZALLDAY,ZCKDIRTYFLAGS,ZCOMPLETED,
-                  ZDISPLAYDATEUPDATEDFORSECONDSFROMGMT,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
-                  ZFLAGGED,ZICSDISPLAYORDER,ZISURGENTSTATEENABLEDFORCURRENTUSER,
-                  ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZPRIORITY,ZSPOTLIGHTINDEXCOUNT,
-                  ZACCOUNT,ZCKCLOUDSTATE,ZLIST,Z_FOK_LIST,ZCREATIONDATE,ZLASTMODIFIEDDATE,
-                  ZCKIDENTIFIER,ZDACALENDARITEMUNIQUEIDENTIFIER,ZNOTES,ZTITLE,ZIDENTIFIER,
-                  ZNOTESDOCUMENT,ZTITLEDOCUMENT,ZRESOLUTIONTOKENMAP_V3_JSONDATA
-                ) values (
-                  ?,39,1,0,0,0,
-                  0,0,
-                  0,0,0,
-                  0,0,0,1,
-                  ?,?,?,?,?,?,
-                  ?,?,?,?,?,?,?,?
-                )
-                """,
-                (
-                    reminder_pk,
-                    list_row["ZACCOUNT"],
-                    cloud_pk,
-                    list_row["Z_PK"],
-                    fok,
-                    now,
-                    now,
-                    reminder_id,
-                    reminder_id,
-                    args.notes,
-                    args.title,
-                    sqlite3.Binary(uuid_blob(reminder_id)),
-                    sqlite3.Binary(reminder_text_document(args.notes)) if args.notes else None,
-                    sqlite3.Binary(reminder_text_document(args.title)),
-                    resolution_map(
-                        [
-                            "allDay",
-                            "completed",
-                            "creationDate",
-                            "lastModifiedDate",
-                            "list",
-                            "minimumSupportedVersion",
-                            "notesDocument",
-                            "titleDocument",
-                        ],
-                        now,
-                    ),
-                ),
+                f"insert into ZREMCDREMINDER ({','.join(columns)}) values ({','.join('?' for _ in columns)})",
+                values,
             )
             con.execute(
                 """
@@ -1049,7 +1282,17 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
             con.commit()
             rem_url = f"x-apple-reminder://{reminder_id}"
             log_action("create_reminder_db", {"id": rem_url, "list": args.list, "title": args.title, "db": str(db)})
-            json_out({"ok": True, "backend": "db", "id": rem_url, "title": args.title, "list": args.list, "pk": reminder_pk})
+            json_out(
+                {
+                    "ok": True,
+                    "backend": "db",
+                    "id": rem_url,
+                    "title": args.title,
+                    "list": args.list,
+                    "pk": reminder_pk,
+                    "scheduled": bool(sched),
+                }
+            )
             return 0
         except Exception:
             con.rollback()
@@ -1057,6 +1300,8 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
         finally:
             con.close()
 
+    if args.due_at or args.remind_at or args.all_day_due_date or args.flagged is not None or args.priority is not None:
+        raise AdapterError("date, flag, and priority options currently require --backend db")
     script = """
 on run argv
   set listName to item 1 of argv
@@ -1100,6 +1345,16 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
             if args.priority is not None:
                 updates.append("ZPRIORITY=?")
                 params.append(args.priority)
+            sched = schedule_values(
+                due_at=args.due_at,
+                remind_at=args.remind_at,
+                all_day_due_date=args.all_day_due_date,
+                clear_due=args.clear_due,
+            )
+            if sched is not None:
+                for key, value in sched.items():
+                    updates.append(f"{key}=?")
+                    params.append(value)
             if not updates:
                 raise AdapterError("No update fields provided")
             now = core_now()
@@ -1119,6 +1374,8 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
         finally:
             con.close()
 
+    if args.due_at or args.remind_at or args.all_day_due_date or args.clear_due:
+        raise AdapterError("date options currently require --backend db")
     rem_id = args.id
     if not rem_id:
         db = main_db()
@@ -1518,6 +1775,109 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cmd_attach_url(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    url = normalized_url(args.url)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        existing = con.execute(
+            """
+            select Z_PK,ZCKIDENTIFIER,ZURL from ZREMCDOBJECT
+            where ZREMINDER2=? and Z_ENT=26 and ZURL=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"], url),
+        ).fetchone()
+        if existing:
+            json_out({"ok": True, "db": str(db), "attached": False, "reason": "already_attached", "object": dict(existing)})
+            return 0
+        now = core_now()
+        object_id = str(uuid.uuid4()).upper()
+        con.execute("begin immediate")
+        object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
+        cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
+        sort_order = con.execute(
+            """
+            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"],),
+        ).fetchone()[0]
+        columns = [
+            "Z_PK",
+            "Z_ENT",
+            "Z_OPT",
+            "ZCKDIRTYFLAGS",
+            "ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION",
+            "ZMARKEDFORDELETION",
+            "ZMINIMUMSUPPORTEDAPPVERSION",
+            "ZACCOUNT",
+            "ZCKCLOUDSTATE",
+            "ZREMINDER2",
+            "Z_FOK_REMINDER1",
+            "ZUTI",
+            "ZURL",
+            "ZIDENTIFIER",
+            "ZCKIDENTIFIER",
+        ]
+        values = [
+            object_pk,
+            26,
+            1,
+            0,
+            0,
+            0,
+            0,
+            reminder["ZACCOUNT"],
+            cloud_pk,
+            reminder["Z_PK"],
+            sort_order,
+            "public.url",
+            url,
+            sqlite3.Binary(uuid_blob(object_id)),
+            object_id,
+        ]
+        con.execute(
+            f"insert into ZREMCDOBJECT ({','.join(columns)}) values ({','.join('?' for _ in columns)})",
+            values,
+        )
+        con.execute(
+            """
+            insert into ZREMCKCLOUDSTATE (
+              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+            ) values (?,45,1,1,0,?,26,?)
+            """,
+            (cloud_pk, object_pk, now),
+        )
+        con.execute(
+            "update ZREMCDREMINDER set Z_OPT=coalesce(Z_OPT,0)+1,ZLASTMODIFIEDDATE=? where Z_PK=?",
+            (now, reminder["Z_PK"]),
+        )
+        bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+        update_primary_key(con, 13, object_pk)
+        update_primary_key(con, 45, cloud_pk)
+        con.commit()
+        log_action("attach_url", {"reminder": reminder["ZCKIDENTIFIER"], "url": url, "object": object_id})
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "attached": True,
+                "reminder_id": reminder["ZCKIDENTIFIER"],
+                "object_id": object_id,
+                "url": url,
+            }
+        )
+        return 0
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def cache_path_from_args(args: argparse.Namespace) -> Path:
     return Path(args.cache).expanduser() if getattr(args, "cache", None) else CACHE_FILE
 
@@ -1666,12 +2026,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.set_defaults(func=cmd_read_reminder)
 
+    p = sub.add_parser("create_list")
+    add_common_db(p)
+    p.add_argument("--name", required=True)
+    p.add_argument("--color")
+    p.add_argument("--emblem")
+    p.set_defaults(func=cmd_create_list)
+
     p = sub.add_parser("create_reminder")
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--list", required=True)
     p.add_argument("--title", required=True)
     p.add_argument("--notes")
+    p.add_argument("--due-at")
+    p.add_argument("--remind-at")
+    p.add_argument("--all-day-due-date")
+    p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
+    p.add_argument("--priority", type=int)
     p.set_defaults(func=cmd_create_reminder)
 
     p = sub.add_parser("update_reminder")
@@ -1684,6 +2056,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--notes")
     p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
     p.add_argument("--priority", type=int)
+    p.add_argument("--due-at")
+    p.add_argument("--remind-at")
+    p.add_argument("--all-day-due-date")
+    p.add_argument("--clear-due", action="store_true")
     p.set_defaults(func=cmd_update_reminder)
 
     p = sub.add_parser("complete_reminder")
@@ -1725,6 +2101,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--image", required=True)
     p.set_defaults(func=cmd_attach_image)
+
+    p = sub.add_parser("attach_url")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--url", required=True)
+    p.set_defaults(func=cmd_attach_url)
 
     return parser
 
