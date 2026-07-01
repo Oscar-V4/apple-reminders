@@ -1,0 +1,39 @@
+{
+  "name": "apple-reminders",
+  "version": "0.1.0",
+  "description": "Connect Apple Reminders for task capture, review, organization, attachments, and safe reminder changes.",
+  "author": {
+    "name": "Soo"
+  },
+  "homepage": "https://support.apple.com/guide/reminders/welcome/mac",
+  "repository": "https://github.com/Oscar-V4/apple-reminders",
+  "license": "MIT",
+  "keywords": [
+    "apple-reminders",
+    "reminders",
+    "tasks",
+    "productivity",
+    "attachments",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Apple Reminders",
+    "shortDescription": "Manage Apple Reminders tasks and attachments",
+    "longDescription": "Use Apple Reminders to inspect lists, sections, reminders, due dates, notes, and image attachments, then draft or apply safe task changes directly from Codex.",
+    "developerName": "Soo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://support.apple.com/guide/reminders/welcome/mac",
+    "defaultPrompt": [
+      "Summarize, organize, capture, attach images to, or safely update my Apple Reminders"
+    ],
+    "brandColor": "#007AFF",
+    "screenshots": []
+  },
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}
