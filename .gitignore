@@ -8,3 +8,4 @@ build/
 *.sqlite-shm
 *.sqlite-wal
 reminders-container-backup-*.tgz
+*.tgz
