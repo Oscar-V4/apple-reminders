@@ -6,7 +6,7 @@ Apple Reminders plugin prototype for Codex. The goal is a local assistant layer 
 
 - Plugin scaffold exists.
 - Main `apple-reminders` skill contract is drafted.
-- Local reverse-engineering has proven that reminders, lists, sections, URL attachments, image attachments, dates, flags, and priorities can be manipulated without foreground UI gestures.
+- Local reverse-engineering has proven that reminders, lists, sections, tags, URL attachments, image attachments, dates, flags, and priorities can be manipulated without foreground UI gestures.
 - Local adapter exposes DB-first JSON commands plus a disposable lightweight cache for full-grasp reads.
 - MCP/tool implementation is not complete yet.
 
@@ -14,7 +14,7 @@ Apple Reminders plugin prototype for Codex. The goal is a local assistant layer 
 
 - Skill layer: planning, safety, output conventions, bounded reads, and write policy.
 - Local adapter layer: AppleScript/EventKit for public reminder fields and final title/body UI sync; SQLite adapter for Reminders-only surfaces such as image attachments and sections.
-- Disposable cache layer: rebuildable JSON under `~/Library/Caches/apple-reminders-codex/` for lightweight list, section, reminder, date, completion, priority, flag, image/URL attachment-count, and notes length/hash scans.
+- Disposable cache layer: rebuildable JSON under `~/Library/Caches/apple-reminders-codex/` for lightweight list, section, reminder, tag, date, completion, priority, flag, image/URL attachment-count, and notes length/hash scans.
 - Verification layer: schema checks, transaction backups, dry-run previews, and post-write reads.
 - Optional MCP shim: a thin wrapper only if Codex needs first-class tool calls. The adapter should work without it.
 
@@ -30,6 +30,7 @@ Read and support commands:
 - `list_sections`
 - `search_reminders`
 - `read_reminder`
+- `list_tags`
 - `backup_store`
 - `cache_rebuild`
 - `cache_info`
@@ -47,10 +48,16 @@ Write commands:
 - `move_to_section`
 - `attach_image`
 - `attach_url`
+- `add_tag`
+- `remove_tag`
+- `cleanup_tags`
+- `list_attachments`
+- `delete_attachment`
+- `replace_attachment`
 
 `cache_rebuild` reads the Reminders database and writes only the disposable cache. It does not write to the Reminders store. Cache search is intentionally lightweight: it searches cached IDs, titles, list names, section names, and cached date strings, but it does not store or search full note bodies.
 
-Date/time support covers timed reminders and all-day due dates. DB-created reminders immediately sync title/body back through AppleScript because native Reminders can otherwise render a newly inserted row with attachments/date but no visible text. URL support uses native Reminders URL attachment rows so the URL appears in the app detail panel. Urgent alerts, location alerts, message-when-messaging alerts, tags, and attachment removal are intentionally not exposed as write commands yet because those surfaces need more reverse-engineering before they are safe for delegated use.
+Date/time support covers timed reminders and all-day due dates. DB-created reminders immediately sync title/body back through AppleScript because native Reminders can otherwise render a newly inserted row with attachments/date but no visible text. URL support uses native Reminders URL attachment rows so the URL appears in the app detail panel. Tag writes use Reminders hashtag label/object rows. Attachment deletion is a soft-delete of the native attachment object only; copied image files are not hard-deleted. Urgent alerts, location alerts, and message-when-messaging alerts are intentionally not exposed as write commands yet because those surfaces need more reverse-engineering before they are safe for delegated use.
 
 ## Reference
 

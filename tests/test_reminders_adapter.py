@@ -64,6 +64,18 @@ class ScheduleHelperTests(unittest.TestCase):
         with self.assertRaises(reminders_adapter.AdapterError):
             reminders_adapter.normalized_url("example.com/no-scheme")
 
+    def test_reminder_url_accepts_bare_or_url_ids(self) -> None:
+        rid = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+
+        self.assertEqual(
+            reminders_adapter.reminder_url(rid),
+            "x-apple-reminder://7718459E-2672-4E99-9E6A-B9AA430E570F",
+        )
+        self.assertEqual(
+            reminders_adapter.reminder_url(f"x-apple-reminder://{rid}"),
+            "x-apple-reminder://7718459E-2672-4E99-9E6A-B9AA430E570F",
+        )
+
 
 class AppleScriptSyncTests(unittest.TestCase):
     def test_sync_reminder_text_uses_no_change_sentinels(self) -> None:
@@ -131,8 +143,21 @@ class CacheHelperTests(unittest.TestCase):
                 );
                 create table ZREMCDOBJECT (
                     ZREMINDER2 integer,
+                    ZREMINDER3 integer,
+                    ZHASHTAGLABEL integer,
                     Z_ENT integer,
                     ZMARKEDFORDELETION integer
+                );
+                create table ZREMCDHASHTAGLABEL (
+                    Z_PK integer primary key,
+                    Z_ENT integer,
+                    Z_OPT integer,
+                    ZFIRSTOCCURRENCECREATIONDATE real,
+                    ZRECENCYDATE real,
+                    ZACCOUNTIDENTIFIER text,
+                    ZCANONICALNAME text,
+                    ZNAME text,
+                    ZUUIDFORCHANGETRACKING blob
                 );
                 """
             )
@@ -168,6 +193,18 @@ class CacheHelperTests(unittest.TestCase):
             con.execute(
                 "insert into ZREMCDOBJECT (ZREMINDER2,Z_ENT,ZMARKEDFORDELETION) values (1,26,0)"
             )
+            con.execute(
+                """
+                insert into ZREMCDHASHTAGLABEL (
+                    Z_PK,Z_ENT,Z_OPT,ZFIRSTOCCURRENCECREATIONDATE,ZRECENCYDATE,
+                    ZACCOUNTIDENTIFIER,ZCANONICALNAME,ZNAME,ZUUIDFORCHANGETRACKING
+                ) values (1,11,1,1,2,'ACCOUNT-1','work','Work',?)
+                """,
+                (b"\x00" * 16,),
+            )
+            con.execute(
+                "insert into ZREMCDOBJECT (ZREMINDER3,ZHASHTAGLABEL,Z_ENT,ZMARKEDFORDELETION) values (1,1,32,0)"
+            )
 
             payload = reminders_adapter.build_cache_payload(
                 con,
@@ -181,10 +218,14 @@ class CacheHelperTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["image_attachments"], 1)
         self.assertEqual(payload["counts"]["url_attachments"], 1)
         self.assertEqual(payload["counts"]["attachments"], 2)
+        self.assertEqual(payload["counts"]["tag_labels"], 1)
+        self.assertEqual(payload["counts"]["tag_assignments"], 1)
         self.assertEqual(reminder["section"], "This Week")
         self.assertEqual(reminder["image_attachment_count"], 1)
         self.assertEqual(reminder["url_attachment_count"], 1)
         self.assertEqual(reminder["attachment_count"], 2)
+        self.assertEqual(reminder["tag_names"], ["Work"])
+        self.assertEqual(reminder["tag_count"], 1)
         self.assertFalse(reminder["all_day"])
         self.assertEqual(reminder["timezone"], "Asia/Seoul")
         self.assertEqual(reminder["notes_length"], len("Sensitive body text"))

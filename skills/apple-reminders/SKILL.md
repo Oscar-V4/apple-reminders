@@ -27,7 +27,7 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 4. When a bounded read returns too much, page or summarize within that same scope before widening the scan.
 5. When the user leaves something ambiguous, inspect Reminders history and current list structure for a clear precedent before choosing a default.
 6. When a list, section, or reminder is referenced indirectly, search the bounded relevant state before asking the user for details.
-7. For image or URL attachments, resolve the exact target reminder first, attach the explicit file path or URL, then read back the reminder or attachment row to verify the attachment.
+7. For image or URL attachments, resolve the exact target reminder first, attach/delete/replace the explicit file path, URL, or attachment id, then read back the reminder or attachment row to verify the attachment.
 8. For sections, preserve list-level section membership and ordering. Do not treat a section name as global unless the data proves it is unique.
 9. For bulk edits, inspect a reasonable bounded set first. If the current user has granted standing delegation, apply the change and report the exact affected set afterward; otherwise restate the qualifying reminders before applying changes.
 10. Use foreground UI automation only as a fallback for verification or unsupported flows. Prefer public APIs and the local background Reminders adapter for normal operation.
@@ -49,7 +49,9 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 - Deletion must use native Reminders delete behavior so deleted reminders go through Reminders' Recently Deleted flow. Never hard-delete rows directly from the database.
 - Do not make direct database writes outside the Reminders group container discovered on the user's machine.
 - Keep iCloud sync caveats explicit when a change relies on private storage details.
-- Do not write urgent alerts, location alerts, message-when-messaging alerts, tags, or attachment removals until the adapter exposes verified commands for those surfaces.
+- Use safe v1 tag writes only through `add_tag`, `remove_tag`, and scoped `cleanup_tags`; do not hard-delete tag labels as part of ordinary tag removal.
+- Use safe v1 attachment removal only through `delete_attachment` or `replace_attachment`; these soft-delete Reminders attachment objects and do not hard-delete copied image files.
+- Do not write urgent alerts, location alerts, or message-when-messaging alerts until the adapter exposes verified commands for those surfaces.
 
 ## Output Conventions
 
@@ -68,13 +70,20 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 - `list_sections`
 - `search_reminders`
 - `read_reminder`
+- `list_tags`
 - `create_reminder`
 - `update_reminder`
 - `complete_reminder`
 - `move_reminder`
 - `create_section`
+- `add_tag`
+- `remove_tag`
+- `cleanup_tags`
 - `attach_image`
 - `attach_url`
+- `list_attachments`
+- `delete_attachment`
+- `replace_attachment`
 - `backup_store`
 - `cache_rebuild`
 - `cache_info`

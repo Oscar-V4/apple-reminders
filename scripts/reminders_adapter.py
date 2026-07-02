@@ -35,11 +35,15 @@ CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 CACHE_FILE = CACHE_DIR / "cache.json"
 CACHE_VERSION = 1
 APPLE_EPOCH_OFFSET = 978307200
+IMAGE_ATTACHMENT_ENT = 25
+URL_ATTACHMENT_ENT = 26
+TAG_OBJECT_ENT = 32
 
 REQUIRED_TABLES = {
     "ZREMCDREMINDER",
     "ZREMCDBASELIST",
     "ZREMCDBASESECTION",
+    "ZREMCDHASHTAGLABEL",
     "ZREMCDOBJECT",
     "ZREMCKCLOUDSTATE",
     "Z_PRIMARYKEY",
@@ -169,10 +173,27 @@ def normalized_url(value: str) -> str:
     return url
 
 
+def normalized_tag_name(value: str) -> str:
+    tag = value.strip()
+    while tag.startswith("#"):
+        tag = tag[1:].strip()
+    if not tag:
+        raise AdapterError("Tag name is required")
+    return tag
+
+
+def canonical_tag_name(value: str) -> str:
+    return normalized_tag_name(value).casefold()
+
+
 def normalize_uuid(value: str) -> str:
     if value.startswith("x-apple-reminder://"):
         value = value.removeprefix("x-apple-reminder://")
     return str(uuid.UUID(value)).upper()
+
+
+def reminder_url(value: str) -> str:
+    return f"x-apple-reminder://{normalize_uuid(value)}"
 
 
 def uuid_blob(value: str) -> bytes:
@@ -263,6 +284,11 @@ def db_counts(db: Path) -> dict[str, int]:
             ).fetchone()[0],
             "url_attachments": con.execute(
                 "select count(*) from ZREMCDOBJECT where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0"
+            ).fetchone()[0],
+            "tag_labels": con.execute("select count(*) from ZREMCDHASHTAGLABEL").fetchone()[0],
+            "tag_assignments": con.execute(
+                "select count(*) from ZREMCDOBJECT where Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0",
+                (TAG_OBJECT_ENT,),
             ).fetchone()[0],
         }
     finally:
@@ -436,6 +462,251 @@ def find_reminder(
         ]
         raise AdapterError(f"Multiple reminders matched; use an id. Candidates: {candidates}")
     return dict(rows[0])
+
+
+def account_identifier(con: sqlite3.Connection, account_pk: int | None) -> str | None:
+    if account_pk is None:
+        return None
+    row = con.execute(
+        """
+        select ZCKIDENTIFIER
+        from ZREMCDOBJECT
+        where Z_PK=? and Z_ENT=14 and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (account_pk,),
+    ).fetchone()
+    return row["ZCKIDENTIFIER"] if row else None
+
+
+def tag_label_payload(row: sqlite3.Row | dict[str, Any], active_count: int | None = None) -> dict[str, Any]:
+    data = dict(row)
+    raw_uuid = data.get("ZUUIDFORCHANGETRACKING")
+    label_uuid = None
+    if raw_uuid:
+        try:
+            label_uuid = str(uuid.UUID(bytes=bytes(raw_uuid))).upper()
+        except (TypeError, ValueError):
+            label_uuid = None
+    payload = {
+        "pk": data["Z_PK"],
+        "uuid": label_uuid,
+        "name": data["ZNAME"],
+        "canonical_name": data["ZCANONICALNAME"],
+        "account_identifier": data["ZACCOUNTIDENTIFIER"],
+        "first_seen_at": core_to_iso(data["ZFIRSTOCCURRENCECREATIONDATE"]),
+        "recency_at": core_to_iso(data["ZRECENCYDATE"]),
+    }
+    if active_count is not None:
+        payload["active_count"] = active_count
+    return payload
+
+
+def find_tag_label(
+    con: sqlite3.Connection,
+    tag: str,
+    account_id: str | None = None,
+) -> dict[str, Any] | None:
+    canonical = canonical_tag_name(tag)
+    params: list[Any] = [canonical]
+    where = ["lower(ZCANONICALNAME)=?"]
+    if account_id:
+        where.append("(ZACCOUNTIDENTIFIER=? or ZACCOUNTIDENTIFIER is null)")
+        params.append(account_id)
+    rows = con.execute(
+        f"""
+        select *
+        from ZREMCDHASHTAGLABEL
+        where {" and ".join(where)}
+        order by case when ZACCOUNTIDENTIFIER=? then 0 else 1 end, Z_PK
+        """,
+        [*params, account_id or ""],
+    ).fetchall()
+    return dict(rows[0]) if rows else None
+
+
+def create_tag_label(
+    con: sqlite3.Connection,
+    tag: str,
+    account_id: str | None,
+    now: float,
+) -> dict[str, Any]:
+    name = normalized_tag_name(tag)
+    label_id = uuid.uuid4()
+    label_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=11").fetchone()[0]
+    con.execute(
+        """
+        insert into ZREMCDHASHTAGLABEL (
+          Z_PK,Z_ENT,Z_OPT,ZFIRSTOCCURRENCECREATIONDATE,ZRECENCYDATE,
+          ZACCOUNTIDENTIFIER,ZCANONICALNAME,ZNAME,ZUUIDFORCHANGETRACKING
+        ) values (?,11,1,?,?,?,?,?,?)
+        """,
+        (
+            label_pk,
+            now,
+            now,
+            account_id,
+            canonical_tag_name(name),
+            name,
+            sqlite3.Binary(label_id.bytes),
+        ),
+    )
+    update_primary_key(con, 11, label_pk)
+    row = con.execute("select * from ZREMCDHASHTAGLABEL where Z_PK=?", (label_pk,)).fetchone()
+    if not row:
+        raise AdapterError("Created tag label could not be read back")
+    return dict(row)
+
+
+def find_or_create_tag_label(
+    con: sqlite3.Connection,
+    tag: str,
+    account_id: str | None,
+    now: float,
+) -> tuple[dict[str, Any], bool]:
+    existing = find_tag_label(con, tag, account_id=account_id)
+    if existing:
+        return existing, False
+    return create_tag_label(con, tag, account_id, now), True
+
+
+def reminder_tag_rows(con: sqlite3.Connection, reminder_pk: int) -> list[dict[str, Any]]:
+    rows = con.execute(
+        """
+        select o.Z_PK as object_pk,o.ZCKIDENTIFIER as object_id,o.ZMARKEDFORDELETION,
+               l.*
+        from ZREMCDOBJECT o
+        join ZREMCDHASHTAGLABEL l on l.Z_PK=o.ZHASHTAGLABEL
+        where o.ZREMINDER3=? and o.Z_ENT=? and coalesce(o.ZMARKEDFORDELETION,0)=0
+        order by lower(l.ZNAME), o.Z_PK
+        """,
+        (reminder_pk, TAG_OBJECT_ENT),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def tag_assignment_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "object_pk": row["object_pk"],
+        "object_id": row["object_id"],
+        "label": tag_label_payload(row),
+    }
+
+
+def touch_reminder(con: sqlite3.Connection, reminder: dict[str, Any], now: float) -> None:
+    con.execute(
+        "update ZREMCDREMINDER set Z_OPT=coalesce(Z_OPT,0)+1,ZLASTMODIFIEDDATE=? where Z_PK=?",
+        (now, reminder["Z_PK"]),
+    )
+    bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+
+
+def attachment_type_for_ent(ent: int) -> str:
+    if ent == IMAGE_ATTACHMENT_ENT:
+        return "image"
+    if ent == URL_ATTACHMENT_ENT:
+        return "url"
+    return f"ent:{ent}"
+
+
+def attachment_ent_for_type(value: str | None) -> int | None:
+    if value is None:
+        return None
+    normalized = value.casefold()
+    if normalized == "image":
+        return IMAGE_ATTACHMENT_ENT
+    if normalized == "url":
+        return URL_ATTACHMENT_ENT
+    raise AdapterError("Attachment type must be image or url")
+
+
+def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    ent = int(data["Z_ENT"])
+    payload = {
+        "pk": data["Z_PK"],
+        "id": data["ZCKIDENTIFIER"],
+        "type": attachment_type_for_ent(ent),
+        "uti": data["ZUTI"],
+        "order": data["Z_FOK_REMINDER1"],
+        "marked_for_deletion": bool(data["ZMARKEDFORDELETION"]),
+    }
+    if ent == IMAGE_ATTACHMENT_ENT:
+        payload.update(
+            {
+                "filename": data["ZFILENAME"],
+                "sha512": data["ZSHA512SUM"],
+                "file_size": data["ZFILESIZE"],
+                "width": data["ZWIDTH"],
+                "height": data["ZHEIGHT"],
+            }
+        )
+    if ent == URL_ATTACHMENT_ENT:
+        payload.update({"url": data["ZURL"], "host_url": data["ZHOSTURL"]})
+    return payload
+
+
+def active_attachment_rows(
+    con: sqlite3.Connection,
+    reminder_pk: int,
+    attachment_ent: int | None = None,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [reminder_pk, IMAGE_ATTACHMENT_ENT, URL_ATTACHMENT_ENT]
+    where = [
+        "ZREMINDER2=?",
+        "Z_ENT in (?,?)",
+        "coalesce(ZMARKEDFORDELETION,0)=0",
+    ]
+    if attachment_ent is not None:
+        where.append("Z_ENT=?")
+        params.append(attachment_ent)
+    rows = con.execute(
+        f"""
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+               ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where {" and ".join(where)}
+        order by Z_FOK_REMINDER1, Z_PK
+        """,
+        params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def resolve_attachment_selection(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment_id: str | None = None,
+    attachment_pk: int | None = None,
+    attachment_type: str | None = None,
+    filename: str | None = None,
+    url: str | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
+    ent = attachment_ent_for_type(attachment_type)
+    rows = active_attachment_rows(con, reminder["Z_PK"], attachment_ent=ent)
+    if attachment_id:
+        wanted = normalize_uuid(attachment_id)
+        matches = [row for row in rows if row["ZCKIDENTIFIER"] == wanted]
+    elif attachment_pk is not None:
+        matches = [row for row in rows if int(row["Z_PK"]) == int(attachment_pk)]
+    elif filename:
+        matches = [row for row in rows if row["Z_ENT"] == IMAGE_ATTACHMENT_ENT and row["ZFILENAME"] == filename]
+    elif url:
+        matches = [row for row in rows if row["Z_ENT"] == URL_ATTACHMENT_ENT and row["ZURL"] == normalized_url(url)]
+    elif ent is not None and len(rows) == 1:
+        matches = rows
+    else:
+        reason = "attachment selector is required"
+        if ent is not None and len(rows) > 1:
+            reason = f"multiple {attachment_type} attachments matched; use an attachment id"
+        if ent is not None and not rows:
+            reason = f"no active {attachment_type} attachments found"
+        return None, [attachment_payload(row) for row in rows], reason
+    if not matches:
+        return None, [attachment_payload(row) for row in rows], "no attachment matched selector"
+    if len(matches) > 1:
+        return None, [attachment_payload(row) for row in matches], "multiple attachments matched selector"
+    return matches[0], [attachment_payload(row) for row in rows], None
 
 
 def attachment_dir_for_account(account_uuid: str | None = None) -> Path:
@@ -624,6 +895,9 @@ def reminder_payload(
         "ics_url": row["ZICSURL"],
         "marked_for_deletion": bool(row["ZMARKEDFORDELETION"]),
     }
+    tags = [tag_assignment_payload(item) for item in reminder_tag_rows(con, row["Z_PK"])]
+    payload["tags"] = tags
+    payload["tag_names"] = [item["label"]["name"] for item in tags]
     if include_attachments:
         image_attachments = con.execute(
             """
@@ -645,6 +919,9 @@ def reminder_payload(
         ).fetchall()
         payload["attachments"] = [dict(item) for item in image_attachments]
         payload["url_attachments"] = [dict(item) for item in url_attachments]
+        payload["attachment_items"] = [
+            attachment_payload(item) for item in active_attachment_rows(con, row["Z_PK"])
+        ]
     return payload
 
 
@@ -732,6 +1009,23 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
         for row in section_rows
     ]
 
+    tag_rows = [
+        dict(row)
+        for row in con.execute(
+            """
+            select o.ZREMINDER3,l.ZNAME
+            from ZREMCDOBJECT o
+            join ZREMCDHASHTAGLABEL l on l.Z_PK=o.ZHASHTAGLABEL
+            where o.Z_ENT=? and coalesce(o.ZMARKEDFORDELETION,0)=0
+            order by lower(l.ZNAME)
+            """,
+            (TAG_OBJECT_ENT,),
+        )
+    ]
+    tag_names_by_reminder_pk: dict[int, list[str]] = {}
+    for row in tag_rows:
+        tag_names_by_reminder_pk.setdefault(row["ZREMINDER3"], []).append(row["ZNAME"])
+
     reminder_rows = [
         dict(row)
         for row in con.execute(
@@ -767,6 +1061,7 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
         reminder_id = (row["ZCKIDENTIFIER"] or "").upper()
         section_id = memberships_by_list_pk.get(row["ZLIST"], {}).get(reminder_id)
         section = sections_by_key.get((row["ZLIST"], section_id)) if section_id else None
+        tag_names = tag_names_by_reminder_pk.get(row["Z_PK"], [])
         reminders.append(
             {
                 "id": row["ZCKIDENTIFIER"],
@@ -792,6 +1087,8 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
                 "url_attachment_count": int(row["url_attachment_count"] or 0),
                 "attachment_count": int(row["image_attachment_count"] or 0)
                 + int(row["url_attachment_count"] or 0),
+                "tag_names": tag_names,
+                "tag_count": len(tag_names),
             }
         )
 
@@ -809,6 +1106,15 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
         where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0
         """
     ).fetchone()[0]
+    tag_label_count = con.execute("select count(*) from ZREMCDHASHTAGLABEL").fetchone()[0]
+    tag_assignment_count = con.execute(
+        """
+        select count(*)
+        from ZREMCDOBJECT
+        where Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (TAG_OBJECT_ENT,),
+    ).fetchone()[0]
     return {
         "version": CACHE_VERSION,
         "generated_at": dt.datetime.now().astimezone().isoformat(),
@@ -820,6 +1126,8 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
             "image_attachments": image_attachment_count,
             "url_attachments": url_attachment_count,
             "attachments": image_attachment_count + url_attachment_count,
+            "tag_labels": tag_label_count,
+            "tag_assignments": tag_assignment_count,
         },
         "lists": lists,
         "sections": sections,
@@ -902,6 +1210,9 @@ def cached_reminder_matches_query(reminder: dict[str, Any], query: str | None) -
     for key in ("id", "title", "list", "section", "due_at", "display_at", "modified_at"):
         value = reminder.get(key)
         if value is not None and needle in str(value).casefold():
+            return True
+    for tag in reminder.get("tag_names", []) or []:
+        if needle in str(tag).casefold():
             return True
     return False
 
@@ -1129,6 +1440,231 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
         row = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         json_out({"ok": True, "db": str(db), "reminder": reminder_payload(con, row)})
         return 0
+    finally:
+        con.close()
+
+
+def cmd_list_tags(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    con = connect(db)
+    try:
+        params: list[Any] = []
+        where: list[str] = []
+        if args.query:
+            where.append("(lower(l.ZNAME) like ? or lower(l.ZCANONICALNAME) like ?)")
+            pattern = f"%{args.query.casefold()}%"
+            params.extend([pattern, pattern])
+        where_sql = f"where {' and '.join(where)}" if where else ""
+        rows = con.execute(
+            f"""
+            select l.*,
+                   coalesce(count(o.Z_PK),0) as active_count
+            from ZREMCDHASHTAGLABEL l
+            left join ZREMCDOBJECT o
+              on o.ZHASHTAGLABEL=l.Z_PK
+             and o.Z_ENT=?
+             and coalesce(o.ZMARKEDFORDELETION,0)=0
+            {where_sql}
+            group by l.Z_PK
+            order by lower(l.ZNAME)
+            limit ?
+            """,
+            [TAG_OBJECT_ENT, *params, args.limit],
+        ).fetchall()
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "tags": [tag_label_payload(row, active_count=int(row["active_count"] or 0)) for row in rows],
+                "truncated": len(rows) >= args.limit,
+            }
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def cmd_add_tag(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    tag = normalized_tag_name(args.tag)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        now = core_now()
+        account_id = account_identifier(con, reminder.get("ZACCOUNT"))
+        con.execute("begin immediate")
+        label, label_created = find_or_create_tag_label(con, tag, account_id, now)
+        existing = con.execute(
+            """
+            select *
+            from ZREMCDOBJECT
+            where ZREMINDER3=? and ZHASHTAGLABEL=? and Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+            order by Z_PK
+            """,
+            (reminder["Z_PK"], label["Z_PK"], TAG_OBJECT_ENT),
+        ).fetchone()
+        if existing:
+            con.commit()
+            json_out(
+                {
+                    "ok": True,
+                    "db": str(db),
+                    "attached": False,
+                    "reason": "already_attached",
+                    "tag": tag_label_payload(label),
+                    "object": {
+                        "object_pk": existing["Z_PK"],
+                        "object_id": existing["ZCKIDENTIFIER"],
+                    },
+                }
+            )
+            return 0
+        object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
+        cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
+        object_id = str(uuid.uuid4()).upper()
+        con.execute(
+            """
+            insert into ZREMCDOBJECT (
+              Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
+              ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
+              ZHASHTAGLABEL,ZREMINDER3,ZIDENTIFIER,ZCKIDENTIFIER
+            ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                object_pk,
+                TAG_OBJECT_ENT,
+                reminder["ZACCOUNT"],
+                cloud_pk,
+                label["Z_PK"],
+                reminder["Z_PK"],
+                sqlite3.Binary(uuid_blob(object_id)),
+                object_id,
+            ),
+        )
+        con.execute(
+            """
+            insert into ZREMCKCLOUDSTATE (
+              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+            ) values (?,45,1,1,0,?,?,?)
+            """,
+            (cloud_pk, object_pk, TAG_OBJECT_ENT, now),
+        )
+        touch_reminder(con, reminder, now)
+        update_primary_key(con, 13, object_pk)
+        update_primary_key(con, 45, cloud_pk)
+        con.commit()
+        log_action("add_tag", {"reminder": reminder["ZCKIDENTIFIER"], "tag": tag, "object": object_id})
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "attached": True,
+                "label_created": label_created,
+                "reminder_id": reminder["ZCKIDENTIFIER"],
+                "tag": tag_label_payload(label),
+                "object_id": object_id,
+            }
+        )
+        return 0
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def cmd_remove_tag(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    tag = normalized_tag_name(args.tag)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        label = find_tag_label(con, tag, account_id=account_identifier(con, reminder.get("ZACCOUNT")))
+        if not label:
+            json_out({"ok": True, "db": str(db), "removed": False, "reason": "tag_not_found", "tag": tag})
+            return 0
+        rows = con.execute(
+            """
+            select *
+            from ZREMCDOBJECT
+            where ZREMINDER3=? and ZHASHTAGLABEL=? and Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+            order by Z_PK
+            """,
+            (reminder["Z_PK"], label["Z_PK"], TAG_OBJECT_ENT),
+        ).fetchall()
+        if not rows:
+            json_out({"ok": True, "db": str(db), "removed": False, "reason": "tag_not_attached", "tag": tag_label_payload(label)})
+            return 0
+        now = core_now()
+        con.execute("begin immediate")
+        removed = []
+        for row in rows:
+            con.execute(
+                "update ZREMCDOBJECT set ZMARKEDFORDELETION=1,Z_OPT=coalesce(Z_OPT,0)+1 where Z_PK=?",
+                (row["Z_PK"],),
+            )
+            bump_cloud_state(con, row["ZCKCLOUDSTATE"], now)
+            removed.append({"object_pk": row["Z_PK"], "object_id": row["ZCKIDENTIFIER"]})
+        touch_reminder(con, reminder, now)
+        con.commit()
+        log_action("remove_tag", {"reminder": reminder["ZCKIDENTIFIER"], "tag": tag, "removed": removed})
+        json_out({"ok": True, "db": str(db), "removed": True, "tag": tag_label_payload(label), "objects": removed})
+        return 0
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def cmd_cleanup_tags(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    con = connect(db)
+    try:
+        params: list[Any] = [TAG_OBJECT_ENT]
+        filters = ["coalesce(active_count,0)=0"]
+        if args.tag:
+            filters.append("lower(ZCANONICALNAME)=?")
+            params.append(canonical_tag_name(args.tag))
+        if args.prefix:
+            filters.append("lower(ZNAME) like ?")
+            params.append(f"{normalized_tag_name(args.prefix).casefold()}%")
+        rows = con.execute(
+            f"""
+            select *
+            from (
+              select l.*,
+                     coalesce(count(o.Z_PK),0) as active_count
+              from ZREMCDHASHTAGLABEL l
+              left join ZREMCDOBJECT o
+                on o.ZHASHTAGLABEL=l.Z_PK
+               and o.Z_ENT=?
+               and coalesce(o.ZMARKEDFORDELETION,0)=0
+              group by l.Z_PK
+            )
+            where {" and ".join(filters)}
+            order by lower(ZNAME)
+            limit ?
+            """,
+            [*params, args.limit],
+        ).fetchall()
+        candidates = [tag_label_payload(row, active_count=int(row["active_count"] or 0)) for row in rows]
+        if not args.apply:
+            json_out({"ok": True, "db": str(db), "applied": False, "candidates": candidates, "truncated": len(rows) >= args.limit})
+            return 0
+        if not args.tag and not args.prefix:
+            raise AdapterError("cleanup_tags --apply requires --tag or --prefix")
+        con.execute("begin immediate")
+        for row in rows:
+            con.execute("delete from ZREMCDHASHTAGLABEL where Z_PK=?", (row["Z_PK"],))
+        con.commit()
+        log_action("cleanup_tags", {"deleted": [item["name"] for item in candidates]})
+        json_out({"ok": True, "db": str(db), "applied": True, "deleted": candidates})
+        return 0
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
 
@@ -1424,12 +1960,12 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
 
     if args.due_at or args.remind_at or args.all_day_due_date or args.clear_due:
         raise AdapterError("date options currently require --backend db")
-    rem_id = args.id
+    rem_id = reminder_url(args.id) if args.id else None
     if not rem_id:
         db = main_db()
         con = connect(db)
         try:
-            rem_id = f"x-apple-reminder://{find_reminder(con, title=args.title, list_name=args.list)['ZCKIDENTIFIER']}"
+            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
         finally:
             con.close()
     script = """
@@ -1495,12 +2031,12 @@ def cmd_complete_reminder(args: argparse.Namespace) -> int:
         finally:
             con.close()
 
-    rem_id = args.id
+    rem_id = reminder_url(args.id) if args.id else None
     if not rem_id:
         db = main_db()
         con = connect(db)
         try:
-            rem_id = f"x-apple-reminder://{find_reminder(con, title=args.title, list_name=args.list)['ZCKIDENTIFIER']}"
+            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
         finally:
             con.close()
     script = """
@@ -1569,12 +2105,12 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
         finally:
             con.close()
 
-    rem_id = args.id
+    rem_id = reminder_url(args.id) if args.id else None
     if not rem_id:
         db = main_db()
         con = connect(db)
         try:
-            rem_id = f"x-apple-reminder://{find_reminder(con, title=args.title, list_name=args.list)['ZCKIDENTIFIER']}"
+            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
         finally:
             con.close()
     script = """
@@ -1708,9 +2244,7 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
         con.close()
 
 
-def cmd_attach_image(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
-    image = Path(args.image).expanduser().resolve()
+def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image: Path) -> dict[str, Any]:
     if not image.exists():
         raise AdapterError(f"Image not found: {image}")
     data = image.read_bytes()
@@ -1720,101 +2254,208 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
         ext = "jpeg"
     uti = "public.jpeg" if ext in {"jpeg", "jpg"} else "public.png"
     width, height = image_size(image)
+    existing = con.execute(
+        """
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+               ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where ZREMINDER2=? and ZSHA512SUM=? and Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (reminder["Z_PK"], sha512, IMAGE_ATTACHMENT_ENT),
+    ).fetchone()
+    if existing:
+        return {"attached": False, "reason": "already_attached", "attachment": attachment_payload(existing)}
+    attach_dir = attachment_dir_for_account()
+    stored = attach_dir / f"{sha512}.{ext}"
+    if not stored.exists():
+        shutil.copy2(image, stored)
+    now = core_now()
+    object_id = str(uuid.uuid4()).upper()
+    display_filename = f"{object_id}-codex.{ext}"
+    object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
+    cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
+    sort_order = con.execute(
+        """
+        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+        from ZREMCDOBJECT
+        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (reminder["Z_PK"],),
+    ).fetchone()[0]
+    con.execute(
+        """
+        insert into ZREMCDOBJECT (
+          Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
+          ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
+          ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
+          ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
+        ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            object_pk,
+            IMAGE_ATTACHMENT_ENT,
+            reminder["ZACCOUNT"],
+            cloud_pk,
+            reminder["Z_PK"],
+            sort_order,
+            len(data),
+            height,
+            width,
+            uti,
+            display_filename,
+            sha512,
+            sqlite3.Binary(uuid_blob(object_id)),
+            object_id,
+        ),
+    )
+    con.execute(
+        """
+        insert into ZREMCKCLOUDSTATE (
+          Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+          ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+        ) values (?,45,1,1,0,?,?,?)
+        """,
+        (cloud_pk, object_pk, IMAGE_ATTACHMENT_ENT, now),
+    )
+    touch_reminder(con, reminder, now)
+    update_primary_key(con, 13, object_pk)
+    update_primary_key(con, 45, cloud_pk)
+    row = con.execute(
+        """
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+               ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where Z_PK=?
+        """,
+        (object_pk,),
+    ).fetchone()
+    return {
+        "attached": True,
+        "attachment": attachment_payload(row),
+        "stored_path": str(stored),
+        "width": width,
+        "height": height,
+    }
+
+
+def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: str) -> dict[str, Any]:
+    normalized = normalized_url(url)
+    existing = con.execute(
+        """
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+               ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where ZREMINDER2=? and Z_ENT=? and ZURL=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (reminder["Z_PK"], URL_ATTACHMENT_ENT, normalized),
+    ).fetchone()
+    if existing:
+        return {"attached": False, "reason": "already_attached", "attachment": attachment_payload(existing)}
+    now = core_now()
+    object_id = str(uuid.uuid4()).upper()
+    object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
+    cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
+    sort_order = con.execute(
+        """
+        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+        from ZREMCDOBJECT
+        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (reminder["Z_PK"],),
+    ).fetchone()[0]
+    columns = [
+        "Z_PK",
+        "Z_ENT",
+        "Z_OPT",
+        "ZCKDIRTYFLAGS",
+        "ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION",
+        "ZMARKEDFORDELETION",
+        "ZMINIMUMSUPPORTEDAPPVERSION",
+        "ZACCOUNT",
+        "ZCKCLOUDSTATE",
+        "ZREMINDER2",
+        "Z_FOK_REMINDER1",
+        "ZUTI",
+        "ZURL",
+        "ZIDENTIFIER",
+        "ZCKIDENTIFIER",
+    ]
+    values = [
+        object_pk,
+        URL_ATTACHMENT_ENT,
+        1,
+        0,
+        0,
+        0,
+        0,
+        reminder["ZACCOUNT"],
+        cloud_pk,
+        reminder["Z_PK"],
+        sort_order,
+        "public.url",
+        normalized,
+        sqlite3.Binary(uuid_blob(object_id)),
+        object_id,
+    ]
+    con.execute(
+        f"insert into ZREMCDOBJECT ({','.join(columns)}) values ({','.join('?' for _ in columns)})",
+        values,
+    )
+    con.execute(
+        """
+        insert into ZREMCKCLOUDSTATE (
+          Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+          ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+        ) values (?,45,1,1,0,?,?,?)
+        """,
+        (cloud_pk, object_pk, URL_ATTACHMENT_ENT, now),
+    )
+    touch_reminder(con, reminder, now)
+    update_primary_key(con, 13, object_pk)
+    update_primary_key(con, 45, cloud_pk)
+    row = con.execute(
+        """
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+               ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where Z_PK=?
+        """,
+        (object_pk,),
+    ).fetchone()
+    return {"attached": True, "attachment": attachment_payload(row), "url": normalized}
+
+
+def soft_delete_attachment_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> dict[str, Any]:
+    now = core_now()
+    con.execute(
+        "update ZREMCDOBJECT set ZMARKEDFORDELETION=1,Z_OPT=coalesce(Z_OPT,0)+1 where Z_PK=?",
+        (attachment["Z_PK"],),
+    )
+    bump_cloud_state(con, attachment.get("ZCKCLOUDSTATE"), now)
+    touch_reminder(con, reminder, now)
+    return attachment_payload({**attachment, "ZMARKEDFORDELETION": 1})
+
+
+def cmd_attach_image(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    image = Path(args.image).expanduser().resolve()
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        existing = con.execute(
-            """
-            select Z_PK,ZCKIDENTIFIER from ZREMCDOBJECT
-            where ZREMINDER2=? and ZSHA512SUM=? and coalesce(ZMARKEDFORDELETION,0)=0
-            """,
-            (reminder["Z_PK"], sha512),
-        ).fetchone()
-        if existing:
-            json_out({"ok": True, "db": str(db), "attached": False, "reason": "already_attached", "object": dict(existing)})
-            return 0
-        attach_dir = attachment_dir_for_account()
-        stored = attach_dir / f"{sha512}.{ext}"
-        if not stored.exists():
-            shutil.copy2(image, stored)
-        now = core_now()
-        object_id = str(uuid.uuid4()).upper()
-        display_filename = f"{object_id}-codex.{ext}"
         con.execute("begin immediate")
-        object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
-        cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-        sort_order = con.execute(
-            """
-            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-            from ZREMCDOBJECT
-            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-            """,
-            (reminder["Z_PK"],),
-        ).fetchone()[0]
-        con.execute(
-            """
-            insert into ZREMCDOBJECT (
-              Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
-              ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
-              ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
-              ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
-            ) values (?,25,1,0,0,0,0,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                object_pk,
-                reminder["ZACCOUNT"],
-                cloud_pk,
-                reminder["Z_PK"],
-                sort_order,
-                len(data),
-                height,
-                width,
-                uti,
-                display_filename,
-                sha512,
-                sqlite3.Binary(uuid_blob(object_id)),
-                object_id,
-            ),
-        )
-        con.execute(
-            """
-            insert into ZREMCKCLOUDSTATE (
-              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
-              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
-            ) values (?,45,1,1,0,?,25,?)
-            """,
-            (cloud_pk, object_pk, now),
-        )
-        con.execute(
-            "update ZREMCDREMINDER set Z_OPT=coalesce(Z_OPT,0)+1,ZLASTMODIFIEDDATE=? where Z_PK=?",
-            (now, reminder["Z_PK"]),
-        )
-        con.execute(
-            """
-            update ZREMCKCLOUDSTATE
-            set Z_OPT=coalesce(Z_OPT,0)+1,
-                ZCURRENTLOCALVERSION=coalesce(ZCURRENTLOCALVERSION,0)+1,
-                ZLOCALVERSIONDATE=?
-            where Z_PK=?
-            """,
-            (now, reminder["ZCKCLOUDSTATE"]),
-        )
-        update_primary_key(con, 13, object_pk)
-        update_primary_key(con, 45, cloud_pk)
+        result = attach_image_record(con, reminder, image)
         con.commit()
-        log_action("attach_image", {"reminder": reminder["ZCKIDENTIFIER"], "image": str(image), "object": object_id, "stored": str(stored)})
-        json_out(
-            {
-                "ok": True,
-                "db": str(db),
-                "attached": True,
-                "reminder_id": reminder["ZCKIDENTIFIER"],
-                "object_id": object_id,
-                "stored_path": str(stored),
-                "width": width,
-                "height": height,
-            }
-        )
+        attachment = result["attachment"]
+        log_action("attach_image", {"reminder": reminder["ZCKIDENTIFIER"], "image": str(image), "object": attachment["id"], "stored": result.get("stored_path")})
+        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], **result})
         return 0
     except Exception:
         con.rollback()
@@ -1829,93 +2470,122 @@ def cmd_attach_url(args: argparse.Namespace) -> int:
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        existing = con.execute(
-            """
-            select Z_PK,ZCKIDENTIFIER,ZURL from ZREMCDOBJECT
-            where ZREMINDER2=? and Z_ENT=26 and ZURL=? and coalesce(ZMARKEDFORDELETION,0)=0
-            """,
-            (reminder["Z_PK"], url),
-        ).fetchone()
-        if existing:
-            json_out({"ok": True, "db": str(db), "attached": False, "reason": "already_attached", "object": dict(existing)})
-            return 0
-        now = core_now()
-        object_id = str(uuid.uuid4()).upper()
         con.execute("begin immediate")
-        object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
-        cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-        sort_order = con.execute(
-            """
-            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-            from ZREMCDOBJECT
-            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-            """,
-            (reminder["Z_PK"],),
-        ).fetchone()[0]
-        columns = [
-            "Z_PK",
-            "Z_ENT",
-            "Z_OPT",
-            "ZCKDIRTYFLAGS",
-            "ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION",
-            "ZMARKEDFORDELETION",
-            "ZMINIMUMSUPPORTEDAPPVERSION",
-            "ZACCOUNT",
-            "ZCKCLOUDSTATE",
-            "ZREMINDER2",
-            "Z_FOK_REMINDER1",
-            "ZUTI",
-            "ZURL",
-            "ZIDENTIFIER",
-            "ZCKIDENTIFIER",
-        ]
-        values = [
-            object_pk,
-            26,
-            1,
-            0,
-            0,
-            0,
-            0,
-            reminder["ZACCOUNT"],
-            cloud_pk,
-            reminder["Z_PK"],
-            sort_order,
-            "public.url",
-            url,
-            sqlite3.Binary(uuid_blob(object_id)),
-            object_id,
-        ]
-        con.execute(
-            f"insert into ZREMCDOBJECT ({','.join(columns)}) values ({','.join('?' for _ in columns)})",
-            values,
-        )
-        con.execute(
-            """
-            insert into ZREMCKCLOUDSTATE (
-              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
-              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
-            ) values (?,45,1,1,0,?,26,?)
-            """,
-            (cloud_pk, object_pk, now),
-        )
-        con.execute(
-            "update ZREMCDREMINDER set Z_OPT=coalesce(Z_OPT,0)+1,ZLASTMODIFIEDDATE=? where Z_PK=?",
-            (now, reminder["Z_PK"]),
-        )
-        bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
-        update_primary_key(con, 13, object_pk)
-        update_primary_key(con, 45, cloud_pk)
+        result = attach_url_record(con, reminder, url)
         con.commit()
-        log_action("attach_url", {"reminder": reminder["ZCKIDENTIFIER"], "url": url, "object": object_id})
+        attachment = result["attachment"]
+        log_action("attach_url", {"reminder": reminder["ZCKIDENTIFIER"], "url": url, "object": attachment["id"]})
+        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], **result})
+        return 0
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def cmd_list_attachments(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        ent = attachment_ent_for_type(args.type)
+        items = [attachment_payload(row) for row in active_attachment_rows(con, reminder["Z_PK"], attachment_ent=ent)]
+        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], "attachments": items})
+        return 0
+    finally:
+        con.close()
+
+
+def cmd_delete_attachment(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        selected, candidates, reason = resolve_attachment_selection(
+            con,
+            reminder,
+            attachment_id=args.attachment_id,
+            attachment_pk=args.attachment_pk,
+            attachment_type=args.type,
+            filename=args.filename,
+            url=args.url,
+        )
+        if not selected:
+            json_out({"ok": False, "db": str(db), "error": reason, "candidates": candidates})
+            return 1
+        before = attachment_payload(selected)
+        con.execute("begin immediate")
+        deleted = soft_delete_attachment_record(con, reminder, selected)
+        con.commit()
+        log_action("delete_attachment_soft", {"reminder": reminder["ZCKIDENTIFIER"], "attachment": before})
         json_out(
             {
                 "ok": True,
                 "db": str(db),
-                "attached": True,
+                "deleted": True,
                 "reminder_id": reminder["ZCKIDENTIFIER"],
-                "object_id": object_id,
-                "url": url,
+                "attachment": before,
+                "deleted_state": deleted,
+            }
+        )
+        return 0
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def cmd_replace_attachment(args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser() if args.db else main_db()
+    if bool(args.image) == bool(args.url):
+        raise AdapterError("replace_attachment requires exactly one of --image or --url")
+    replacement_type = "image" if args.image else "url"
+    selector_type = args.type or replacement_type
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        selected, candidates, reason = resolve_attachment_selection(
+            con,
+            reminder,
+            attachment_id=args.attachment_id,
+            attachment_pk=args.attachment_pk,
+            attachment_type=selector_type,
+            filename=args.filename,
+            url=args.old_url,
+        )
+        if not selected:
+            json_out({"ok": False, "db": str(db), "error": reason, "candidates": candidates})
+            return 1
+        old_attachment = attachment_payload(selected)
+        con.execute("begin immediate")
+        if args.image:
+            new_result = attach_image_record(con, reminder, Path(args.image).expanduser().resolve())
+        else:
+            new_result = attach_url_record(con, reminder, args.url)
+        new_attachment = new_result.get("attachment") or {}
+        if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
+            raise AdapterError("Replacement source is the same as the selected existing attachment")
+        deleted = soft_delete_attachment_record(con, reminder, selected)
+        con.commit()
+        log_action(
+            "replace_attachment",
+            {
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "old": old_attachment,
+                "new": new_result.get("attachment"),
+            },
+        )
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "replaced": True,
+                "reminder_id": reminder["ZCKIDENTIFIER"],
+                "old_attachment": old_attachment,
+                "new_attachment": new_result,
+                "deleted_state": deleted,
             }
         )
         return 0
@@ -2074,6 +2744,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.set_defaults(func=cmd_read_reminder)
 
+    p = sub.add_parser("list_tags")
+    add_common_db(p)
+    p.add_argument("--query")
+    p.add_argument("--limit", type=int, default=100)
+    p.set_defaults(func=cmd_list_tags)
+
+    p = sub.add_parser("add_tag")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--tag", required=True)
+    p.set_defaults(func=cmd_add_tag)
+
+    p = sub.add_parser("remove_tag")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--tag", required=True)
+    p.set_defaults(func=cmd_remove_tag)
+
+    p = sub.add_parser("cleanup_tags")
+    add_common_db(p)
+    p.add_argument("--tag")
+    p.add_argument("--prefix")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--limit", type=int, default=100)
+    p.set_defaults(func=cmd_cleanup_tags)
+
     p = sub.add_parser("create_list")
     add_common_db(p)
     p.add_argument("--name", required=True)
@@ -2157,6 +2857,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--url", required=True)
     p.set_defaults(func=cmd_attach_url)
+
+    p = sub.add_parser("list_attachments")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--type", choices=["image", "url"])
+    p.set_defaults(func=cmd_list_attachments)
+
+    p = sub.add_parser("delete_attachment")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--attachment-id")
+    p.add_argument("--attachment-pk", type=int)
+    p.add_argument("--type", choices=["image", "url"])
+    p.add_argument("--filename")
+    p.add_argument("--url")
+    p.set_defaults(func=cmd_delete_attachment)
+
+    p = sub.add_parser("replace_attachment")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--attachment-id")
+    p.add_argument("--attachment-pk", type=int)
+    p.add_argument("--type", choices=["image", "url"])
+    p.add_argument("--filename")
+    p.add_argument("--old-url")
+    p.add_argument("--image")
+    p.add_argument("--url")
+    p.set_defaults(func=cmd_replace_attachment)
 
     return parser
 

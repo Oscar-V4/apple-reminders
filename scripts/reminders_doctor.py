@@ -17,6 +17,7 @@ REQUIRED_TABLES = {
     "ZREMCDREMINDER",
     "ZREMCDBASELIST",
     "ZREMCDBASESECTION",
+    "ZREMCDHASHTAGLABEL",
     "ZREMCDOBJECT",
     "ZREMCKCLOUDSTATE",
     "Z_PRIMARYKEY",
@@ -53,6 +54,10 @@ def inspect_db(path: Path) -> dict:
             ).fetchone()[0],
             "url_attachments": cur.execute(
                 "select count(*) from ZREMCDOBJECT where Z_ENT=26 and coalesce(ZMARKEDFORDELETION,0)=0"
+            ).fetchone()[0],
+            "tag_labels": cur.execute("select count(*) from ZREMCDHASHTAGLABEL").fetchone()[0],
+            "tag_assignments": cur.execute(
+                "select count(*) from ZREMCDOBJECT where Z_ENT=32 and coalesce(ZMARKEDFORDELETION,0)=0"
             ).fetchone()[0],
         }
     con.close()

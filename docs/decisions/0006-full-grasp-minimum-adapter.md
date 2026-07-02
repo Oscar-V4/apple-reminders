@@ -18,6 +18,7 @@ Read and diagnostics:
 - `list_sections`
 - `search_reminders`
 - `read_reminder`
+- `list_tags`
 
 Writes:
 
@@ -28,8 +29,14 @@ Writes:
 - `delete_reminder`
 - `create_section`
 - `move_to_section`
+- `add_tag`
+- `remove_tag`
+- `cleanup_tags`
 - `attach_image`
 - `attach_url`
+- `list_attachments`
+- `delete_attachment`
+- `replace_attachment`
 
 Safety and support:
 

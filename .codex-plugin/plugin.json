@@ -1,6 +1,6 @@
 {
   "name": "apple-reminders",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260702084002",
   "description": "Connect Apple Reminders for task capture, review, organization, attachments, and safe reminder changes.",
   "author": {
     "name": "Soo"

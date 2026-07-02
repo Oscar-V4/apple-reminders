@@ -23,6 +23,7 @@ Observed Core Data entities:
 - `REMCDReminder`
 - `REMCDBaseList`
 - `REMCDBaseSection`
+- `REMCDHashtagLabel`
 - `REMCDImageAttachment`
 - `REMCDURLAttachment`
 - `REMCKCloudState`
@@ -47,6 +48,13 @@ URL attachment proof:
 - Insert/update the related `REMCKCloudState`.
 - Restart/read Reminders and verify that the URL appears in the native detail panel. Setting only the reminder-level `ZICSURL` was not enough to render in the UI.
 
+Tag proof:
+
+- Tag labels live in `ZREMCDHASHTAGLABEL`.
+- Reminder tag assignments are `ZREMCDOBJECT` rows with `Z_ENT=32`, `ZREMINDER3` linked to the reminder, and `ZHASHTAGLABEL` linked to the label.
+- `add_tag` find-or-creates the label and inserts an active assignment object. Duplicate add is idempotent.
+- `remove_tag` soft-deletes only the assignment object. Label cleanup is separate and scoped through `cleanup_tags`.
+
 Reminder creation proof:
 
 - A reminder row can be inserted directly with `REMCDReminder` plus a matching `REMCKCloudState` row.
@@ -70,9 +78,9 @@ Cache commands:
 - `cache_search`: search active cached reminders by cached lightweight fields.
 - `cache_query`: filter cached reminders without requiring a search term.
 
-The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, completion, priority, flagged state, due/display/completion/modified timestamps, image and URL attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
+The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, tag names/counts, completion, priority, flagged state, due/display/completion/modified timestamps, image and URL attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
 
-Unsupported writes as of this note: urgent alerts, location alerts, message-when-messaging alerts, tags, and attachment removal. These surfaces have private data shapes or higher destructive risk and should not be exposed until verified separately.
+Supported safe v1 private writes include sections, image attachments, URL attachments, tag assignment writes, and attachment soft-delete/replacement. Unsupported writes as of this note: urgent alerts, location alerts, and message-when-messaging alerts. These surfaces have private data shapes and should not be exposed until verified separately.
 
 Cache searches do not search note bodies because the cache does not keep them. Use `search_reminders` when full note text must be searched from the source database.
 
