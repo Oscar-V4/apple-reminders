@@ -52,7 +52,8 @@ Reminder creation proof:
 - A reminder row can be inserted directly with `REMCDReminder` plus a matching `REMCKCloudState` row.
 - The list's reminder ordering JSON should include the new reminder UUID.
 - `ZTITLE` and `ZNOTES` alone are not enough for native list rendering. Reminders also expects gzip-compressed rich text document blobs in `ZTITLEDOCUMENT` and `ZNOTESDOCUMENT`.
-- Once those document blobs are present, DB-created reminders render title and notes correctly in the native Reminders UI.
+- Even when those document blobs are present, live testing found that freshly DB-created reminders can render in the native list without visible title text until the public Reminders object model rewrites the text.
+- The adapter therefore uses a hybrid path: create the row, dates, ordering, and private fields through SQLite, then immediately sync title/body through AppleScript so the native Reminders UI renders the text reliably.
 - Timed due/reminder dates set `ZDUEDATE`, `ZDISPLAYDATEDATE`, `ZTIMEZONE`, and `ZDISPLAYDATETIMEZONE`.
 - All-day due dates set `ZALLDAY=1`, `ZDISPLAYDATEISALLDAY=1`, local-midnight `ZDISPLAYDATEDATE`, and UTC-midnight `ZDUEDATE`.
 
@@ -81,4 +82,5 @@ Cache searches do not search note bodies because the cache does not keep them. U
 - Always back up the Reminders container before experiments or broad changes.
 - Keep transactions narrow.
 - Verify every write by reading back through the app state or database.
+- For reminder title/body writes, prefer AppleScript or the adapter's AppleScript text-sync post-write, not a DB-only write.
 - Treat private-store writes as local-first until iCloud behavior is tested more deeply.

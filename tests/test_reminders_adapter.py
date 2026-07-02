@@ -5,6 +5,7 @@ import importlib.util
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -62,6 +63,26 @@ class ScheduleHelperTests(unittest.TestCase):
     def test_normalized_url_requires_scheme(self) -> None:
         with self.assertRaises(reminders_adapter.AdapterError):
             reminders_adapter.normalized_url("example.com/no-scheme")
+
+
+class AppleScriptSyncTests(unittest.TestCase):
+    def test_sync_reminder_text_uses_no_change_sentinels(self) -> None:
+        with mock.patch.object(reminders_adapter, "run_osascript", return_value="x-apple-reminder://AAA") as run:
+            out = reminders_adapter.sync_reminder_text_applescript(
+                "x-apple-reminder://AAA",
+                title="New title",
+            )
+
+        self.assertEqual(out, "x-apple-reminder://AAA")
+        args = run.call_args.args[1]
+        self.assertEqual(args, ["x-apple-reminder://AAA", "New title", "__NO_CHANGE__"])
+
+    def test_sync_reminder_text_skips_when_no_fields_are_provided(self) -> None:
+        with mock.patch.object(reminders_adapter, "run_osascript") as run:
+            out = reminders_adapter.sync_reminder_text_applescript("x-apple-reminder://AAA")
+
+        self.assertIsNone(out)
+        run.assert_not_called()
 
 
 class CacheHelperTests(unittest.TestCase):

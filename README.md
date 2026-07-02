@@ -13,7 +13,7 @@ Apple Reminders plugin prototype for Codex. The goal is a local assistant layer 
 ## Intended Shape
 
 - Skill layer: planning, safety, output conventions, bounded reads, and write policy.
-- Local adapter layer: AppleScript/EventKit for public reminder fields; SQLite adapter for Reminders-only surfaces such as image attachments and sections.
+- Local adapter layer: AppleScript/EventKit for public reminder fields and final title/body UI sync; SQLite adapter for Reminders-only surfaces such as image attachments and sections.
 - Disposable cache layer: rebuildable JSON under `~/Library/Caches/apple-reminders-codex/` for lightweight list, section, reminder, date, completion, priority, flag, image/URL attachment-count, and notes length/hash scans.
 - Verification layer: schema checks, transaction backups, dry-run previews, and post-write reads.
 - Optional MCP shim: a thin wrapper only if Codex needs first-class tool calls. The adapter should work without it.
@@ -50,7 +50,7 @@ Write commands:
 
 `cache_rebuild` reads the Reminders database and writes only the disposable cache. It does not write to the Reminders store. Cache search is intentionally lightweight: it searches cached IDs, titles, list names, section names, and cached date strings, but it does not store or search full note bodies.
 
-Date/time support covers timed reminders and all-day due dates. URL support uses native Reminders URL attachment rows so the URL appears in the app detail panel. Urgent alerts, location alerts, message-when-messaging alerts, tags, and attachment removal are intentionally not exposed as write commands yet because those surfaces need more reverse-engineering before they are safe for delegated use.
+Date/time support covers timed reminders and all-day due dates. DB-created reminders immediately sync title/body back through AppleScript because native Reminders can otherwise render a newly inserted row with attachments/date but no visible text. URL support uses native Reminders URL attachment rows so the URL appears in the app detail panel. Urgent alerts, location alerts, message-when-messaging alerts, tags, and attachment removal are intentionally not exposed as write commands yet because those surfaces need more reverse-engineering before they are safe for delegated use.
 
 ## Reference
 

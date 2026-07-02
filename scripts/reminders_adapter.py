@@ -304,6 +304,32 @@ def run_osascript(script: str, args: list[str]) -> str:
     return proc.stdout.strip()
 
 
+def sync_reminder_text_applescript(reminder_id: str, title: str | None = None, notes: str | None = None) -> str | None:
+    if title is None and notes is None:
+        return None
+    script = """
+on run argv
+  set reminderID to item 1 of argv
+  set newTitle to item 2 of argv
+  set newBody to item 3 of argv
+  tell application "Reminders"
+    set targetReminder to reminder id reminderID
+    if newTitle is not "__NO_CHANGE__" then set name of targetReminder to newTitle
+    if newBody is not "__NO_CHANGE__" then set body of targetReminder to newBody
+    return id of targetReminder
+  end tell
+end run
+"""
+    return run_osascript(
+        script,
+        [
+            reminder_id,
+            title if title is not None else "__NO_CHANGE__",
+            notes if notes is not None else "__NO_CHANGE__",
+        ],
+    )
+
+
 def find_list(con: sqlite3.Connection, name: str | None = None, list_id: str | None = None) -> dict[str, Any]:
     if list_id:
         uid = normalize_uuid(list_id)
@@ -1281,7 +1307,17 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
             update_primary_key(con, 45, cloud_pk)
             con.commit()
             rem_url = f"x-apple-reminder://{reminder_id}"
-            log_action("create_reminder_db", {"id": rem_url, "list": args.list, "title": args.title, "db": str(db)})
+            sync_reminder_text_applescript(rem_url, title=args.title, notes=args.notes)
+            log_action(
+                "create_reminder_db",
+                {
+                    "id": rem_url,
+                    "list": args.list,
+                    "title": args.title,
+                    "db": str(db),
+                    "text_synced_via_applescript": True,
+                },
+            )
             json_out(
                 {
                     "ok": True,
@@ -1291,6 +1327,7 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
                     "list": args.list,
                     "pk": reminder_pk,
                     "scheduled": bool(sched),
+                    "text_synced_via_applescript": True,
                 }
             )
             return 0
@@ -1365,8 +1402,19 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
             bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
             con.commit()
             rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
-            log_action("update_reminder_db", {"id": rem_url, "db": str(db), "fields": [item.split('=')[0] for item in updates]})
-            json_out({"ok": True, "backend": "db", "id": rem_url})
+            text_sync_needed = args.new_title is not None or args.notes is not None
+            if text_sync_needed:
+                sync_reminder_text_applescript(rem_url, title=args.new_title, notes=args.notes)
+            log_action(
+                "update_reminder_db",
+                {
+                    "id": rem_url,
+                    "db": str(db),
+                    "fields": [item.split('=')[0] for item in updates],
+                    "text_synced_via_applescript": text_sync_needed,
+                },
+            )
+            json_out({"ok": True, "backend": "db", "id": rem_url, "text_synced_via_applescript": text_sync_needed})
             return 0
         except Exception:
             con.rollback()

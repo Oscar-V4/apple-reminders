@@ -44,6 +44,7 @@ Use this skill to turn raw Apple Reminders state into clear task decisions, capt
 - Prefer structured local adapter calls over free-form AppleScript or UI gestures.
 - Prefer EventKit or AppleScript for public reminder fields.
 - Use the SQLite-backed adapter only for Reminders surfaces not exposed through public APIs, such as image attachments, URL attachments, sections, and full-grasp cache reads.
+- When creating or updating reminders through the local adapter, rely on the adapter's AppleScript title/body sync for visible native UI text; do not treat DB-only title/body writes as sufficient.
 - The SQLite-backed adapter must run schema checks, use transactions, update related cloud-state rows, and verify with a read-back.
 - Deletion must use native Reminders delete behavior so deleted reminders go through Reminders' Recently Deleted flow. Never hard-delete rows directly from the database.
 - Do not make direct database writes outside the Reminders group container discovered on the user's machine.
