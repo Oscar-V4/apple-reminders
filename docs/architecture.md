@@ -22,7 +22,8 @@ The dependency-light shape should therefore be:
 2. Local adapter core
    - A small local CLI/library that performs JSON-in/JSON-out operations against Reminders.
    - Uses public APIs first: AppleScript and EventKit.
-   - Uses private store writes only for native Reminders surfaces not exposed publicly, such as image attachments and sections.
+   - Uses private ReminderKit for image attachments because iPhone visibility requires native CloudKit attachment records.
+   - Uses private store writes only for native Reminders surfaces not exposed publicly, such as sections, tags, URL attachments, and bounded repair/audit flows.
 3. Optional MCP shim
    - A thin wrapper over the local adapter only if Codex needs first-class tool calls in the plugin UI.
    - It should not own business logic.
@@ -35,9 +36,11 @@ Foreground UI gestures conflict with the user's active desktop, dual-monitor sta
 Normal operation should be background-first:
 
 - read through AppleScript/EventKit/SQLite
-- write through AppleScript/EventKit/SQLite adapter
+- write through AppleScript/EventKit/ReminderKit/SQLite adapter
 - verify by read-back
 - optionally open Reminders only when the user asks to inspect the result
+
+For image attachments, the verification target is iPhone visibility, not local Mac rendering. A SQLite-only image row can show in Reminders on the Mac while failing to appear on iOS because it lacks CloudKit server-record state. The adapter therefore defaults to the ReminderKit image backend and exposes `audit_attachments` plus `repair_attachments` for older local-only rows.
 
 ## Core Adapter Contract
 
@@ -67,6 +70,8 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `attach_image`
 - `attach_url`
 - `list_attachments`
+- `audit_attachments`
+- `repair_attachments`
 - `delete_attachment`
 - `replace_attachment`
 - `backup_store`

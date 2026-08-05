@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import gzip
 import hashlib
 import json
@@ -18,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.parse
 import uuid
@@ -38,6 +40,8 @@ APPLE_EPOCH_OFFSET = 978307200
 IMAGE_ATTACHMENT_ENT = 25
 URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
+SUBPROCESS_TIMEOUT_SECONDS = 30
+ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 6
 
 REQUIRED_TABLES = {
     "ZREMCDREMINDER",
@@ -51,7 +55,18 @@ REQUIRED_TABLES = {
 
 
 class AdapterError(RuntimeError):
-    pass
+    def __init__(self, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+class AttachmentVerificationError(AdapterError):
+    def __init__(self, message: str, row: dict[str, Any], **details: Any) -> None:
+        super().__init__(message, **details)
+        self.row = row
+
+    def compensation_result(self) -> dict[str, Any]:
+        return {"attachment": self.details.get("attachment", {}), "_row": self.row}
 
 
 def json_out(payload: Any) -> None:
@@ -61,6 +76,33 @@ def json_out(payload: Any) -> None:
 def fail(message: str, **extra: Any) -> int:
     json_out({"ok": False, "error": message, **extra})
     return 1
+
+
+def ensure_private_dir(path: Path) -> None:
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    is_plugin_data = (
+        path == APP_SUPPORT
+        or APP_SUPPORT in path.parents
+        or path == CACHE_DIR
+        or CACHE_DIR in path.parents
+    )
+    if not existed or is_plugin_data:
+        path.chmod(0o700)
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def reminder_priority(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 9:
+        raise argparse.ArgumentTypeError("must be between 0 and 9")
+    return parsed
 
 
 def core_now() -> float:
@@ -238,10 +280,30 @@ def reminder_text_document(text: str) -> bytes:
 
 
 def connect(db: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(db)
+    path = Path(db).expanduser()
+    if not path.exists():
+        raise AdapterError(f"Reminders database not found: {path}")
+    uri = f"file:{urllib.parse.quote(str(path.resolve()))}?mode=rw"
+    con = sqlite3.connect(uri, uri=True)
     con.row_factory = sqlite3.Row
     con.execute("pragma busy_timeout=5000")
     return con
+
+
+def resolve_database(value: str | None, *, write: bool = False) -> Path:
+    path = Path(value).expanduser().resolve() if value else main_db().resolve()
+    if not path.exists():
+        raise AdapterError(f"Reminders database not found: {path}")
+    if write:
+        stores = STORES.expanduser().resolve()
+        try:
+            path.relative_to(stores)
+        except ValueError as exc:
+            raise AdapterError(
+                "Refusing to write to a database outside the Reminders store",
+                database=path.name,
+            ) from exc
+    return path
 
 
 def table_names(con: sqlite3.Connection) -> set[str]:
@@ -249,6 +311,10 @@ def table_names(con: sqlite3.Connection) -> set[str]:
         row["name"]
         for row in con.execute("select name from sqlite_master where type='table'")
     }
+
+
+def column_names(con: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in con.execute(f"pragma table_info({table})")}
 
 
 def usable_dbs() -> list[Path]:
@@ -266,10 +332,10 @@ def usable_dbs() -> list[Path]:
     return paths
 
 
-def db_counts(db: Path) -> dict[str, int]:
+def db_counts(db: Path) -> dict[str, int | None]:
     con = connect(db)
     try:
-        return {
+        counts = {
             "lists": con.execute(
                 "select count(*) from ZREMCDBASELIST where coalesce(ZMARKEDFORDELETION,0)=0"
             ).fetchone()[0],
@@ -291,6 +357,8 @@ def db_counts(db: Path) -> dict[str, int]:
                 (TAG_OBJECT_ENT,),
             ).fetchone()[0],
         }
+        counts.update(image_attachment_sync_counts(con))
+        return counts
     finally:
         con.close()
 
@@ -307,7 +375,7 @@ def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def log_action(action: str, payload: dict[str, Any]) -> None:
-    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(APP_SUPPORT)
     entry = {
         "time": dt.datetime.now().astimezone().isoformat(),
         "action": action,
@@ -315,16 +383,21 @@ def log_action(action: str, payload: dict[str, Any]) -> None:
     }
     with JOURNAL.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    JOURNAL.chmod(0o600)
 
 
 def run_osascript(script: str, args: list[str]) -> str:
-    proc = subprocess.run(
-        ["osascript", "-e", script, *args],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script, *args],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError("Reminders AppleScript timed out") from exc
     if proc.returncode != 0:
         raise AdapterError(proc.stderr.strip() or proc.stdout.strip() or "osascript failed")
     return proc.stdout.strip()
@@ -619,9 +692,68 @@ def attachment_ent_for_type(value: str | None) -> int | None:
     raise AdapterError("Attachment type must be image or url")
 
 
+def attachment_sync_capabilities(con: sqlite3.Connection) -> dict[str, Any]:
+    object_columns = column_names(con, "ZREMCDOBJECT")
+    cloud_columns = column_names(con, "ZREMCKCLOUDSTATE")
+    required_object = {"ZCKSERVERRECORDDATA"}
+    required_cloud = {
+        "ZINCLOUD",
+        "ZCURRENTLOCALVERSION",
+        "ZLATESTVERSIONSYNCEDTOCLOUD",
+    }
+    missing = sorted(
+        [f"ZREMCDOBJECT.{name}" for name in required_object - object_columns]
+        + [f"ZREMCKCLOUDSTATE.{name}" for name in required_cloud - cloud_columns]
+    )
+    return {"available": not missing, "missing_columns": missing}
+
+
+def attachment_sync_select(con: sqlite3.Connection) -> str:
+    capabilities = attachment_sync_capabilities(con)
+    if not capabilities["available"]:
+        return """
+               0 as SYNC_FIELDS_AVAILABLE,
+               null as HAS_SERVER_RECORD,
+               null as SERVER_RECORD_BYTES,
+               null as ZINCLOUD,
+               null as ZCURRENTLOCALVERSION,
+               null as ZLATESTVERSIONSYNCEDTOCLOUD
+        """
+    return """
+               1 as SYNC_FIELDS_AVAILABLE,
+               o.ZCKSERVERRECORDDATA is not null as HAS_SERVER_RECORD,
+               length(o.ZCKSERVERRECORDDATA) as SERVER_RECORD_BYTES,
+               cs.ZINCLOUD,cs.ZCURRENTLOCALVERSION,cs.ZLATESTVERSIONSYNCEDTOCLOUD
+    """
+
+
 def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = dict(row)
     ent = int(data["Z_ENT"])
+    sync_fields_available = data.get("SYNC_FIELDS_AVAILABLE")
+    if sync_fields_available is None:
+        sync_fields_available = any(
+            key in data
+            for key in (
+                "HAS_SERVER_RECORD",
+                "has_server_record",
+                "ZINCLOUD",
+                "ZCURRENTLOCALVERSION",
+                "ZLATESTVERSIONSYNCEDTOCLOUD",
+            )
+        )
+    has_server_record = (
+        bool(data.get("HAS_SERVER_RECORD") or data.get("has_server_record"))
+        if sync_fields_available
+        else None
+    )
+    server_record_bytes = data.get("SERVER_RECORD_BYTES") or data.get("server_record_bytes")
+    in_cloud = data.get("ZINCLOUD")
+    current_local_version = data.get("ZCURRENTLOCALVERSION")
+    latest_synced_version = data.get("ZLATESTVERSIONSYNCEDTOCLOUD")
+    mobile_visible_likely = None
+    if ent == IMAGE_ATTACHMENT_ENT and sync_fields_available:
+        mobile_visible_likely = bool(has_server_record and in_cloud == 1)
     payload = {
         "pk": data["Z_PK"],
         "id": data["ZCKIDENTIFIER"],
@@ -629,6 +761,15 @@ def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "uti": data["ZUTI"],
         "order": data["Z_FOK_REMINDER1"],
         "marked_for_deletion": bool(data["ZMARKEDFORDELETION"]),
+        "sync": {
+            "mobile_visible_likely": mobile_visible_likely,
+            "has_server_record": has_server_record,
+            "server_record_bytes": server_record_bytes,
+            "in_cloud": in_cloud,
+            "current_local_version": current_local_version,
+            "latest_synced_version": latest_synced_version,
+            "fields_available": bool(sync_fields_available),
+        },
     }
     if ent == IMAGE_ATTACHMENT_ENT:
         payload.update(
@@ -645,6 +786,45 @@ def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def image_attachment_sync_counts(con: sqlite3.Connection) -> dict[str, int | None]:
+    capabilities = attachment_sync_capabilities(con)
+    if not capabilities["available"]:
+        total = con.execute(
+            """
+            select count(*)
+            from ZREMCDOBJECT
+            where Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (IMAGE_ATTACHMENT_ENT,),
+        ).fetchone()[0]
+        return {
+            "mobile_visible_image_attachments": None,
+            "local_only_image_attachments": None,
+            "unverified_image_attachments": int(total),
+        }
+    row = con.execute(
+        """
+        select
+          count(*) as total,
+          coalesce(sum(
+            case
+              when o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1 then 1
+              else 0
+            end
+          ),0) as local_only
+        from ZREMCDOBJECT o
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where o.Z_ENT=? and coalesce(o.ZMARKEDFORDELETION,0)=0
+        """,
+        (IMAGE_ATTACHMENT_ENT,),
+    ).fetchone()
+    return {
+        "mobile_visible_image_attachments": int(row["total"] - row["local_only"]),
+        "local_only_image_attachments": int(row["local_only"]),
+        "unverified_image_attachments": 0,
+    }
+
+
 def active_attachment_rows(
     con: sqlite3.Connection,
     reminder_pk: int,
@@ -652,25 +832,172 @@ def active_attachment_rows(
 ) -> list[dict[str, Any]]:
     params: list[Any] = [reminder_pk, IMAGE_ATTACHMENT_ENT, URL_ATTACHMENT_ENT]
     where = [
-        "ZREMINDER2=?",
-        "Z_ENT in (?,?)",
-        "coalesce(ZMARKEDFORDELETION,0)=0",
+        "o.ZREMINDER2=?",
+        "o.Z_ENT in (?,?)",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
     ]
     if attachment_ent is not None:
-        where.append("Z_ENT=?")
+        where.append("o.Z_ENT=?")
         params.append(attachment_ent)
+    sync_select = attachment_sync_select(con)
     rows = con.execute(
         f"""
-        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
-               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
-               ZMARKEDFORDELETION
-        from ZREMCDOBJECT
+        select o.Z_PK,o.Z_ENT,o.ZCKIDENTIFIER,o.ZCKCLOUDSTATE,o.ZREMINDER2,o.Z_FOK_REMINDER1,
+               o.ZFILENAME,o.ZSHA512SUM,o.ZUTI,o.ZFILESIZE,o.ZWIDTH,o.ZHEIGHT,o.ZURL,o.ZHOSTURL,
+               o.ZMARKEDFORDELETION,
+               {sync_select}
+        from ZREMCDOBJECT o
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
         where {" and ".join(where)}
-        order by Z_FOK_REMINDER1, Z_PK
+        order by o.Z_FOK_REMINDER1, o.Z_PK
         """,
         params,
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def image_attachment_audit_items(
+    con: sqlite3.Connection,
+    *,
+    search: str | None = None,
+    list_name: str | None = None,
+    problems_only: bool = False,
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    params: list[Any] = [IMAGE_ATTACHMENT_ENT]
+    where = [
+        "o.Z_ENT=?",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
+        "coalesce(r.ZMARKEDFORDELETION,0)=0",
+    ]
+    if search:
+        where.append("(r.ZTITLE like ? or coalesce(r.ZNOTES,'') like ?)")
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+    if list_name:
+        where.append("l.ZNAME=?")
+        params.append(list_name)
+    if problems_only and attachment_sync_capabilities(con)["available"]:
+        where.append("(o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1)")
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "limit ?"
+        params.append(limit)
+    sync_select = attachment_sync_select(con)
+    rows = con.execute(
+        f"""
+        select r.Z_PK as reminder_pk,r.ZCKIDENTIFIER as reminder_id,r.ZTITLE as reminder_title,
+               r.ZACCOUNT as reminder_account,l.ZNAME as list_name,
+               o.Z_PK,o.Z_ENT,o.ZCKIDENTIFIER,o.ZCKCLOUDSTATE,o.ZREMINDER2,o.Z_FOK_REMINDER1,
+               o.ZFILENAME,o.ZSHA512SUM,o.ZUTI,o.ZFILESIZE,o.ZWIDTH,o.ZHEIGHT,o.ZURL,o.ZHOSTURL,
+               o.ZMARKEDFORDELETION,
+               {sync_select}
+        from ZREMCDOBJECT o
+        join ZREMCDREMINDER r on r.Z_PK=o.ZREMINDER2
+        left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where {" and ".join(where)}
+        order by lower(l.ZNAME), lower(r.ZTITLE), o.Z_FOK_REMINDER1, o.Z_PK
+        {limit_sql}
+        """,
+        params,
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    problem_count = 0
+    for row in rows:
+        attachment = attachment_payload(row)
+        mobile_visible = attachment["sync"]["mobile_visible_likely"]
+        problem = mobile_visible is not True
+        if problem:
+            problem_count += 1
+        if problems_only and not problem:
+            continue
+        items.append(
+            {
+                "reminder": {
+                    "pk": row["reminder_pk"],
+                    "id": row["reminder_id"],
+                    "title": row["reminder_title"],
+                    "list": row["list_name"],
+                    "account": row["reminder_account"],
+                },
+                "attachment": attachment,
+                "problem": (
+                    "image_attachment_local_only"
+                    if mobile_visible is False
+                    else "image_attachment_sync_unverifiable"
+                    if mobile_visible is None
+                    else None
+                ),
+                "_row": dict(row),
+            }
+        )
+    return items, problem_count
+
+
+def image_attachment_audit_counts(
+    con: sqlite3.Connection,
+    *,
+    search: str | None = None,
+    list_name: str | None = None,
+) -> dict[str, int]:
+    params: list[Any] = [IMAGE_ATTACHMENT_ENT]
+    where = [
+        "o.Z_ENT=?",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
+        "coalesce(r.ZMARKEDFORDELETION,0)=0",
+    ]
+    if search:
+        where.append("(r.ZTITLE like ? or coalesce(r.ZNOTES,'') like ?)")
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+    if list_name:
+        where.append("l.ZNAME=?")
+        params.append(list_name)
+    capabilities = attachment_sync_capabilities(con)
+    problem_expression = (
+        "(o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1)"
+        if capabilities["available"]
+        else "1"
+    )
+    row = con.execute(
+        f"""
+        select count(*) as total,
+               coalesce(sum(case when {problem_expression} then 1 else 0 end),0) as problems
+        from ZREMCDOBJECT o
+        join ZREMCDREMINDER r on r.Z_PK=o.ZREMINDER2
+        left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where {" and ".join(where)}
+        """,
+        params,
+    ).fetchone()
+    return {"total": int(row["total"]), "problems": int(row["problems"])}
+
+
+def source_paths_for_attachment(attachment: dict[str, Any]) -> list[Path]:
+    sha512 = attachment.get("sha512")
+    if not sha512:
+        return []
+    ext_candidates: list[str] = []
+    filename = attachment.get("filename")
+    if filename and Path(filename).suffix:
+        ext_candidates.append(Path(filename).suffix.lower().lstrip("."))
+    if attachment.get("uti") == "public.jpeg":
+        ext_candidates.extend(["jpg", "jpeg"])
+    if attachment.get("uti") == "public.png":
+        ext_candidates.append("png")
+    ext_candidates.extend(["png", "jpg", "jpeg", "heic"])
+    seen_exts = list(dict.fromkeys(ext for ext in ext_candidates if ext))
+    dirs = sorted(FILES.glob("Account-*/Attachments"))
+    paths: list[Path] = []
+    for directory in dirs:
+        for ext in seen_exts:
+            candidate = directory / f"{sha512}.{ext}"
+            if candidate.exists():
+                paths.append(candidate)
+        paths.extend(sorted(directory.glob(f"{sha512}.*")))
+    return list(dict.fromkeys(paths))
 
 
 def resolve_attachment_selection(
@@ -724,13 +1051,17 @@ def attachment_dir_for_account(account_uuid: str | None = None) -> Path:
 
 
 def image_size(path: Path) -> tuple[int, int]:
-    proc = subprocess.run(
-        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError("Image metadata inspection timed out", image=path.name) from exc
     if proc.returncode != 0:
         raise AdapterError(proc.stderr.strip() or "Unable to read image dimensions")
     width = height = None
@@ -743,6 +1074,174 @@ def image_size(path: Path) -> tuple[int, int]:
     if width is None or height is None:
         raise AdapterError("Unable to parse image dimensions")
     return width, height
+
+
+def reminderkit_attach_helper() -> Path:
+    source = Path(__file__).resolve().with_name("remkit_attach_image.m")
+    if not source.exists():
+        raise AdapterError(f"ReminderKit helper source not found: {source.name}")
+    helper = CACHE_DIR / "remkit_attach_image"
+    ensure_private_dir(CACHE_DIR)
+    lock_path = CACHE_DIR / "remkit_attach_image.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        needs_build = (
+            not helper.exists()
+            or not os.access(helper, os.X_OK)
+            or source.stat().st_mtime > helper.stat().st_mtime
+        )
+        if not needs_build:
+            return helper
+        clang = shutil.which("clang")
+        if not clang:
+            raise AdapterError("clang is required to build the ReminderKit attachment helper")
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=".remkit_attach_image.",
+            dir=CACHE_DIR,
+            delete=False,
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            try:
+                proc = subprocess.run(
+                    [
+                        clang,
+                        "-x",
+                        "objective-c",
+                        "-fobjc-arc",
+                        "-framework",
+                        "Foundation",
+                        "-framework",
+                        "AppKit",
+                        "-o",
+                        str(temp_path),
+                        str(source),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("ReminderKit helper build timed out") from exc
+            if proc.returncode != 0:
+                raise AdapterError(
+                    (proc.stderr or proc.stdout).strip()
+                    or "Failed to build ReminderKit attachment helper"
+                )
+            temp_path.chmod(0o700)
+            os.replace(temp_path, helper)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return helper
+
+
+def attach_image_reminderkit_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    image: Path,
+) -> dict[str, Any]:
+    if not image.exists():
+        raise AdapterError(f"Image not found: {image.name}")
+    before_rows = active_attachment_rows(
+        con,
+        reminder["Z_PK"],
+        attachment_ent=IMAGE_ATTACHMENT_ENT,
+    )
+    before_ids = {row["ZCKIDENTIFIER"] for row in before_rows}
+    helper = reminderkit_attach_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), reminder["ZCKIDENTIFIER"], str(image)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError("ReminderKit image attachment timed out", image=image.name) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(f"ReminderKit helper returned invalid JSON: {raw or proc.stderr.strip()}") from exc
+    if proc.returncode != 0 or not payload.get("ok"):
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = payload.get("error") or "ReminderKit image attachment failed"
+        if detail:
+            message = f"{message}: {detail}"
+        raise AdapterError(message)
+
+    db_row = con.execute("pragma database_list").fetchone()
+    db_path = Path(db_row["file"] if isinstance(db_row, sqlite3.Row) else db_row[2])
+    attachment_id = payload.get("attachment_id")
+    wanted = normalize_uuid(str(attachment_id)) if attachment_id else None
+    if wanted in before_ids:
+        raise AdapterError(
+            "ReminderKit helper returned an attachment id that existed before the operation",
+            attachment_id=wanted,
+        )
+    selected: dict[str, Any] | None = None
+    deadline = time.time() + ATTACHMENT_VERIFY_TIMEOUT_SECONDS
+    while True:
+        fresh = connect(db_path)
+        try:
+            rows = active_attachment_rows(fresh, reminder["Z_PK"], attachment_ent=IMAGE_ATTACHMENT_ENT)
+        finally:
+            fresh.close()
+        if wanted:
+            selected = next((row for row in rows if row["ZCKIDENTIFIER"] == wanted), None)
+        else:
+            new_rows = [row for row in rows if row["ZCKIDENTIFIER"] not in before_ids]
+            if len(new_rows) == 1:
+                selected = new_rows[0]
+            elif len(new_rows) > 1:
+                raise AdapterError(
+                    "ReminderKit helper created multiple image attachments; verification is ambiguous",
+                    attachment_ids=[row["ZCKIDENTIFIER"] for row in new_rows],
+                )
+            else:
+                raise AdapterError(
+                    "ReminderKit helper reported success without an attachment id or a new database row"
+                )
+        if selected is not None:
+            sync = attachment_payload(selected).get("sync", {})
+            if sync.get("mobile_visible_likely") is True:
+                break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    if selected is None:
+        raise AdapterError(
+            "ReminderKit helper reported success but its image attachment id was not found",
+            attachment_id=attachment_id,
+        )
+
+    attachment = attachment_payload(selected)
+    if attachment["sync"].get("mobile_visible_likely") is not True:
+        raise AttachmentVerificationError(
+            "Image attachment was created but mobile visibility could not be verified",
+            row=selected,
+            partial_failure=True,
+            attachment=attachment,
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
+    return {
+        "attached": True,
+        "backend": "reminderkit",
+        "attachment": attachment,
+        "helper": payload,
+        "sync": attachment.get("sync", {}),
+        "_row": selected,
+    }
 
 
 def membership_map(raw: str | bytes | None) -> dict[str, str]:
@@ -1136,26 +1635,40 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
 
 
 def write_cache_file(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    ensure_private_dir(path.parent)
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    tmp = Path(temp_handle.name)
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
+        with temp_handle as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
             fh.write("\n")
-        tmp.replace(path)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+        path.chmod(0o600)
     except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+        tmp.unlink(missing_ok=True)
         raise
 
 
 def load_cache_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise AdapterError(f"Cache not found: {path}. Run cache_rebuild first.")
-    with path.open("r", encoding="utf-8") as fh:
-        payload = json.load(fh)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            f"Cache contains invalid JSON: {path}. Run cache_rebuild."
+        ) from exc
     if not isinstance(payload, dict):
         raise AdapterError(f"Cache is not a JSON object: {path}")
     if payload.get("version") != CACHE_VERSION:
@@ -1257,6 +1770,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
                 missing = sorted(REQUIRED_TABLES - table_names(con))
                 item = {"path": str(db), "usable": not missing, "missing_tables": missing}
                 if not missing:
+                    item["attachment_sync_capabilities"] = attachment_sync_capabilities(con)
                     item["counts"] = db_counts(db)
                 dbs.append(item)
             finally:
@@ -1276,20 +1790,54 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_backup_store(args: argparse.Namespace) -> int:
+def create_store_backup(output: str | None = None) -> dict[str, Any]:
+    if not GROUP.exists():
+        raise AdapterError("Reminders group container does not exist")
     default_dir = APP_SUPPORT / "backups"
-    default_dir.mkdir(parents=True, exist_ok=True)
-    out = Path(args.output).expanduser() if args.output else default_dir / f"reminders-container-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.tgz"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(out, "w:gz") as tar:
-        tar.add(GROUP, arcname="Container_v1")
-    log_action("backup_store", {"path": str(out)})
-    json_out({"ok": True, "backup": str(out), "bytes": out.stat().st_size})
+    ensure_private_dir(default_dir)
+    out = (
+        Path(output).expanduser()
+        if output
+        else default_dir / f"reminders-container-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.tgz"
+    )
+    out = out.resolve()
+    group = GROUP.resolve()
+    if out == group or group in out.parents:
+        raise AdapterError("Backup output must be outside the Reminders group container")
+    ensure_private_dir(out.parent)
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix=f".{out.name}.",
+        suffix=".tmp",
+        dir=out.parent,
+        delete=False,
+    )
+    temp_path = Path(temp_handle.name)
+    temp_handle.close()
+    try:
+        with tarfile.open(temp_path, "w:gz") as tar:
+            tar.add(group, arcname="Container_v1")
+        temp_path.chmod(0o600)
+        os.replace(temp_path, out)
+        out.chmod(0o600)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return {
+        "backup": str(out),
+        "bytes": out.stat().st_size,
+        "consistency": "best_effort_live_container",
+        "warning": "Reminders may write while this archive is created; verify the backup before relying on it for recovery.",
+    }
+
+
+def cmd_backup_store(args: argparse.Namespace) -> int:
+    result = create_store_backup(args.output)
+    log_action("backup_store", {"path": result["backup"]})
+    json_out({"ok": True, **result})
     return 0
 
 
 def cmd_list_lists(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         rows = con.execute(
@@ -1311,7 +1859,7 @@ def cmd_list_lists(args: argparse.Namespace) -> int:
 
 
 def cmd_list_sections(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         params: list[Any] = []
@@ -1336,7 +1884,7 @@ def cmd_list_sections(args: argparse.Namespace) -> int:
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         lists = [dict(row) for row in con.execute(
@@ -1395,7 +1943,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_search_reminders(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         pattern = f"%{args.query.lower()}%"
@@ -1434,7 +1982,7 @@ def cmd_search_reminders(args: argparse.Namespace) -> int:
 
 
 def cmd_read_reminder(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         row = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -1445,7 +1993,7 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
 
 
 def cmd_list_tags(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         params: list[Any] = []
@@ -1485,7 +2033,7 @@ def cmd_list_tags(args: argparse.Namespace) -> int:
 
 
 def cmd_add_tag(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     tag = normalized_tag_name(args.tag)
     con = connect(db)
     try:
@@ -1575,7 +2123,7 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
 
 
 def cmd_remove_tag(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     tag = normalized_tag_name(args.tag)
     con = connect(db)
     try:
@@ -1619,7 +2167,7 @@ def cmd_remove_tag(args: argparse.Namespace) -> int:
 
 
 def cmd_cleanup_tags(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=args.apply)
     con = connect(db)
     try:
         params: list[Any] = [TAG_OBJECT_ENT]
@@ -1670,7 +2218,7 @@ def cmd_cleanup_tags(args: argparse.Namespace) -> int:
 
 
 def cmd_create_list(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
         existing = con.execute(
@@ -1719,7 +2267,7 @@ end run
 
 def cmd_create_reminder(args: argparse.Namespace) -> int:
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
             list_row = find_list(con, name=args.list)
@@ -1896,7 +2444,7 @@ end run
 
 def cmd_update_reminder(args: argparse.Namespace) -> int:
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2002,7 +2550,7 @@ end run
 
 def cmd_complete_reminder(args: argparse.Namespace) -> int:
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2057,7 +2605,7 @@ end run
 
 def cmd_delete_reminder(args: argparse.Namespace) -> int:
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2129,7 +2677,7 @@ end run
 
 
 def cmd_create_section(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
         list_row = find_list(con, name=args.list, list_id=args.list_id)
@@ -2206,7 +2754,7 @@ def cmd_create_section(args: argparse.Namespace) -> int:
 
 
 def cmd_move_to_section(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2246,7 +2794,7 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
 
 def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image: Path) -> dict[str, Any]:
     if not image.exists():
-        raise AdapterError(f"Image not found: {image}")
+        raise AdapterError(f"Image not found: {image.name}")
     data = image.read_bytes()
     sha512 = hashlib.sha512(data).hexdigest()
     ext = image.suffix.lower().lstrip(".") or "png"
@@ -2268,76 +2816,89 @@ def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image
         return {"attached": False, "reason": "already_attached", "attachment": attachment_payload(existing)}
     attach_dir = attachment_dir_for_account()
     stored = attach_dir / f"{sha512}.{ext}"
+    stored_created = False
     if not stored.exists():
         shutil.copy2(image, stored)
-    now = core_now()
-    object_id = str(uuid.uuid4()).upper()
-    display_filename = f"{object_id}-codex.{ext}"
-    object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
-    cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-    sort_order = con.execute(
-        """
-        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-        from ZREMCDOBJECT
-        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-        """,
-        (reminder["Z_PK"],),
-    ).fetchone()[0]
-    con.execute(
-        """
-        insert into ZREMCDOBJECT (
-          Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
-          ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
-          ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
-          ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
-        ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            object_pk,
-            IMAGE_ATTACHMENT_ENT,
-            reminder["ZACCOUNT"],
-            cloud_pk,
-            reminder["Z_PK"],
-            sort_order,
-            len(data),
-            height,
-            width,
-            uti,
-            display_filename,
-            sha512,
-            sqlite3.Binary(uuid_blob(object_id)),
-            object_id,
-        ),
-    )
-    con.execute(
-        """
-        insert into ZREMCKCLOUDSTATE (
-          Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
-          ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
-        ) values (?,45,1,1,0,?,?,?)
-        """,
-        (cloud_pk, object_pk, IMAGE_ATTACHMENT_ENT, now),
-    )
-    touch_reminder(con, reminder, now)
-    update_primary_key(con, 13, object_pk)
-    update_primary_key(con, 45, cloud_pk)
-    row = con.execute(
-        """
-        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
-               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
-               ZMARKEDFORDELETION
-        from ZREMCDOBJECT
-        where Z_PK=?
-        """,
-        (object_pk,),
-    ).fetchone()
-    return {
-        "attached": True,
-        "attachment": attachment_payload(row),
-        "stored_path": str(stored),
-        "width": width,
-        "height": height,
-    }
+        stored_created = True
+    try:
+        now = core_now()
+        object_id = str(uuid.uuid4()).upper()
+        display_filename = f"{object_id}-codex.{ext}"
+        object_pk = con.execute(
+            "select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'"
+        ).fetchone()[0]
+        cloud_pk = con.execute(
+            "select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'"
+        ).fetchone()[0]
+        sort_order = con.execute(
+            """
+            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"],),
+        ).fetchone()[0]
+        con.execute(
+            """
+            insert into ZREMCDOBJECT (
+              Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
+              ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
+              ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
+              ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
+            ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                object_pk,
+                IMAGE_ATTACHMENT_ENT,
+                reminder["ZACCOUNT"],
+                cloud_pk,
+                reminder["Z_PK"],
+                sort_order,
+                len(data),
+                height,
+                width,
+                uti,
+                display_filename,
+                sha512,
+                sqlite3.Binary(uuid_blob(object_id)),
+                object_id,
+            ),
+        )
+        con.execute(
+            """
+            insert into ZREMCKCLOUDSTATE (
+              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+            ) values (?,45,1,1,0,?,?,?)
+            """,
+            (cloud_pk, object_pk, IMAGE_ATTACHMENT_ENT, now),
+        )
+        touch_reminder(con, reminder, now)
+        update_primary_key(con, 13, object_pk)
+        update_primary_key(con, 45, cloud_pk)
+        row = con.execute(
+            """
+            select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+                   ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+                   ZMARKEDFORDELETION
+            from ZREMCDOBJECT
+            where Z_PK=?
+            """,
+            (object_pk,),
+        ).fetchone()
+        return {
+            "attached": True,
+            "attachment": attachment_payload(row),
+            "stored_file": stored.name,
+            "_stored_path": str(stored),
+            "_stored_file_created": stored_created,
+            "width": width,
+            "height": height,
+        }
+    except Exception:
+        if stored_created:
+            stored.unlink(missing_ok=True)
+        raise
 
 
 def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: str) -> dict[str, Any]:
@@ -2444,17 +3005,69 @@ def soft_delete_attachment_record(
     return attachment_payload({**attachment, "ZMARKEDFORDELETION": 1})
 
 
+def compensate_new_attachment(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not result:
+        return None
+    row = result.get("_row")
+    if not isinstance(row, dict):
+        return None
+    con.rollback()
+    con.execute("begin immediate")
+    try:
+        deleted = soft_delete_attachment_record(con, reminder, row)
+        con.commit()
+        return deleted
+    except Exception:
+        con.rollback()
+        raise
+
+
 def cmd_attach_image(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     image = Path(args.image).expanduser().resolve()
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        con.execute("begin immediate")
-        result = attach_image_record(con, reminder, image)
-        con.commit()
+        if args.backend == "reminderkit":
+            result = attach_image_reminderkit_record(con, reminder, image)
+        else:
+            con.execute("begin immediate")
+            result = attach_image_record(con, reminder, image)
+            try:
+                con.commit()
+            except Exception:
+                con.rollback()
+                if result.get("_stored_file_created") and result.get("_stored_path"):
+                    Path(result["_stored_path"]).unlink(missing_ok=True)
+                raise
+            result["backend"] = "db"
+            result["sync"] = {
+                "mobile_visible_likely": False,
+                "reason": "sqlite_local_attachment_without_cloudkit_server_record",
+            }
+            result["warning"] = (
+                "This image was attached through the SQLite fallback path. It can render on this Mac, "
+                "but it is not expected to appear on iPhone until a native Reminders/CloudKit attachment path creates a server record."
+            )
         attachment = result["attachment"]
-        log_action("attach_image", {"reminder": reminder["ZCKIDENTIFIER"], "image": str(image), "object": attachment["id"], "stored": result.get("stored_path")})
+        log_action(
+            "attach_image",
+            {
+                "backend": result.get("backend", args.backend),
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "image": image.name,
+                "object": attachment["id"],
+                "stored": result.get("stored_file"),
+                "mobile_visible_likely": result.get("sync", {}).get("mobile_visible_likely"),
+            },
+        )
+        result.pop("_row", None)
+        result.pop("_stored_path", None)
+        result.pop("_stored_file_created", None)
         json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], **result})
         return 0
     except Exception:
@@ -2465,7 +3078,7 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
 
 
 def cmd_attach_url(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     url = normalized_url(args.url)
     con = connect(db)
     try:
@@ -2485,7 +3098,7 @@ def cmd_attach_url(args: argparse.Namespace) -> int:
 
 
 def cmd_list_attachments(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2497,8 +3110,205 @@ def cmd_list_attachments(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cmd_audit_attachments(args: argparse.Namespace) -> int:
+    db = resolve_database(args.db)
+    con = connect(db)
+    try:
+        counts = image_attachment_audit_counts(
+            con,
+            search=args.search,
+            list_name=args.list,
+        )
+        items, _ = image_attachment_audit_items(
+            con,
+            search=args.search,
+            list_name=args.list,
+            problems_only=args.problems_only,
+            limit=args.limit,
+        )
+        total_matching = counts["problems"] if args.problems_only else counts["total"]
+        for item in items:
+            item.pop("_row", None)
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "scope": {"search": args.search, "list": args.list},
+                "counts": {
+                    "image_attachments": counts["total"],
+                    "local_only_or_not_mobile_visible": counts["problems"],
+                    "returned": len(items),
+                },
+                "limit": args.limit,
+                "truncated": total_matching > len(items),
+                "items": items,
+            }
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def cmd_repair_attachments(args: argparse.Namespace) -> int:
+    db = resolve_database(args.db, write=args.apply)
+    con = connect(db)
+    try:
+        capabilities = attachment_sync_capabilities(con)
+        if args.apply and not capabilities["available"]:
+            raise AdapterError(
+                "Attachment repair apply is unavailable because sync verification columns are missing",
+                missing_columns=capabilities["missing_columns"],
+            )
+        counts = image_attachment_audit_counts(
+            con,
+            search=args.search,
+            list_name=args.list,
+        )
+        problem_items, _ = image_attachment_audit_items(
+            con,
+            search=args.search,
+            list_name=args.list,
+            problems_only=True,
+            limit=args.limit,
+        )
+        problem_count = counts["problems"]
+        selected = problem_items
+        candidates: list[dict[str, Any]] = []
+        for item in selected:
+            attachment = item["attachment"]
+            sources = source_paths_for_attachment(attachment)
+            public_item = {
+                "reminder": item["reminder"],
+                "attachment": attachment,
+                "problem": item["problem"],
+                "source_files": [path.name for path in sources],
+                "repairable": bool(sources),
+            }
+            candidates.append(public_item)
+
+        if not args.apply:
+            json_out(
+                {
+                    "ok": True,
+                    "db": str(db),
+                    "dry_run": True,
+                    "scope": {"search": args.search, "list": args.list, "limit": args.limit},
+                    "counts": {
+                        "local_only_or_not_mobile_visible": problem_count,
+                        "selected": len(selected),
+                        "repairable": sum(1 for item in candidates if item["repairable"]),
+                    },
+                    "truncated": problem_count > len(selected),
+                    "candidates": candidates,
+                    "next_step": "Run again with --apply to back up the Reminders container and repair selected image attachments.",
+                }
+            )
+            return 0
+
+        backup = None
+        if not args.no_backup:
+            backup = create_store_backup()
+            log_action("backup_store", {"path": backup["backup"], "reason": "repair_attachments"})
+
+        repaired: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for item in selected:
+            attachment = item["attachment"]
+            sources = source_paths_for_attachment(attachment)
+            if not sources:
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "error": "source_image_file_not_found",
+                    }
+                )
+                continue
+            source = sources[0]
+            reminder = None
+            new_result = None
+            item_committed = False
+            try:
+                reminder = find_reminder(con, reminder_id=item["reminder"]["id"], title=None, list_name=None)
+                try:
+                    new_result = attach_image_reminderkit_record(con, reminder, source)
+                except AttachmentVerificationError as attach_exc:
+                    new_result = attach_exc.compensation_result()
+                    raise
+                con.execute("begin immediate")
+                deleted = soft_delete_attachment_record(con, reminder, item["_row"])
+                con.commit()
+                item_committed = True
+                result = {
+                    "reminder": item["reminder"],
+                    "old_attachment": attachment,
+                    "new_attachment": new_result["attachment"],
+                    "source_file": source.name,
+                    "deleted_state": deleted,
+                    "sync": new_result.get("sync", {}),
+                }
+                log_action(
+                    "repair_image_attachment",
+                    {
+                        "reminder": item["reminder"]["id"],
+                        "old_attachment": attachment["id"],
+                        "new_attachment": new_result["attachment"]["id"],
+                        "source": source.name,
+                        "mobile_visible_likely": new_result.get("sync", {}).get("mobile_visible_likely"),
+                    },
+                )
+                repaired.append(result)
+            except Exception as exc:
+                con.rollback()
+                compensation = None
+                compensation_error = None
+                if not item_committed and reminder is not None and new_result is not None:
+                    try:
+                        compensation = compensate_new_attachment(con, reminder, new_result)
+                    except Exception as cleanup_exc:
+                        compensation_error = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "source_file": source.name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "partial_failure": new_result is not None,
+                        "new_attachment_id": (
+                            new_result.get("attachment", {}).get("id")
+                            if new_result is not None
+                            else None
+                        ),
+                        "replacement_committed": item_committed,
+                        "compensated": compensation is not None,
+                        "compensation_error": compensation_error,
+                    }
+                )
+
+        json_out(
+            {
+                "ok": not failed,
+                "db": str(db),
+                "backup": backup,
+                "scope": {"search": args.search, "list": args.list, "limit": args.limit},
+                "counts": {
+                    "local_only_or_not_mobile_visible": problem_count,
+                    "selected": len(selected),
+                    "repaired": len(repaired),
+                    "failed": len(failed),
+                },
+                "truncated": problem_count > len(selected),
+                "repaired": repaired,
+                "failed": failed,
+            }
+        )
+        return 0 if not failed else 1
+    finally:
+        con.close()
+
+
 def cmd_delete_attachment(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -2538,12 +3348,15 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
 
 
 def cmd_replace_attachment(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=True)
     if bool(args.image) == bool(args.url):
         raise AdapterError("replace_attachment requires exactly one of --image or --url")
     replacement_type = "image" if args.image else "url"
     selector_type = args.type or replacement_type
     con = connect(db)
+    reminder = None
+    new_result = None
+    committed = False
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         selected, candidates, reason = resolve_attachment_selection(
@@ -2559,16 +3372,30 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
             json_out({"ok": False, "db": str(db), "error": reason, "candidates": candidates})
             return 1
         old_attachment = attachment_payload(selected)
-        con.execute("begin immediate")
         if args.image:
-            new_result = attach_image_record(con, reminder, Path(args.image).expanduser().resolve())
+            try:
+                new_result = attach_image_reminderkit_record(
+                    con,
+                    reminder,
+                    Path(args.image).expanduser().resolve(),
+                )
+            except AttachmentVerificationError as attach_exc:
+                new_result = attach_exc.compensation_result()
+                raise
+            new_attachment = new_result.get("attachment") or {}
+            if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
+                raise AdapterError("Replacement source is the same as the selected existing attachment")
+            con.execute("begin immediate")
+            deleted = soft_delete_attachment_record(con, reminder, selected)
         else:
+            con.execute("begin immediate")
             new_result = attach_url_record(con, reminder, args.url)
-        new_attachment = new_result.get("attachment") or {}
-        if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
-            raise AdapterError("Replacement source is the same as the selected existing attachment")
-        deleted = soft_delete_attachment_record(con, reminder, selected)
+            new_attachment = new_result.get("attachment") or {}
+            if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
+                raise AdapterError("Replacement source is the same as the selected existing attachment")
+            deleted = soft_delete_attachment_record(con, reminder, selected)
         con.commit()
+        committed = True
         log_action(
             "replace_attachment",
             {
@@ -2577,6 +3404,7 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
                 "new": new_result.get("attachment"),
             },
         )
+        new_result.pop("_row", None)
         json_out(
             {
                 "ok": True,
@@ -2589,8 +3417,26 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
             }
         )
         return 0
-    except Exception:
+    except Exception as exc:
         con.rollback()
+        if args.image and not committed and reminder is not None and new_result is not None:
+            try:
+                compensated = compensate_new_attachment(con, reminder, new_result)
+            except Exception as cleanup_exc:
+                raise AdapterError(
+                    "Image replacement failed and compensating cleanup also failed",
+                    partial_failure=True,
+                    original_error=f"{type(exc).__name__}: {exc}",
+                    new_attachment_id=new_result.get("attachment", {}).get("id"),
+                    compensation_error=f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                ) from exc
+            raise AdapterError(
+                "Image replacement failed after the new attachment was created",
+                partial_failure=True,
+                original_error=f"{type(exc).__name__}: {exc}",
+                new_attachment_id=new_result.get("attachment", {}).get("id"),
+                compensated=compensated is not None,
+            ) from exc
         raise
     finally:
         con.close()
@@ -2601,7 +3447,7 @@ def cache_path_from_args(args: argparse.Namespace) -> Path:
 
 
 def cmd_cache_rebuild(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     cache_path = cache_path_from_args(args)
     con = connect(db)
     try:
@@ -2681,8 +3527,8 @@ def add_cache_query_args(parser: argparse.ArgumentParser, include_positional_que
     parser.add_argument("--section")
     parser.add_argument("--include-completed", action="store_true")
     parser.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    parser.add_argument("--priority", type=int)
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--priority", type=reminder_priority)
+    parser.add_argument("--limit", type=positive_int, default=20)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2726,7 +3572,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_db(p)
     p.add_argument("--list")
     p.add_argument("--include-completed", action="store_true")
-    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--limit", type=positive_int, default=1000)
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("search_reminders")
@@ -2734,7 +3580,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query")
     p.add_argument("--list")
     p.add_argument("--include-completed", action="store_true")
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--limit", type=positive_int, default=20)
     p.set_defaults(func=cmd_search_reminders)
 
     p = sub.add_parser("read_reminder")
@@ -2747,7 +3593,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list_tags")
     add_common_db(p)
     p.add_argument("--query")
-    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_tags)
 
     p = sub.add_parser("add_tag")
@@ -2771,7 +3617,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag")
     p.add_argument("--prefix")
     p.add_argument("--apply", action="store_true")
-    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_cleanup_tags)
 
     p = sub.add_parser("create_list")
@@ -2791,7 +3637,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remind-at")
     p.add_argument("--all-day-due-date")
     p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    p.add_argument("--priority", type=int)
+    p.add_argument("--priority", type=reminder_priority)
     p.set_defaults(func=cmd_create_reminder)
 
     p = sub.add_parser("update_reminder")
@@ -2803,7 +3649,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--new-title")
     p.add_argument("--notes")
     p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    p.add_argument("--priority", type=int)
+    p.add_argument("--priority", type=reminder_priority)
     p.add_argument("--due-at")
     p.add_argument("--remind-at")
     p.add_argument("--all-day-due-date")
@@ -2820,7 +3666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("delete_reminder")
     add_common_db(p)
-    p.add_argument("--backend", choices=["db", "applescript"], default="db")
+    p.add_argument("--backend", choices=["db", "applescript"], default="applescript")
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")
@@ -2848,6 +3694,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--image", required=True)
+    p.add_argument("--backend", choices=["reminderkit", "db"], default="reminderkit")
     p.set_defaults(func=cmd_attach_image)
 
     p = sub.add_parser("attach_url")
@@ -2865,6 +3712,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--type", choices=["image", "url"])
     p.set_defaults(func=cmd_list_attachments)
+
+    p = sub.add_parser("audit_attachments")
+    add_common_db(p)
+    p.add_argument("--search")
+    p.add_argument("--list")
+    p.add_argument("--problems-only", action="store_true")
+    p.add_argument("--limit", type=positive_int, default=100)
+    p.set_defaults(func=cmd_audit_attachments)
+
+    p = sub.add_parser("repair_attachments")
+    add_common_db(p)
+    p.add_argument("--search")
+    p.add_argument("--list")
+    p.add_argument("--limit", type=positive_int, default=50)
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--no-backup", action="store_true")
+    p.set_defaults(func=cmd_repair_attachments)
 
     p = sub.add_parser("delete_attachment")
     add_common_db(p)
@@ -2901,7 +3765,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except AdapterError as exc:
-        return fail(str(exc))
+        return fail(str(exc), **exc.details)
     except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
 

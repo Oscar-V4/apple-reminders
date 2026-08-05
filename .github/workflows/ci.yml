@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run adapter tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests/test_reminders_adapter.py
+      - name: Compile Python sources
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/reminders_adapter.py scripts/reminders_doctor.py scripts/validate_minis_export.py
+      - name: Validate portable Minis export
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_minis_export.py
+      - name: Check ReminderKit helper syntax
+        run: clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit -fsyntax-only scripts/remkit_attach_image.m

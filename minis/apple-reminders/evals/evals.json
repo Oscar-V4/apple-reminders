@@ -1,0 +1,101 @@
+{
+  "skill_name": "apple-reminders",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "오늘 할 일 브리핑해줘. 지난 항목, 오늘 마감, 이번 주 예정, 기한 없는 항목을 나눠서 보여줘.",
+      "expected_output": "Uses a bounded incomplete-reminder read, states the local date and timezone, groups items into the four requested buckets, treats this week as through Sunday, caps no-due-date output, and reports truncation without exposing unrelated notes.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The response states the local date/timezone basis and uses only bounded read commands",
+          "type": "contains"
+        },
+        {
+          "text": "The response separates overdue, due today, later this week, and no due date",
+          "type": "contains"
+        },
+        {
+          "text": "No-due-date output is capped at 20 and any omitted or truncated count is reported",
+          "type": "contains"
+        },
+        {
+          "text": "Unrelated notes and raw reminder JSON are not exposed",
+          "type": "contains"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "쇼핑 목록에 우유 사기를 오늘 저녁 7시로 추가해줘.",
+      "expected_output": "Creates one reminder in the Shopping list with an explicit local ISO due time, then reads back the affected scope and reports the created reminder ID.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Uses apple-reminders create with title, list, and due time",
+          "type": "contains"
+        },
+        {
+          "text": "Verifies the created reminder with a follow-up read",
+          "type": "contains"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "치과 예약 미리알림 지워줘.",
+      "expected_output": "Lists a bounded active scope first, refuses to guess when duplicate titles exist, deletes only by one resolved reminder ID, and verifies that exact item no longer appears as active.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The target is resolved from current list output before delete",
+          "type": "contains"
+        },
+        {
+          "text": "No title-only or bulk guess is used for deletion",
+          "type": "contains"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "이 스크린샷을 취업캠프 준비 미리알림에 첨부해줘.",
+      "expected_output": "Explains that the built-in Minis reminder command does not support attachments and does not fabricate an attach command or claim success.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "The response states that reminder attachments are unsupported",
+          "type": "contains"
+        },
+        {
+          "text": "attach_image",
+          "type": "not_contains"
+        },
+        {
+          "text": "osascript",
+          "type": "not_contains"
+        },
+        {
+          "text": "The response suggests a feature request or supported product path",
+          "type": "contains"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "프로젝트 제출 미리알림의 제목만 '프로젝트 최종 제출'로 바꿔줘. 날짜랑 메모는 그대로 둬.",
+      "expected_output": "Reads current candidates, resolves one reminder ID, updates only the title, preserves due date and notes, and verifies the changed title.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Only the requested title field is changed",
+          "type": "contains"
+        },
+        {
+          "text": "The response includes a post-update verification read",
+          "type": "contains"
+        }
+      ]
+    }
+  ]
+}

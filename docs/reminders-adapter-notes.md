@@ -28,12 +28,16 @@ Observed Core Data entities:
 - `REMCDURLAttachment`
 - `REMCKCloudState`
 
-Image attachment proof:
+Image attachment proof, revised after iPhone testing:
 
-- Copy image file into the account attachment folder using its SHA512 digest as filename.
-- Insert a `REMCDImageAttachment` row linked to the reminder.
-- Insert/update related `REMCKCloudState`.
-- Restart/read Reminders and verify native thumbnail display.
+- Copying an image file into the account attachment folder, inserting a `REMCDImageAttachment` row, and inserting/updating `REMCKCloudState` can make the image render on the Mac.
+- That DB-only path is not sufficient for iPhone visibility. The local row can have no `ZCKSERVERRECORDDATA`, no `ZINCLOUD=1`, and no synced local version, which leaves the attachment Mac-local in practice.
+- The working mobile-visible path uses private ReminderKit classes (`REMStore`, `REMSaveRequest`, `REMReminderAttachmentContextChangeItem`, and `REMImageAttachment`) through the local `remkit_attach_image.m` helper.
+- `attach_image` defaults to that ReminderKit backend, then verifies `mobile_visible_likely` by reading back CloudKit evidence from the Reminders store.
+- Helper success is not enough: the adapter rejects pre-existing or ambiguous rows and reports partial failure if mobile-visible evidence does not arrive within the bounded verification window.
+- `replace_attachment --image` uses the same ReminderKit backend for the new image, then soft-deletes the selected old attachment. If that second step fails, it attempts a compensating soft-delete of the new attachment and never reports full success.
+- `attach_image --backend db` remains a fallback/diagnostic path only. Treat those rows as local-only unless `audit_attachments` proves otherwise.
+- `repair_attachments` finds local-only image rows, locates the source file by SHA512, reattaches through ReminderKit, and soft-deletes the older local-only attachment object after a backup.
 
 Section proof:
 
@@ -80,7 +84,7 @@ Cache commands:
 
 The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, tag names/counts, completion, priority, flagged state, due/display/completion/modified timestamps, image and URL attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
 
-Supported safe v1 private writes include sections, image attachments, URL attachments, tag assignment writes, and attachment soft-delete/replacement. Unsupported writes as of this note: urgent alerts, location alerts, and message-when-messaging alerts. These surfaces have private data shapes and should not be exposed until verified separately.
+Supported safe v1 private writes include sections, mobile-visible image attachments through ReminderKit, URL attachments, tag assignment writes, attachment soft-delete/replacement, and local-only image attachment repair. Unsupported writes as of this note: urgent alerts, location alerts, and message-when-messaging alerts. These surfaces have private data shapes and should not be exposed until verified separately.
 
 Cache searches do not search note bodies because the cache does not keep them. Use `search_reminders` when full note text must be searched from the source database.
 
@@ -88,7 +92,8 @@ Cache searches do not search note bodies because the cache does not keep them. U
 
 - Always run a schema doctor before private writes.
 - Always back up the Reminders container before experiments or broad changes.
+- Treat container archives as best-effort snapshots of a live store and verify them before relying on recovery.
 - Keep transactions narrow.
 - Verify every write by reading back through the app state or database.
 - For reminder title/body writes, prefer AppleScript or the adapter's AppleScript text-sync post-write, not a DB-only write.
-- Treat private-store writes as local-first until iCloud behavior is tested more deeply.
+- Treat private-store writes as local-first until iCloud behavior is tested more deeply. For image attachments specifically, do not report success for user-facing capture unless the read-back shows CloudKit/mobile visibility evidence.

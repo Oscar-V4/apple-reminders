@@ -2,13 +2,15 @@
 
 ## Status
 
-Accepted.
+Accepted, amended by 0008 for image attachments.
 
 ## Decision
 
-Use direct Reminders database writes as the primary backend for local write operations.
+Use direct Reminders database writes as the primary backend for local write operations except image attachments and reminder deletion.
 
-AppleScript remains a fallback, not the default write path.
+AppleScript remains a fallback for most fields. Reminder deletion defaults to AppleScript so it follows native Reminders deletion and Recently Deleted behavior; the DB soft-delete backend is diagnostic/recovery-only.
+
+Image attachments are no longer DB-first because DB-only image rows can render on macOS while failing to appear on iPhone. See 0008.
 
 ## Rationale
 
@@ -24,16 +26,16 @@ DB-first writes may cover:
 - title and notes updates
 - priority and flag updates
 - completion
-- soft/native-style deletion
+- diagnostic soft-delete fallback
 - section creation
 - section membership
-- image attachment insertion
+- image attachment fallback/diagnostics only
 
 ## Hard Rule
 
 DB-first does not mean hard delete.
 
-Deletion must preserve Reminders' recovery model by reproducing native soft-delete semantics, such as marking a reminder for deletion and removing it from its list, instead of removing database rows.
+Deletion must preserve Reminders' recovery model. Use native AppleScript deletion by default. If the explicit diagnostic DB backend is used, it may only reproduce native soft-delete state; it must never remove database rows.
 
 ## Fallbacks
 
