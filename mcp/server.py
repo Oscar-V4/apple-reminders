@@ -25,6 +25,19 @@ from pathlib import Path
 from typing import Any
 
 
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from receipt_contract import (  # noqa: E402
+    FAILURE_RECEIPT_STATUSES,
+    RECEIPT_OBJECT_FIELDS as CONTRACT_RECEIPT_OBJECT_FIELDS,
+    SUCCESS_RECEIPT_STATUSES,
+    adapter_receipt_error,
+)
+
+
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
 SERVER_VERSION = "0.2.0"
@@ -35,7 +48,6 @@ SUPPORTED_PROTOCOL_VERSIONS = {
     "2024-11-05",
 }
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_SCHEMA_PATH = PLUGIN_ROOT / "schemas" / "mcp-tools.json"
 DEFAULT_ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 DEFAULT_EVENTKIT_BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
@@ -280,17 +292,9 @@ MUTATION_TOOLS = {
     for tool in TOOLS
     if tool.get("annotations", {}).get("readOnlyHint") is not True
 }
-RECEIPT_STATUSES = {
-    "unchanged",
-    "verified",
-    "committed_verification_pending",
-    "partial_success",
-}
-FAILED_RECEIPT_STATUSES = {
-    "failed_manual_repair_required",
-    "failed_no_mutation",
-}
-RECEIPT_OBJECT_FIELDS = {"target", "after", "verification", "recovery"}
+RECEIPT_STATUSES = set(SUCCESS_RECEIPT_STATUSES)
+FAILED_RECEIPT_STATUSES = set(FAILURE_RECEIPT_STATUSES)
+RECEIPT_OBJECT_FIELDS = set(CONTRACT_RECEIPT_OBJECT_FIELDS)
 RECENT_CALLS: deque[float] = deque()
 SESSION_INITIALIZED = False
 _ADAPTER_MODULE: Any | None = None
@@ -1169,34 +1173,7 @@ def validate_adapter_receipt(
     *,
     expected_operation: str,
 ) -> str | None:
-    required_scalars = {
-        "status": str,
-        "operation": str,
-        "operation_id": str,
-        "backend": str,
-    }
-    status = payload.get("status")
-    if payload.get("ok") is True:
-        if status not in RECEIPT_STATUSES:
-            return f"unsupported successful mutation status: {status}"
-    elif payload.get("ok") is False:
-        if status not in FAILED_RECEIPT_STATUSES:
-            return f"unsupported failed mutation receipt status: {status}"
-    else:
-        return "a mutation receipt must set ok to a boolean"
-    for name, expected_type in required_scalars.items():
-        value = payload.get(name)
-        if not isinstance(value, expected_type) or not value:
-            return f"an adapter mutation receipt requires non-empty {name}"
-    if payload["operation"] != expected_operation:
-        return (
-            "mutation receipt operation mismatch: "
-            f"expected {expected_operation}, received {payload['operation']}"
-        )
-    for name in RECEIPT_OBJECT_FIELDS:
-        if not isinstance(payload.get(name), dict):
-            return f"an adapter mutation receipt requires object field {name}"
-    return None
+    return adapter_receipt_error(payload, expected_operation=expected_operation)
 
 
 def rate_limit_allows_call() -> bool:

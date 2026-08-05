@@ -31,14 +31,14 @@ PACKAGE_ROOT_FILES = {
     Path("PRIVACY.md"),
     Path("README.md"),
     Path("assets/icon.png"),
-    Path("assets/logo-dark.png"),
-    Path("assets/logo.png"),
     Path("mcp/server.py"),
     Path("schemas/mcp-tools.json"),
     Path("scripts/eventkit_bridge.py"),
     Path("scripts/eventkit_bridge_info.plist"),
     Path("scripts/eventkit_bridge_schema.json"),
+    Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
+    Path("scripts/reminders_contracts.py"),
     Path("scripts/reminders_doctor.py"),
     Path("scripts/reminders_eventkit.m"),
     Path("scripts/remkit_attach_image.m"),
@@ -50,8 +50,6 @@ ALLOWED_SKILL_FILES = {
 }
 ALLOWED_IMAGE_FILES = {
     Path("assets/icon.png"),
-    Path("assets/logo-dark.png"),
-    Path("assets/logo.png"),
 }
 FORBIDDEN_FILE_SUFFIXES = {
     ".7z",
@@ -156,7 +154,7 @@ def forbidden_path_reason(relative: Path) -> str | None:
     if forbidden:
         return f"forbidden file type {forbidden[-1]}"
     if relative.suffix.casefold() == ".png" and relative not in ALLOWED_IMAGE_FILES:
-        return "image outside the three reviewed brand assets"
+        return "image outside the reviewed brand asset"
     if lower_name.startswith("reminders-container-backup-"):
         return "Reminders container backup"
     return None

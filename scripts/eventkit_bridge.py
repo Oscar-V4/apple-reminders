@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -25,8 +24,17 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-SCHEMA_VERSION = 1
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from receipt_contract import (  # noqa: E402
+    STABLE_ERROR_CODES as CONTRACT_STABLE_ERROR_CODES,
+    eventkit_mutation_receipt_error,
+)
+
+
+SCHEMA_VERSION = 1
 SOURCE_PATH = SCRIPT_DIR / "reminders_eventkit.m"
 INFO_PLIST_PATH = SCRIPT_DIR / "eventkit_bridge_info.plist"
 SCHEMA_PATH = SCRIPT_DIR / "eventkit_bridge_schema.json"
@@ -67,17 +75,7 @@ EXIT_CODES = {
     "failed_no_mutation": 2,
 }
 
-STABLE_ERROR_CODES = {
-    "ambiguous_scope",
-    "ambiguous_target",
-    "concurrent_modification",
-    "invalid_input",
-    "permission_denied",
-    "schema_mismatch",
-    "sync_pending",
-    "unsupported_capability",
-    "unexpected_error",
-}
+STABLE_ERROR_CODES = set(CONTRACT_STABLE_ERROR_CODES)
 
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
@@ -947,52 +945,14 @@ def validate_response(payload: Any, operation: str) -> dict[str, Any]:
 
 
 def validate_mutation_receipt(payload: Any, operation: str | None = None) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise RuntimeError("Mutation receipt must be an object")
-    expected_operation = operation or payload.get("operation")
-    if expected_operation not in MUTATION_OPERATIONS:
-        raise RuntimeError("Mutation receipt operation is not supported")
-    required = {
-        "ok",
-        "status",
-        "operation",
-        "operation_id",
-        "backend",
-        "target",
-        "after",
-        "verification",
-        "recovery",
-    }
-    if expected_operation != "create_reminder":
-        required.add("before")
-    missing = sorted(required - set(payload))
-    if missing:
-        raise RuntimeError(f"Mutation receipt is missing: {', '.join(missing)}")
-    if payload["operation"] != expected_operation:
-        raise RuntimeError("Mutation receipt operation does not match the request")
-    if payload["backend"] != "eventkit_public_sdk":
-        raise RuntimeError("Mutation receipt backend must be eventkit_public_sdk")
-    try:
-        uuid.UUID(payload["operation_id"])
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise RuntimeError("Mutation receipt operation_id must be a UUID") from exc
-    for key in ("target", "after", "verification", "recovery"):
-        if not isinstance(payload[key], dict):
-            raise RuntimeError(f"Mutation receipt {key} must be an object")
-    if "before" in payload and not isinstance(payload["before"], dict):
-        raise RuntimeError("Mutation receipt before must be an object")
-    if "warnings" in payload and not isinstance(payload["warnings"], list):
-        raise RuntimeError("Mutation receipt warnings must be an array")
-    if payload["status"] == "committed_verification_pending":
-        if payload["verification"].get("state") != "pending":
-            raise RuntimeError("Pending mutation receipt must report verification.state=pending")
-        if not payload.get("warnings"):
-            raise RuntimeError("Pending mutation receipt must include a warning")
-        error = payload.get("error")
-        if not isinstance(error, dict):
-            raise RuntimeError("Pending mutation receipt must include an error object")
-        if error.get("code") not in STABLE_ERROR_CODES or not isinstance(error.get("message"), str):
-            raise RuntimeError("Pending mutation receipt error must include a stable code and message")
+    error = eventkit_mutation_receipt_error(
+        payload,
+        operation=operation,
+        mutation_operations=MUTATION_OPERATIONS,
+        stable_error_codes=STABLE_ERROR_CODES,
+    )
+    if error:
+        raise RuntimeError(error)
     return payload
 
 

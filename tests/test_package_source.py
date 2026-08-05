@@ -17,6 +17,11 @@ import audit_source_package  # noqa: E402
 import build_source_package  # noqa: E402
 
 
+# The slim package is about 701 KB. This leaves roughly 14% headroom, but not
+# enough to silently reintroduce one of the removed, roughly 100 KB icon copies.
+RELEASE_ARCHIVE_SIZE_BUDGET_BYTES = 800_000
+
+
 class SourcePackagePolicyTests(unittest.TestCase):
     def test_real_source_package_allowlist_passes(self) -> None:
         result = audit_source_package.audit_source(ROOT)
@@ -41,6 +46,8 @@ class SourcePackagePolicyTests(unittest.TestCase):
             Path("screen-recording.mov"),
             Path("release.zip"),
             Path("release.dmg"),
+            Path("assets/logo.png"),
+            Path("assets/logo-dark.png"),
         }
         for path in cases:
             with self.subTest(path=path):
@@ -96,6 +103,18 @@ class SourcePackagePolicyTests(unittest.TestCase):
             )
             self.assertEqual(audit_source_package.audit_archive(ROOT, first), [])
 
+    def test_release_archive_stays_within_size_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = build_source_package.build_package(ROOT, Path(temp_dir))
+            archive_size = archive.stat().st_size
+
+        self.assertLessEqual(
+            archive_size,
+            RELEASE_ARCHIVE_SIZE_BUDGET_BYTES,
+            "release archive exceeded its 800 KB budget; review package growth "
+            "before raising the ceiling",
+        )
+
     def test_archive_contains_only_runtime_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = build_source_package.build_package(ROOT, Path(temp_dir))
@@ -113,6 +132,10 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertFalse(any("minis/" in member for member in members))
         self.assertFalse(any(".github/" in member for member in members))
         self.assertFalse(any("audit_source_package.py" in member for member in members))
+        self.assertEqual(
+            {member for member in members if member.startswith(prefix + "assets/")},
+            {prefix + "assets/icon.png"},
+        )
 
 
 if __name__ == "__main__":

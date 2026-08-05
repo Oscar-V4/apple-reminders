@@ -18,6 +18,22 @@ class PluginValidationTests(unittest.TestCase):
     def test_real_plugin_manifest_mcp_skills_and_evals_validate(self) -> None:
         self.assertEqual(validate_plugin.validate_root(ROOT), [])
 
+    def test_manifest_reuses_one_reviewed_brand_asset(self) -> None:
+        manifest = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        interface = manifest["interface"]
+        brand_paths = {
+            interface["composerIcon"],
+            interface["logo"],
+            interface["logoDark"],
+        }
+
+        self.assertEqual(brand_paths, {"./assets/icon.png"})
+        self.assertTrue((ROOT / "assets" / "icon.png").is_file())
+        self.assertFalse((ROOT / "assets" / "logo.png").exists())
+        self.assertFalse((ROOT / "assets" / "logo-dark.png").exists())
+
     def test_substantive_mcp_requires_manifest_declaration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

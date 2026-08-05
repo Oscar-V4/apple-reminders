@@ -30,6 +30,22 @@ from pathlib import Path
 from typing import Any
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from receipt_contract import (  # noqa: E402
+    FAILURE_RECEIPT_STATUSES,
+    RESULT_RECEIPT_STATUSES,
+    STABLE_ERROR_CODES,
+    build_operation_receipt,
+)
+from reminders_contracts import (  # noqa: E402
+    REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
+    command_schema_requirements,
+)
+
+
 HOME = Path.home()
 GROUP = HOME / "Library/Group Containers/group.com.apple.reminders/Container_v1"
 STORES = GROUP / "Stores"
@@ -53,36 +69,10 @@ JOURNAL_RETENTION_DAYS = 30
 IDEMPOTENCY_RETENTION_DAYS = 30
 IDEMPOTENCY_MAX_ENTRIES = 500
 
-RESULT_STATUSES = {
-    "unchanged",
-    "verified",
-    "committed_verification_pending",
-    "partial_success",
-    "failed_no_mutation",
-    "failed_manual_repair_required",
-}
-
-ERROR_CODES = {
-    "ambiguous_scope",
-    "ambiguous_target",
-    "concurrent_modification",
-    "invalid_input",
-    "permission_denied",
-    "schema_mismatch",
-    "sync_pending",
-    "unsupported_capability",
-    "unexpected_error",
-}
-
-REQUIRED_TABLES = {
-    "ZREMCDREMINDER",
-    "ZREMCDBASELIST",
-    "ZREMCDBASESECTION",
-    "ZREMCDHASHTAGLABEL",
-    "ZREMCDOBJECT",
-    "ZREMCKCLOUDSTATE",
-    "Z_PRIMARYKEY",
-}
+RESULT_STATUSES = set(RESULT_RECEIPT_STATUSES)
+ERROR_CODES = set(STABLE_ERROR_CODES)
+REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
+COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("runtime")
 
 
 class AdapterError(RuntimeError):
@@ -113,7 +103,7 @@ def fail(
     status: str = "failed_no_mutation",
     **extra: Any,
 ) -> int:
-    if status not in {"failed_no_mutation", "failed_manual_repair_required"}:
+    if status not in FAILURE_RECEIPT_STATUSES:
         status = "failed_no_mutation"
     json_out(
         {
@@ -143,26 +133,19 @@ def operation_receipt(
     operation_id: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    if status not in RESULT_STATUSES:
-        raise ValueError(f"Unsupported operation status: {status}")
-    payload: dict[str, Any] = {
-        "ok": status not in {"failed_no_mutation", "failed_manual_repair_required"},
-        "status": status,
-        "operation": operation,
-        "operation_id": operation_id or new_operation_id(),
-        "backend": backend,
-        "target": target or {},
-        "verification": verification or {"state": "not_requested"},
-        "recovery": recovery or {"semantics": "not_applicable"},
-    }
-    if before is not None:
-        payload["before"] = before
-    if after is not None:
-        payload["after"] = after
-    if warnings:
-        payload["warnings"] = warnings
-    payload.update(extra)
-    return payload
+    return build_operation_receipt(
+        status=status,
+        operation=operation,
+        operation_id=operation_id or new_operation_id(),
+        backend=backend,
+        target=target,
+        before=before,
+        after=after,
+        verification=verification,
+        recovery=recovery,
+        warnings=warnings,
+        **extra,
+    )
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -411,305 +394,6 @@ def table_names(con: sqlite3.Connection) -> set[str]:
 
 def column_names(con: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in con.execute(f"pragma table_info({table})")}
-
-
-COMMAND_SCHEMA_REQUIREMENTS: dict[str, dict[str, set[str]]] = {
-    "create_reminder_db": {
-        "ZREMCDREMINDER": {
-            "Z_PK",
-            "Z_ENT",
-            "Z_OPT",
-            "ZALLDAY",
-            "ZCKDIRTYFLAGS",
-            "ZCOMPLETED",
-            "ZDISPLAYDATEISALLDAY",
-            "ZDISPLAYDATEUPDATEDFORSECONDSFROMGMT",
-            "ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION",
-            "ZFLAGGED",
-            "ZICSDISPLAYORDER",
-            "ZISURGENTSTATEENABLEDFORCURRENTUSER",
-            "ZMARKEDFORDELETION",
-            "ZMINIMUMSUPPORTEDAPPVERSION",
-            "ZPRIORITY",
-            "ZSPOTLIGHTINDEXCOUNT",
-            "ZACCOUNT",
-            "ZCKCLOUDSTATE",
-            "ZLIST",
-            "Z_FOK_LIST",
-            "ZCREATIONDATE",
-            "ZDISPLAYDATEDATE",
-            "ZDUEDATE",
-            "ZLASTMODIFIEDDATE",
-            "ZCKIDENTIFIER",
-            "ZDACALENDARITEMUNIQUEIDENTIFIER",
-            "ZDISPLAYDATETIMEZONE",
-            "ZNOTES",
-            "ZTIMEZONE",
-            "ZTITLE",
-            "ZIDENTIFIER",
-            "ZNOTESDOCUMENT",
-            "ZTITLEDOCUMENT",
-            "ZRESOLUTIONTOKENMAP_V3_JSONDATA",
-        },
-        "ZREMCDBASELIST": {
-            "Z_PK",
-            "Z_OPT",
-            "ZNAME",
-            "ZACCOUNT",
-            "ZCKCLOUDSTATE",
-            "ZCKIDENTIFIER",
-            "ZMARKEDFORDELETION",
-            "ZREMINDERIDSMERGEABLEORDERING_V2_JSON",
-        },
-        "ZREMCKCLOUDSTATE": {
-            "Z_PK",
-            "Z_ENT",
-            "Z_OPT",
-            "ZCURRENTLOCALVERSION",
-            "ZLATESTVERSIONSYNCEDTOCLOUD",
-            "ZREMINDER",
-            "ZLOCALVERSIONDATE",
-        },
-        "Z_PRIMARYKEY": {"Z_ENT", "Z_NAME", "Z_MAX"},
-    },
-    "delete_reminder_db": {
-        "ZREMCDREMINDER": {
-            "Z_PK",
-            "Z_OPT",
-            "ZCKIDENTIFIER",
-            "ZCKCLOUDSTATE",
-            "ZLASTMODIFIEDDATE",
-            "ZLIST",
-            "Z_FOK_LIST",
-            "ZMARKEDFORDELETION",
-        },
-        "ZREMCDBASELIST": {
-            "Z_PK",
-            "Z_OPT",
-            "ZCKCLOUDSTATE",
-            "ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA",
-            "ZREMINDERIDSMERGEABLEORDERING_V2_JSON",
-        },
-        "ZREMCKCLOUDSTATE": {
-            "Z_PK",
-            "Z_OPT",
-            "ZCURRENTLOCALVERSION",
-            "ZLOCALVERSIONDATE",
-        },
-    },
-    "cleanup_tags": {
-        "ZREMCDHASHTAGLABEL": {
-            "Z_PK",
-            "ZNAME",
-            "ZCANONICALNAME",
-            "ZACCOUNTIDENTIFIER",
-            "ZUUIDFORCHANGETRACKING",
-        },
-        "ZREMCDOBJECT": {
-            "Z_PK",
-            "Z_ENT",
-            "ZHASHTAGLABEL",
-            "ZMARKEDFORDELETION",
-        },
-    },
-}
-
-COMMAND_SCHEMA_REQUIREMENTS.update(
-    {
-        "update_reminder_db": {
-            "ZREMCDREMINDER": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCKIDENTIFIER",
-                "ZCKCLOUDSTATE",
-                "ZLASTMODIFIEDDATE",
-                "ZTITLE",
-                "ZTITLEDOCUMENT",
-                "ZNOTES",
-                "ZNOTESDOCUMENT",
-                "ZFLAGGED",
-                "ZPRIORITY",
-                "ZDUEDATE",
-                "ZDISPLAYDATEDATE",
-                "ZALLDAY",
-                "ZDISPLAYDATEISALLDAY",
-                "ZDISPLAYDATETIMEZONE",
-                "ZTIMEZONE",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCURRENTLOCALVERSION",
-                "ZLOCALVERSIONDATE",
-            },
-        },
-        "set_completion_db": {
-            "ZREMCDREMINDER": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCKIDENTIFIER",
-                "ZCKCLOUDSTATE",
-                "ZCOMPLETED",
-                "ZCOMPLETIONDATE",
-                "ZLASTMODIFIEDDATE",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCURRENTLOCALVERSION",
-                "ZLOCALVERSIONDATE",
-            },
-        },
-        "tag_assignment_db": {
-            "ZREMCDREMINDER": {
-                "Z_PK",
-                "Z_OPT",
-                "ZACCOUNT",
-                "ZCKCLOUDSTATE",
-                "ZCKIDENTIFIER",
-                "ZLASTMODIFIEDDATE",
-            },
-            "ZREMCDHASHTAGLABEL": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZACCOUNTIDENTIFIER",
-                "ZCANONICALNAME",
-                "ZNAME",
-                "ZUUIDFORCHANGETRACKING",
-            },
-            "ZREMCDOBJECT": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZMARKEDFORDELETION",
-                "ZACCOUNT",
-                "ZCKCLOUDSTATE",
-                "ZHASHTAGLABEL",
-                "ZREMINDER3",
-                "ZIDENTIFIER",
-                "ZCKIDENTIFIER",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZCURRENTLOCALVERSION",
-                "ZLATESTVERSIONSYNCEDTOCLOUD",
-                "ZOBJECT",
-                "Z13_OBJECT",
-                "ZLOCALVERSIONDATE",
-            },
-            "Z_PRIMARYKEY": {"Z_ENT", "Z_NAME", "Z_MAX"},
-        },
-        "create_section_db": {
-            "ZREMCDBASELIST": {
-                "Z_PK",
-                "ZACCOUNT",
-                "ZCKIDENTIFIER",
-                "ZNAME",
-                "ZMARKEDFORDELETION",
-            },
-            "ZREMCDBASESECTION": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZACCOUNT",
-                "ZCKCLOUDSTATE",
-                "ZLIST",
-                "Z_FOK_LIST",
-                "ZCREATIONDATE",
-                "ZCKIDENTIFIER",
-                "ZDISPLAYNAME",
-                "ZIDENTIFIER",
-                "ZRESOLUTIONTOKENMAP_V3_JSONDATA",
-                "ZMARKEDFORDELETION",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZCURRENTLOCALVERSION",
-                "ZLATESTVERSIONSYNCEDTOCLOUD",
-                "ZSECTION",
-                "Z5_SECTION",
-                "ZLOCALVERSIONDATE",
-            },
-            "Z_PRIMARYKEY": {"Z_ENT", "Z_NAME", "Z_MAX"},
-        },
-        "move_to_section_db": {
-            "ZREMCDREMINDER": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCKIDENTIFIER",
-                "ZLIST",
-                "ZMARKEDFORDELETION",
-            },
-            "ZREMCDBASELIST": {
-                "Z_PK",
-                "Z_OPT",
-                "ZCKCLOUDSTATE",
-                "ZCKIDENTIFIER",
-                "ZNAME",
-                "ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA",
-            },
-            "ZREMCDBASESECTION": {
-                "Z_PK",
-                "ZCKIDENTIFIER",
-                "ZDISPLAYNAME",
-                "ZLIST",
-                "ZMARKEDFORDELETION",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "ZCURRENTLOCALVERSION",
-                "ZLOCALVERSIONDATE",
-            },
-        },
-        "attachment_mutation_db": {
-            "ZREMCDREMINDER": {
-                "Z_PK",
-                "Z_OPT",
-                "ZACCOUNT",
-                "ZCKCLOUDSTATE",
-                "ZCKIDENTIFIER",
-                "ZLASTMODIFIEDDATE",
-                "ZMARKEDFORDELETION",
-            },
-            "ZREMCDOBJECT": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZACCOUNT",
-                "ZCKCLOUDSTATE",
-                "ZCKIDENTIFIER",
-                "ZIDENTIFIER",
-                "ZREMINDER2",
-                "Z_FOK_REMINDER1",
-                "ZMARKEDFORDELETION",
-                "ZFILENAME",
-                "ZSHA512SUM",
-                "ZUTI",
-                "ZFILESIZE",
-                "ZWIDTH",
-                "ZHEIGHT",
-                "ZURL",
-                "ZHOSTURL",
-            },
-            "ZREMCKCLOUDSTATE": {
-                "Z_PK",
-                "Z_ENT",
-                "Z_OPT",
-                "ZCURRENTLOCALVERSION",
-                "ZLATESTVERSIONSYNCEDTOCLOUD",
-                "ZOBJECT",
-                "Z13_OBJECT",
-                "ZLOCALVERSIONDATE",
-            },
-            "Z_PRIMARYKEY": {"Z_ENT", "Z_NAME", "Z_MAX"},
-        },
-    }
-)
 
 
 def command_capability(con: sqlite3.Connection, command: str) -> dict[str, Any]:

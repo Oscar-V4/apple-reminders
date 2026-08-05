@@ -25,6 +25,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from reminders_contracts import (  # noqa: E402
+    REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
+    command_schema_requirements,
+)
+
+
 REPORT_SCHEMA_VERSION = 1
 DOCTOR_NAME = "apple-reminders-doctor"
 
@@ -50,219 +60,8 @@ JOURNAL = APP_SUPPORT / "actions.jsonl"
 BACKUPS = APP_SUPPORT / "backups"
 CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 CACHE_FILE = CACHE_DIR / "cache.json"
-
-REQUIRED_TABLES = {
-    "ZREMCDREMINDER",
-    "ZREMCDBASELIST",
-    "ZREMCDBASESECTION",
-    "ZREMCDHASHTAGLABEL",
-    "ZREMCDOBJECT",
-    "ZREMCKCLOUDSTATE",
-    "Z_PRIMARYKEY",
-}
-
-
-def _merge_requirements(*groups: dict[str, set[str]]) -> dict[str, set[str]]:
-    merged: dict[str, set[str]] = {}
-    for group in groups:
-        for table, columns in group.items():
-            merged.setdefault(table, set()).update(columns)
-    return merged
-
-
-LIST_FIELDS = {
-    "ZREMCDBASELIST": {
-        "Z_PK",
-        "ZCKIDENTIFIER",
-        "ZNAME",
-        "ZMARKEDFORDELETION",
-    }
-}
-REMINDER_FIELDS = {
-    "ZREMCDREMINDER": {
-        "Z_PK",
-        "ZCKIDENTIFIER",
-        "ZTITLE",
-        "ZLIST",
-        "ZCOMPLETED",
-        "ZMARKEDFORDELETION",
-    }
-}
-SECTION_FIELDS = {
-    "ZREMCDBASESECTION": {
-        "Z_PK",
-        "ZCKIDENTIFIER",
-        "ZDISPLAYNAME",
-        "ZLIST",
-        "ZMARKEDFORDELETION",
-    }
-}
-TAG_FIELDS = {
-    "ZREMCDHASHTAGLABEL": {
-        "Z_PK",
-        "ZNAME",
-        "ZCANONICALNAME",
-    },
-    "ZREMCDOBJECT": {
-        "Z_PK",
-        "Z_ENT",
-        "ZHASHTAGLABEL",
-        "ZREMINDER3",
-        "ZMARKEDFORDELETION",
-    },
-}
-ATTACHMENT_FIELDS = {
-    "ZREMCDOBJECT": {
-        "Z_PK",
-        "Z_ENT",
-        "ZCKIDENTIFIER",
-        "ZREMINDER2",
-        "Z_FOK_REMINDER1",
-        "ZMARKEDFORDELETION",
-    }
-}
-ATTACHMENT_SYNC_FIELDS = {
-    "ZREMCDOBJECT": {"ZCKSERVERRECORDDATA"},
-    "ZREMCKCLOUDSTATE": {
-        "ZINCLOUD",
-        "ZCURRENTLOCALVERSION",
-        "ZLATESTVERSIONSYNCEDTOCLOUD",
-    },
-}
-CLOUD_WRITE_FIELDS = {
-    "ZREMCKCLOUDSTATE": {
-        "Z_PK",
-        "ZCURRENTLOCALVERSION",
-        "ZLOCALVERSIONDATE",
-    },
-    "Z_PRIMARYKEY": {"Z_ENT", "Z_MAX"},
-}
-REMINDER_WRITE_FIELDS = {
-    "ZREMCDREMINDER": {
-        "Z_PK",
-        "Z_OPT",
-        "ZCKIDENTIFIER",
-        "ZCKCLOUDSTATE",
-        "ZLASTMODIFIEDDATE",
-        "ZLIST",
-        "ZMARKEDFORDELETION",
-    }
-}
-
-# These are intentionally explicit minimum schema contracts. Passing a static
-# contract means the expected tables/columns exist; it never claims that a
-# write is semantically safe on an unverified macOS/Reminders build.
-COMMAND_SCHEMA_REQUIREMENTS: dict[str, dict[str, set[str]]] = {
-    "list_lists": _merge_requirements(LIST_FIELDS),
-    "list_sections": _merge_requirements(LIST_FIELDS, SECTION_FIELDS),
-    "snapshot": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, SECTION_FIELDS, TAG_FIELDS, ATTACHMENT_FIELDS
-    ),
-    "search_reminders": _merge_requirements(LIST_FIELDS, REMINDER_FIELDS),
-    "read_reminder": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, TAG_FIELDS, ATTACHMENT_FIELDS
-    ),
-    "list_tags": _merge_requirements(TAG_FIELDS),
-    "cache_rebuild": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, SECTION_FIELDS, TAG_FIELDS, ATTACHMENT_FIELDS
-    ),
-    "create_list_db": _merge_requirements(LIST_FIELDS, CLOUD_WRITE_FIELDS),
-    "create_reminder_db": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, REMINDER_WRITE_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "update_reminder_db": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, REMINDER_WRITE_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "complete_reminder_db": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, REMINDER_WRITE_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "delete_reminder_db": {
-        "ZREMCDREMINDER": {
-            "Z_PK",
-            "Z_OPT",
-            "ZCKIDENTIFIER",
-            "ZCKCLOUDSTATE",
-            "ZLASTMODIFIEDDATE",
-            "ZLIST",
-            "Z_FOK_LIST",
-            "ZMARKEDFORDELETION",
-        },
-        "ZREMCDBASELIST": {
-            "Z_PK",
-            "Z_OPT",
-            "ZCKCLOUDSTATE",
-            "ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA",
-        },
-        "ZREMCKCLOUDSTATE": {
-            "Z_PK",
-            "ZCURRENTLOCALVERSION",
-            "ZLOCALVERSIONDATE",
-        },
-    },
-    "create_section_db": _merge_requirements(
-        LIST_FIELDS, SECTION_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "move_to_section_db": _merge_requirements(
-        LIST_FIELDS, REMINDER_FIELDS, SECTION_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "add_tag_db": _merge_requirements(
-        REMINDER_FIELDS, REMINDER_WRITE_FIELDS, TAG_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "remove_tag_db": _merge_requirements(
-        REMINDER_FIELDS, REMINDER_WRITE_FIELDS, TAG_FIELDS, CLOUD_WRITE_FIELDS
-    ),
-    "cleanup_tags": {
-        "ZREMCDHASHTAGLABEL": {
-            "Z_PK",
-            "ZNAME",
-            "ZCANONICALNAME",
-            "ZACCOUNTIDENTIFIER",
-            "ZUUIDFORCHANGETRACKING",
-        },
-        "ZREMCDOBJECT": {
-            "Z_PK",
-            "Z_ENT",
-            "ZHASHTAGLABEL",
-            "ZMARKEDFORDELETION",
-        },
-    },
-    "attach_image_db": _merge_requirements(
-        REMINDER_FIELDS,
-        REMINDER_WRITE_FIELDS,
-        ATTACHMENT_FIELDS,
-        CLOUD_WRITE_FIELDS,
-    ),
-    "attach_image_reminderkit_verify": _merge_requirements(
-        REMINDER_FIELDS, ATTACHMENT_FIELDS, ATTACHMENT_SYNC_FIELDS
-    ),
-    "attach_url_db": _merge_requirements(
-        REMINDER_FIELDS,
-        REMINDER_WRITE_FIELDS,
-        ATTACHMENT_FIELDS,
-        CLOUD_WRITE_FIELDS,
-    ),
-    "list_attachments": _merge_requirements(REMINDER_FIELDS, ATTACHMENT_FIELDS),
-    "audit_attachments": _merge_requirements(REMINDER_FIELDS, ATTACHMENT_FIELDS),
-    "repair_attachments": _merge_requirements(
-        REMINDER_FIELDS,
-        REMINDER_WRITE_FIELDS,
-        ATTACHMENT_FIELDS,
-        ATTACHMENT_SYNC_FIELDS,
-        CLOUD_WRITE_FIELDS,
-    ),
-    "delete_attachment_db": _merge_requirements(
-        REMINDER_FIELDS,
-        REMINDER_WRITE_FIELDS,
-        ATTACHMENT_FIELDS,
-        CLOUD_WRITE_FIELDS,
-    ),
-    "replace_attachment_db": _merge_requirements(
-        REMINDER_FIELDS,
-        REMINDER_WRITE_FIELDS,
-        ATTACHMENT_FIELDS,
-        CLOUD_WRITE_FIELDS,
-    ),
-}
+REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
+COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("diagnostic")
 
 
 def default_paths(

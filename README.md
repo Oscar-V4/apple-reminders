@@ -120,6 +120,24 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/reminders_doctor.py --compact
 Read the emitted `privacy`, `checks`, and `capabilities` fields. A static pass
 is a prerequisite, not a guarantee that a future write is semantically safe.
 
+### Data-free performance benchmark
+
+The repeatable benchmark measures cold MCP initialization/tool discovery,
+Python-only EventKit request validation, an isolated-home doctor run, source
+audit, and deterministic package build time. It reports median and p95 latency
+plus allowlisted source/archive bytes:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
+  --label local-baseline --samples 15 --warmups 3 \
+  --build-samples 5 --build-warmups 1 --output benchmark.json
+```
+
+It does not load EventKit, request TCC access, open Reminders, or read reminder
+rows. Use `--plugin-root` to compare another clean checkout on the same machine.
+Timing results are advisory because host load varies; the deterministic release
+archive has a CI-tested 800,000-byte budget.
+
 ## Deterministic Source Package
 
 The release ZIP is built from a runtime-only allowlist. It contains the plugin
