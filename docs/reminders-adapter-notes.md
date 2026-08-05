@@ -6,7 +6,9 @@ These notes capture local findings from the initial macOS Reminders investigatio
 
 AppleScript can create and inspect lists and reminders. It exposes common fields such as title, body, due date, reminder date, completion, priority, and flagged state.
 
-EventKit exposes reminders and calendars but does not expose native image attachments or list sections.
+EventKit exposes accounts/calendars and public reminder fields, including typed due dates, absolute and coordinate-backed location alarms, recurrence, completion, priority, URLs, and list-to-list moves. It does not expose native image attachments, tags, or list sections.
+
+The bundled EventKit bridge is now the default public-field path. It requires a native EventKit predicate bound by calendar IDs or the matching incomplete-due/completed-completion range; text and modified-time filters are post-filters and do not make an otherwise broad native fetch safe. Existing-reminder writes require an exact identifier and last-modified precondition.
 
 ## Private Store Surfaces
 
@@ -59,15 +61,17 @@ Tag proof:
 - `add_tag` find-or-creates the label and inserts an active assignment object. Duplicate add is idempotent.
 - `remove_tag` soft-deletes only the assignment object. Label cleanup is separate and scoped through `cleanup_tags`.
 
-Reminder creation proof:
+Historical private reminder creation proof:
 
 - A reminder row can be inserted directly with `REMCDReminder` plus a matching `REMCKCloudState` row.
 - The list's reminder ordering JSON should include the new reminder UUID.
 - `ZTITLE` and `ZNOTES` alone are not enough for native list rendering. Reminders also expects gzip-compressed rich text document blobs in `ZTITLEDOCUMENT` and `ZNOTESDOCUMENT`.
 - Even when those document blobs are present, live testing found that freshly DB-created reminders can render in the native list without visible title text until the public Reminders object model rewrites the text.
-- The adapter therefore uses a hybrid path: create the row, dates, ordering, and private fields through SQLite, then immediately sync title/body through AppleScript so the native Reminders UI renders the text reliably.
+- The private adapter therefore used a hybrid path: create the row, dates, ordering, and private fields through SQLite, then immediately sync title/body through AppleScript so the native Reminders UI renders the text reliably.
 - Timed due/reminder dates set `ZDUEDATE`, `ZDISPLAYDATEDATE`, `ZTIMEZONE`, and `ZDISPLAYDATETIMEZONE`.
 - All-day due dates set `ZALLDAY=1`, `ZDISPLAYDATEISALLDAY=1`, local-midnight `ZDISPLAYDATEDATE`, and UTC-midnight `ZDUEDATE`.
+
+Normal public reminder creation and editing now use EventKit. The bridge keeps `due` and `alarms` separate, rejects timezone-naive timed values, supports absolute or coordinate-backed location alarms, and never treats a due date as an alert implicitly. Direct SQLite `--remind-at` writes are rejected because the previous mapping could conflate those concepts.
 
 ## Disposable Cache
 
@@ -84,16 +88,19 @@ Cache commands:
 
 The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, tag names/counts, completion, priority, flagged state, due/display/completion/modified timestamps, image and URL attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
 
-Supported safe v1 private writes include sections, mobile-visible image attachments through ReminderKit, URL attachments, tag assignment writes, attachment soft-delete/replacement, and local-only image attachment repair. Unsupported writes as of this note: urgent alerts, location alerts, and message-when-messaging alerts. These surfaces have private data shapes and should not be exposed until verified separately.
+Supported private writes include sections, mobile-visible image attachments through ReminderKit, URL attachment objects, tag assignment writes, attachment soft-delete/replacement, and local-only image attachment repair. Location alarms are supported only through the public EventKit bridge with explicit coordinates and enter/leave proximity. Unsupported writes as of this note include urgent alerts and message-when-messaging alerts; do not emulate them through private fields.
 
 Cache searches do not search note bodies because the cache does not keep them. Use `search_reminders` when full note text must be searched from the source database.
 
 ## Adapter Rules
 
 - Always run a schema doctor before private writes.
+- Use the content-free plugin doctor for first-run diagnostics; request EventKit access only through the separate explicit permission tool.
 - Always back up the Reminders container before experiments or broad changes.
 - Treat container archives as best-effort snapshots of a live store and verify them before relying on recovery.
 - Keep transactions narrow.
 - Verify every write by reading back through the app state or database.
-- For reminder title/body writes, prefer AppleScript or the adapter's AppleScript text-sync post-write, not a DB-only write.
+- For public reminder fields, prefer the EventKit MCP tools. The adapter's AppleScript text-sync exists for legacy/private creation paths and is not a reason to choose DB-only writes.
+- `delete_reminder` uses `backend=auto`: a DB soft-delete is eligible only with exact OS/Reminders/schema evidence for recovery and sync parity; otherwise it uses native AppleScript. Never fall back to DB after an uncertain native attempt.
+- `cleanup_tags --apply` intentionally hard-deletes unused label rows, but only after a scoped preview digest, literal wildcard handling, a write lock, account-aware revalidation, zero-reference proof, backup, and read-back.
 - Treat private-store writes as local-first until iCloud behavior is tested more deeply. For image attachments specifically, do not report success for user-facing capture unless the read-back shows CloudKit/mobile visibility evidence.

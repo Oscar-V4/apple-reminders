@@ -9,20 +9,83 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: apple-reminders-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  validate-and-test:
     runs-on: macos-14
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run adapter tests
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests/test_reminders_adapter.py
-      - name: Compile Python sources
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/reminders_adapter.py scripts/reminders_doctor.py scripts/validate_minis_export.py
+
+      - name: Validate plugin manifest, MCP, skills, and evals
+        run: python3 scripts/validate_plugin.py .
+
       - name: Validate portable Minis export
-        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_minis_export.py
-      - name: Check ReminderKit helper syntax
-        run: clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit -fsyntax-only scripts/remkit_attach_image.m
+        run: python3 scripts/validate_minis_export.py
+
+      - name: Audit runtime source allowlist
+        run: python3 scripts/audit_source_package.py . --strict-worktree
+
+      - name: Compile all Python source in memory
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path.cwd()
+          paths = sorted(
+              path for path in root.rglob("*.py")
+              if ".git" not in path.relative_to(root).parts
+          )
+          for path in paths:
+              source = path.read_text(encoding="utf-8")
+              compile(source, str(path.relative_to(root)), "exec")
+          print(f"Compiled {len(paths)} Python source files without bytecode output")
+          PY
+
+      - name: Validate EventKit request contract without live access
+        run: |
+          printf '%s\n' '{"schema_version":1,"operation":"capabilities"}' | \
+            python3 scripts/eventkit_bridge.py --validate-only
+
+      - name: Run all synthetic unit and packaging tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check ReminderKit helper syntax without linking
+        run: >-
+          clang -x objective-c -fobjc-arc
+          -framework Foundation -framework AppKit
+          -fsyntax-only scripts/remkit_attach_image.m
+
+      - name: Check EventKit helper syntax without linking
+        run: >-
+          clang -x objective-c -fobjc-arc
+          -framework Foundation -framework EventKit
+          -fsyntax-only scripts/reminders_eventkit.m
+
+      - name: Validate EventKit helper plist
+        run: plutil -lint scripts/eventkit_bridge_info.plist
+
+      - name: Prove deterministic source packaging
+        run: |
+          mkdir -p "$RUNNER_TEMP/package-a" "$RUNNER_TEMP/package-b"
+          python3 scripts/build_source_package.py \
+            --output-directory "$RUNNER_TEMP/package-a" > "$RUNNER_TEMP/package-a.json"
+          python3 scripts/build_source_package.py \
+            --output-directory "$RUNNER_TEMP/package-b" > "$RUNNER_TEMP/package-b.json"
+          cmp "$RUNNER_TEMP/package-a/"*.zip "$RUNNER_TEMP/package-b/"*.zip
+          python3 scripts/audit_source_package.py . \
+            --archive "$RUNNER_TEMP/package-a/"*.zip
+          shasum -a 256 "$RUNNER_TEMP/package-a/"*.zip
+
+      - name: Confirm checks left no forbidden source artifacts
+        run: python3 scripts/audit_source_package.py . --strict-worktree

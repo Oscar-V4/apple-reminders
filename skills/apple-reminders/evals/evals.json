@@ -13,7 +13,7 @@
   },
   {
     "prompt": "'치과 예약' 미리알림 지워줘.",
-    "expected_behavior": "Searches for similarly named reminders first, disambiguates duplicates, uses native delete behavior instead of direct hard deletion, and verifies the target no longer appears in active reads."
+    "expected_behavior": "Searches for similarly named reminders first, disambiguates duplicates, calls exact-ID delete_reminder with backend=auto recovery policy, never hard-deletes reminder rows or falls back after an uncertain native attempt, and verifies the target no longer appears in active reads."
   },
   {
     "prompt": "첨부파일이 아이폰에 안 뜨는 미리알림들을 찾아서 고칠 수 있는지 봐줘.",

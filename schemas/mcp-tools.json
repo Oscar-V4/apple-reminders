@@ -1,0 +1,1475 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "name": "reminders_plugin_doctor",
+      "title": "Check Reminders Plugin Readiness",
+      "description": "Run a content-free local readiness and capability diagnosis. It inspects only app/toolchain/file metadata, SQLite schema, anonymous counts, and privacy-safe permission symptoms; it does not read reminder rows or names, launch Reminders, load EventKit or private frameworks, trigger a TCC prompt, or write data.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_reminders_capabilities",
+      "title": "Get Reminders Capabilities",
+      "description": "Report the public EventKit bridge's supported operations and field capabilities without reading reminder content or requesting Reminders access.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "request_reminders_access",
+      "title": "Request Reminders Access",
+      "description": "Explicitly request full macOS Reminders access through EventKit. This may display a system TCC permission prompt and can change authorization state, but it does not read, create, update, complete, move, or delete reminders.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_reminder_accounts",
+      "title": "List Reminder Accounts",
+      "description": "List Apple Reminders accounts through Apple's public EventKit API. Returns at most limit accounts, may require macOS Reminders permission, and makes no changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum accounts to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_reminder_lists",
+      "title": "List Reminder Lists",
+      "description": "List Apple Reminders lists through Apple's public EventKit API, optionally scoped to one exact account ID or writable lists. Returns at most limit lists and makes no changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Optional exact account ID returned by list_reminder_accounts."
+          },
+          "writable_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return only lists that EventKit reports as writable."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum lists to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_reminder_sections",
+      "title": "List Reminder Sections",
+      "description": "List active sections, optionally within one exact list name, from the local default store. Returns at most limit items and makes no changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact list name to filter by. Omit to inspect sections across lists."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum sections to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "fetch_reminders",
+      "title": "Fetch Reminders",
+      "description": "Fetch a bounded, structured page of reminders through Apple's public EventKit API. The native fetch must be bounded by calendar_ids, a complete due range with status=incomplete, or a complete completion range with status=completed. Query and modified_after are post-filters only. Continue only with the opaque next_cursor and identical filters, sort, and page size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendar_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "description": "One or more exact list IDs returned by list_reminder_lists."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["incomplete", "completed", "any"],
+            "default": "incomplete",
+            "description": "Completion-state filter."
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Optional case-insensitive title or notes filter. This does not count as the required fetch bound."
+          },
+          "due_start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive lower due-date bound. Without calendar_ids it must be paired with due_end and status=incomplete."
+          },
+          "due_end": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive upper due-date bound. Without calendar_ids it must be paired with due_start and status=incomplete."
+          },
+          "completion_start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive lower completion-date bound. Without calendar_ids it must be paired with completion_end and status=completed."
+          },
+          "completion_end": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive upper completion-date bound. Without calendar_ids it must be paired with completion_start and status=completed."
+          },
+          "modified_after": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Post-filter reminders modified at or after this RFC 3339 instant. This does not bound the native EventKit fetch."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum reminders in this page. Reuse the same value with next_cursor."
+          },
+          "sort": {
+            "type": "string",
+            "enum": ["due", "modified", "title"],
+            "default": "due",
+            "description": "Stable page ordering. Reuse the same value with next_cursor."
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Opaque next_cursor from the preceding page. It is rejected if filters, sort, or page size changed."
+          }
+        },
+        "anyOf": [
+          {"required": ["calendar_ids"]},
+          {
+            "required": ["due_start", "due_end"],
+            "properties": {"status": {"enum": ["incomplete"]}}
+          },
+          {
+            "required": ["status", "completion_start", "completion_end"],
+            "properties": {"status": {"const": "completed"}}
+          }
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "read_reminder",
+      "title": "Read Reminder",
+      "description": "Read one reminder by its exact stable EventKit ID through Apple's public API. This makes no changes and may require macOS Reminders permission. Exceptionally long strings or arrays are bounded and reported through _mcp truncation metadata.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by fetch_reminders."
+          }
+        },
+        "required": [
+          "reminder_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_reminder_tags",
+      "title": "List Reminder Tags",
+      "description": "List reminder tag labels from the local default store. Results are bounded by limit and this tool makes no changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional partial tag-name filter."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum tag labels to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "preview_unused_reminder_tags",
+      "title": "Preview Unused Reminder Tags",
+      "description": "Preview a bounded set of tag labels with no active assignments. This is always a dry run: it never applies cleanup or deletes a label.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional exact canonical tag name."
+          },
+          "prefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional literal tag-name prefix."
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional exact account identifier returned by list_reminder_tags."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "Maximum candidates to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "cleanup_unused_reminder_tags",
+      "title": "Clean Up Unused Reminder Tags",
+      "description": "Hard-delete only the zero-reference tag-label rows in a previously previewed, untruncated candidate set. This destructive maintenance action requires the preview's exact candidate digest and the same scope; the adapter rechecks under a write lock, backs up multi-label cleanup, and verifies deletion. Tag labels have no native undo, though labels can be recreated.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact canonical tag name used for the preview."
+          },
+          "prefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Literal tag-name prefix used for the preview."
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional exact account identifier used for the preview."
+          },
+          "candidate_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Exact candidate_digest returned by preview_unused_reminder_tags."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "The same candidate bound used for the preview."
+          }
+        },
+        "required": [
+          "candidate_digest"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "tag"
+            ]
+          },
+          {
+            "required": [
+              "prefix"
+            ]
+          }
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_reminder_list",
+      "title": "Create Reminder List",
+      "description": "Create one Apple Reminders list by exact name with optional color and emblem visual identity. If an active list with the same name already exists, the adapter returns it without creating another list.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact name for the new list."
+          },
+          "color": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional Reminders color name accepted by the native scripting surface."
+          },
+          "emblem": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional emoji or emblem value for the list badge."
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_reminder",
+      "title": "Create Reminder",
+      "description": "Create one reminder in an exact EventKit list ID using Apple's public API. Supports typed due dates, absolute or location alarms, URL, location text, priority, and one recurrence rule. A required idempotency key makes retries replay the original receipt instead of creating a duplicate.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendar_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact writable list ID returned by list_reminder_lists."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000,
+            "description": "Reminder title."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 1000000,
+            "description": "Optional reminder notes."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 100000,
+            "description": "Optional reminder URL with an explicit scheme."
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 1000000,
+            "description": "Optional location text stored on the reminder."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9,
+            "description": "Apple Reminders priority value from 0 through 9."
+          },
+          "due": {
+            "$ref": "#/$defs/due",
+            "description": "Typed all-day or timed due value. Timed values require a matching IANA time zone and UTC offset."
+          },
+          "alarms": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"$ref": "#/$defs/alarm"},
+            "description": "Absolute-time or geofenced location alarms. Relative alarms are intentionally unsupported."
+          },
+          "recurrence_rules": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/recurrence"},
+            "description": "At most one recurrence rule. A non-empty rule requires due."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Caller-generated unique key for this logical creation. Reuse only when retrying the exact same input."
+          }
+        },
+        "required": [
+          "calendar_id",
+          "title",
+          "idempotency_key"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "due": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "date"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "all_day"},
+                  "date": {"type": "string", "format": "date"}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "date_time", "time_zone"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "timed"},
+                  "date_time": {"type": "string", "format": "date-time"},
+                  "time_zone": {"type": "string", "minLength": 1, "maxLength": 128}
+                }
+              }
+            ]
+          },
+          "alarm": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "date_time"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "absolute"},
+                  "date_time": {"type": "string", "format": "date-time"}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "proximity", "location"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "location"},
+                  "proximity": {"type": "string", "enum": ["enter", "leave"]},
+                  "location": {
+                    "type": "object",
+                    "required": ["title", "latitude", "longitude"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                      "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+                      "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+                      "radius_meters": {"type": "number", "exclusiveMinimum": 0, "maximum": 100000}
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "weekday": {
+            "type": "object",
+            "required": ["day"],
+            "additionalProperties": false,
+            "properties": {
+              "day": {
+                "type": "string",
+                "enum": ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+              },
+              "ordinal": {"type": "integer", "minimum": -53, "maximum": 53, "not": {"const": 0}}
+            }
+          },
+          "recurrence_end": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "count"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "count"},
+                  "count": {"type": "integer", "minimum": 1, "maximum": 10000}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "date_time"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "date"},
+                  "date_time": {"type": "string", "format": "date-time"}
+                }
+              }
+            ]
+          },
+          "recurrence": {
+            "type": "object",
+            "required": ["frequency", "interval"],
+            "additionalProperties": false,
+            "properties": {
+              "frequency": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]},
+              "interval": {"type": "integer", "minimum": 1, "maximum": 999},
+              "days_of_week": {
+                "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true,
+                "items": {"$ref": "#/$defs/weekday"}
+              },
+              "days_of_month": {
+                "type": "array", "minItems": 1, "maxItems": 62, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -31, "maximum": 31, "not": {"const": 0}}
+              },
+              "months_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 1, "maximum": 12}
+              },
+              "weeks_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 106, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -53, "maximum": 53, "not": {"const": 0}}
+              },
+              "days_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 732, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -366, "maximum": 366, "not": {"const": 0}}
+              },
+              "set_positions": {
+                "type": "array", "minItems": 1, "maxItems": 732, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -366, "maximum": 366, "not": {"const": 0}}
+              },
+              "end": {"$ref": "#/$defs/recurrence_end"}
+            }
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "update_reminder",
+      "title": "Update Reminder",
+      "description": "Update one reminder through Apple's public EventKit API using its exact ID and the last_modified value from read_reminder or fetch_reminders. Only fields inside patch change; null explicitly clears nullable fields. A stale last_modified value fails without mutation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by read_reminder or fetch_reminders."
+          },
+          "expected_last_modified": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact last_modified timestamp from the most recent public EventKit read."
+          },
+          "patch": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "title": {"type": "string", "minLength": 1, "maxLength": 10000},
+              "notes": {"type": ["string", "null"], "maxLength": 1000000},
+              "url": {"type": ["string", "null"], "format": "uri", "maxLength": 100000},
+              "location": {"type": ["string", "null"], "maxLength": 1000000},
+              "priority": {"type": "integer", "minimum": 0, "maximum": 9},
+              "due": {
+                "oneOf": [
+                  {"$ref": "#/$defs/due"},
+                  {"type": "null"}
+                ]
+              },
+              "alarms": {
+                "oneOf": [
+                  {"type": "null"},
+                  {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/alarm"}}
+                ]
+              },
+              "recurrence_rules": {
+                "oneOf": [
+                  {"type": "null"},
+                  {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/recurrence"}}
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "reminder_id",
+          "expected_last_modified",
+          "patch"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "due": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "date"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "all_day"},
+                  "date": {"type": "string", "format": "date"}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "date_time", "time_zone"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "timed"},
+                  "date_time": {"type": "string", "format": "date-time"},
+                  "time_zone": {"type": "string", "minLength": 1, "maxLength": 128}
+                }
+              }
+            ]
+          },
+          "alarm": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "date_time"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "absolute"},
+                  "date_time": {"type": "string", "format": "date-time"}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "proximity", "location"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "location"},
+                  "proximity": {"type": "string", "enum": ["enter", "leave"]},
+                  "location": {
+                    "type": "object",
+                    "required": ["title", "latitude", "longitude"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                      "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+                      "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+                      "radius_meters": {"type": "number", "exclusiveMinimum": 0, "maximum": 100000}
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "weekday": {
+            "type": "object",
+            "required": ["day"],
+            "additionalProperties": false,
+            "properties": {
+              "day": {
+                "type": "string",
+                "enum": ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+              },
+              "ordinal": {"type": "integer", "minimum": -53, "maximum": 53, "not": {"const": 0}}
+            }
+          },
+          "recurrence_end": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "count"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "count"},
+                  "count": {"type": "integer", "minimum": 1, "maximum": 10000}
+                }
+              },
+              {
+                "type": "object",
+                "required": ["kind", "date_time"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"const": "date"},
+                  "date_time": {"type": "string", "format": "date-time"}
+                }
+              }
+            ]
+          },
+          "recurrence": {
+            "type": "object",
+            "required": ["frequency", "interval"],
+            "additionalProperties": false,
+            "properties": {
+              "frequency": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]},
+              "interval": {"type": "integer", "minimum": 1, "maximum": 999},
+              "days_of_week": {
+                "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true,
+                "items": {"$ref": "#/$defs/weekday"}
+              },
+              "days_of_month": {
+                "type": "array", "minItems": 1, "maxItems": 62, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -31, "maximum": 31, "not": {"const": 0}}
+              },
+              "months_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 1, "maximum": 12}
+              },
+              "weeks_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 106, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -53, "maximum": 53, "not": {"const": 0}}
+              },
+              "days_of_year": {
+                "type": "array", "minItems": 1, "maxItems": 732, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -366, "maximum": 366, "not": {"const": 0}}
+              },
+              "set_positions": {
+                "type": "array", "minItems": 1, "maxItems": 732, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": -366, "maximum": 366, "not": {"const": 0}}
+              },
+              "end": {"$ref": "#/$defs/recurrence_end"}
+            }
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "complete_reminder",
+      "title": "Complete Reminder",
+      "description": "Mark exactly one reminder complete through Apple's public EventKit API. Requires the exact ID and last_modified value from a recent read so a concurrent edit fails without mutation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by read_reminder or fetch_reminders."
+          },
+          "expected_last_modified": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact last_modified timestamp from the most recent public EventKit read."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "expected_last_modified"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "reopen_reminder",
+      "title": "Reopen Reminder",
+      "description": "Mark exactly one completed reminder incomplete through Apple's public EventKit API. Requires the exact ID and last_modified value from a recent read so a concurrent edit fails without mutation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by read_reminder or fetch_reminders."
+          },
+          "expected_last_modified": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact last_modified timestamp from the most recent public EventKit read."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "expected_last_modified"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "move_reminder_to_list",
+      "title": "Move Reminder to List",
+      "description": "Move exactly one reminder to exactly one destination list through Apple's public EventKit API. Requires exact reminder/list IDs and a recent last_modified precondition; no title or fuzzy matching is used.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by read_reminder or fetch_reminders."
+          },
+          "calendar_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact writable destination list ID returned by list_reminder_lists."
+          },
+          "expected_last_modified": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact last_modified timestamp from the most recent public EventKit read."
+          }
+        },
+        "required": ["reminder_id", "calendar_id", "expected_last_modified"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "delete_reminder",
+      "title": "Delete Reminder",
+      "description": "Delete exactly one reminder selected by its stable reminder ID. This is destructive. The adapter's auto mode uses its fast DB soft-delete only for a verified matching capability record and otherwise falls back to native Reminders deletion; the selected backend and recovery semantics are returned.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional private-store version from a preceding adapter receipt. Deletion fails if it no longer matches."
+          }
+        },
+        "required": [
+          "reminder_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "show_reminder",
+      "title": "Show Reminder in App",
+      "description": "Open the Reminders app and request that it show exactly one reminder selected by stable ID. This changes only local UI focus, not reminder data. The receipt confirms that Reminders accepted the handoff but does not claim that visual selection was observed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          }
+        },
+        "required": ["reminder_id"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "purge_reminder_plugin_logs",
+      "title": "Purge Reminder Plugin Logs",
+      "description": "Delete only this plugin's bounded local redacted action journals. This is destructive and cannot be undone, but it does not delete reminders, lists, tags, attachments, caches, or backups.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "add_reminder_tag",
+      "title": "Add Reminder Tag",
+      "description": "Add one exact tag to one reminder selected by its stable reminder ID. Repeating an already-attached tag is a no-op.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact tag name, with or without a leading #."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional private-store version from a preceding adapter receipt. The tag is not added if it no longer matches."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "tag"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "remove_reminder_tag",
+      "title": "Remove Reminder Tag",
+      "description": "Remove one exact tag assignment from one reminder selected by its stable reminder ID. It does not delete the global tag label.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact tag name, with or without a leading #."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional private-store version from a preceding adapter receipt. The tag is not removed if it no longer matches."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "tag"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_reminder_section",
+      "title": "Create Reminder Section",
+      "description": "Create one section inside one list selected by its exact stable list ID. If the same section name already exists in that list, the adapter returns it without creating another.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_id": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact stable list UUID from list_reminder_lists."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact section name."
+          }
+        },
+        "required": [
+          "list_id",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "move_reminder_to_section",
+      "title": "Move Reminder to Section",
+      "description": "Move exactly one reminder to exactly one section using stable IDs. The section must belong to the reminder's current list; no title or fuzzy matching is used.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "section_id": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact stable section UUID from list_reminder_sections."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional private-store version from a preceding adapter receipt. The section move fails if it no longer matches."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "section_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "attach_image_to_reminder",
+      "title": "Attach Image to Reminder",
+      "description": "Attach one local image to exactly one reminder using the private ReminderKit path that can produce mobile-sync evidence. First call list_reminder_attachments to obtain reminder_version, then pass it as the required precondition with an absolute path and idempotency key. The backend is fixed and not caller-selectable; the receipt distinguishes verified mobile-visible evidence from pending sync.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "image_path": {
+            "type": "string",
+            "pattern": "^/",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute local filesystem path to the image."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Required reminder_version returned by list_reminder_attachments."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Caller-generated key for this exact image attachment; reuse only for an identical retry."
+          }
+        },
+        "required": ["reminder_id", "image_path", "if_version", "idempotency_key"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "attach_url_to_reminder",
+      "title": "Attach URL to Reminder",
+      "description": "Attach one URL to exactly one reminder selected by its stable ID. Repeating the same URL on the same reminder is a no-op. The change may sync to the user's other Apple devices through iCloud.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+            "maxLength": 8192,
+            "description": "Absolute HTTP or HTTPS URL including a host."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional reminder_version from list_reminder_attachments. Attachment fails if the reminder changed after that read."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "list_reminder_attachments",
+      "title": "List Reminder Attachments",
+      "description": "List a bounded set of active attachments for one reminder selected by its exact stable ID and return reminder_version for version-guarded attachment mutations. This tool makes no changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "attachment_type": {
+            "type": "string",
+            "enum": [
+              "image",
+              "url"
+            ],
+            "description": "Optional attachment-type filter."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100,
+            "description": "Maximum attachments to return."
+          }
+        },
+        "required": [
+          "reminder_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "audit_reminder_attachments",
+      "title": "Audit Reminder Attachments",
+      "description": "Audit a bounded set of image attachments for local/mobile-sync evidence. This is read-only and does not repair or delete attachments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Optional text filter for reminder title or notes."
+          },
+          "list_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional exact list name."
+          },
+          "problems_only": {
+            "type": "boolean",
+            "default": true,
+            "description": "Return only attachments that lack mobile-visible evidence when true."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "Maximum audit items to return."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "preview_reminder_attachment_repairs",
+      "title": "Preview Attachment Repairs",
+      "description": "Build a bounded, read-only snapshot of image attachments lacking mobile-sync evidence and return its candidate_digest. This never repairs, replaces, deletes, or backs up anything. Apply is allowed only when this preview is untruncated and the same scope/digest is supplied.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Optional reminder title/notes filter used to narrow the repair scope."
+          },
+          "list_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Optional exact list name used to narrow the repair scope."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "Maximum repair candidates in the snapshot. Narrow scope if the result is truncated."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "apply_reminder_attachment_repairs",
+      "title": "Apply Attachment Repairs",
+      "description": "Replace every candidate in one previously previewed, untruncated repair snapshot using ReminderKit, then soft-delete the old local-only attachment. Requires the exact candidate_digest and identical search/list/limit scope. A best-effort live-container backup is created by default; no_backup=true explicitly waives it. Per-item outcomes and recovery details are returned.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "The exact search filter used for preview."
+          },
+          "list_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "The exact list-name filter used for preview."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "The exact candidate bound used for preview."
+          },
+          "candidate_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Exact candidate_digest returned by preview_reminder_attachment_repairs."
+          },
+          "no_backup": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true only to explicitly waive the default best-effort live-container backup."
+          }
+        },
+        "required": ["candidate_digest"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "delete_reminder_attachment",
+      "title": "Delete Reminder Attachment",
+      "description": "Soft-delete exactly one attachment selected by its stable attachment ID from exactly one reminder selected by its stable reminder ID. No filename, URL, type, or fuzzy selector is accepted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "attachment_id": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact stable attachment UUID from list_reminder_attachments."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional reminder_version from list_reminder_attachments. Deletion fails if the reminder changed after that read."
+          }
+        },
+        "required": [
+          "reminder_id",
+          "attachment_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "replace_reminder_attachment",
+      "title": "Replace Reminder Attachment",
+      "description": "Replace exactly one attachment selected by stable reminder and attachment IDs with either one absolute local image path or one HTTP(S) URL. First call list_reminder_attachments to obtain reminder_version, then pass it with an idempotency key. Image replacement uses ReminderKit; URL replacement uses the private store. The old attachment is soft-deleted only after the replacement is created, with compensation on failed image replacement.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+          },
+          "attachment_id": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            "description": "Exact stable attachment UUID from list_reminder_attachments."
+          },
+          "image_path": {
+            "type": "string",
+            "pattern": "^/",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute local image path. Mutually exclusive with url."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+            "maxLength": 8192,
+            "description": "Absolute HTTP or HTTPS URL. Mutually exclusive with image_path."
+          },
+          "if_version": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Required reminder_version returned by list_reminder_attachments."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Caller-generated key for this exact replacement; reuse only for an identical retry."
+          }
+        },
+        "required": ["reminder_id", "attachment_id", "if_version", "idempotency_key"],
+        "oneOf": [
+          {"required": ["image_path"], "not": {"required": ["url"]}},
+          {"required": ["url"], "not": {"required": ["image_path"]}}
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    }
+  ]
+}

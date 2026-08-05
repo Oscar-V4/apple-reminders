@@ -2,15 +2,17 @@
 
 ## Status
 
-Accepted.
+Accepted as a private fallback; amended by 0009 for the default public read path.
 
 ## Decision
 
-Use a hybrid read policy:
+The original adapter used a hybrid read policy:
 
 - Assistant-style reasoning starts with a lightweight global index.
 - Explicit single-target actions use a narrow partial read.
 - Deep reads are performed only for the relevant lists, sections, reminders, notes, and attachments.
+
+ADR 0009 makes the normal path typed EventKit reads: enumerate the intended calendar IDs, fetch through a native semantic predicate with a limit, and page by an opaque filter-bound cursor. The disposable index remains useful only when a task genuinely needs private section/tag/attachment context that EventKit cannot project; it is not the default daily-brief source.
 
 ## Rationale
 

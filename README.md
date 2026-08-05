@@ -1,115 +1,186 @@
 # Apple Reminders Codex Plugin
 
-Apple Reminders is a local Codex plugin prototype for managing the native macOS Reminders app. It is designed for personal desktop use: read real Reminders state first, keep scans bounded, propose exact changes, apply writes through structured local commands, and verify results with read-back evidence.
+Apple Reminders is an experimental, local macOS Codex plugin. It provides a
+bundled stdio MCP server, task-oriented skills, and narrow adapters for reading
+and changing the current user's Apple Reminders data.
 
-This repository is not a drop-in OpenMinis contribution. OpenMinis runs skills inside a mobile Linux sandbox and already exposes an iOS native `apple-reminders` command. A public MinisSkills contribution should be exported separately as a smaller skill that targets that built-in command surface.
+This is not an Apple-supported integration, an App Store component, or a claim
+of stable compatibility with every macOS release. Public APIs are preferred.
+Some advanced operations rely on private frameworks or the private Reminders
+store and must pass build-, permission-, schema-, and read-back gates at run
+time.
 
-## Status
+## Release Status
 
-- Plugin manifest and primary `apple-reminders` skill are present.
-- Local adapter exposes a JSON-friendly CLI plus a disposable lightweight cache.
-- Reads cover reminders, lists, sections, tags, dates, completion state, priority, flags, URL attachments, image attachment metadata, and cache queries.
-- Writes cover reminders, sections, tags, URLs, attachment soft-delete/replacement, and mobile-visible image attachments.
-- Image attachment handling is mobile-first: the default path uses a ReminderKit background helper, and SQLite-only image rows are treated as local-only repair candidates unless CloudKit evidence proves otherwise.
-- No MCP server or Codex app connector is currently bundled. The plugin uses local scripts and skill instructions.
+- `.codex-plugin/plugin.json` declares the bundled skills and the substantive
+  local MCP configuration in `.mcp.json`.
+- `mcp/server.py` is a local JSON-RPC/stdio transport. It does not provide or
+  contact a remote MCP endpoint.
+- Public reminder fields use EventKit or AppleScript-backed paths where the
+  requested operation is supported.
+- Sections, tags, URL/image attachments, repair workflows, and some full-grasp
+  reads may use version-sensitive private storage or ReminderKit paths.
+- A zero exit code alone is never sufficient evidence that a mutation reached
+  Reminders, iCloud, another device, or a shared-list participant.
+
+The repository also contains a separate, reduced OpenMinis export under
+`minis/apple-reminders/`. It is not part of the installable macOS plugin
+artifact and does not include private adapters.
+
+## Architecture and Trust Boundary
+
+| Layer | Role | Trust and compatibility boundary |
+|---|---|---|
+| Skills | Bounded reads, ambiguity handling, mutation policy, and reporting | Instructions only; they do not grant macOS permissions |
+| Local MCP | Typed tools over stdio; invokes the bundled adapter | Runs with the Codex host user's filesystem and process permissions |
+| EventKit helper | Public reminders access for supported fields | Requires macOS Reminders permission; runtime success is permission/account dependent |
+| AppleScript | Public app automation and native deletion fallback | May require Automation permission and an available Reminders app |
+| SQLite adapter | Sections, tags, URL attachments, bounded cache/audit/repair surfaces | Private schema; can break after a macOS update; writes must be schema-gated and verified |
+| ReminderKit helper | Native image-attachment path | Private framework; not an App Store API; mobile-sync evidence is not an iPhone-screen confirmation |
+| Doctor | Content-free metadata, schema, permission-symptom, and toolchain checks | Does not prove write semantics, iCloud convergence, or device visibility |
+
+The MCP process can invoke tools that mutate reminders. Those changes may sync
+through the user's Apple account and may affect shared lists. Review tool
+arguments, target IDs, result status, warnings, and recovery semantics before
+treating an operation as complete.
+
+## Result Semantics
+
+Mutation responses use explicit states such as:
+
+- `unchanged`: no mutation was necessary.
+- `verified`: the selected backend produced the stated local verification
+  evidence.
+- `committed_verification_pending`: a write may have committed, but the required
+  read-back is not yet available.
+- `partial_success`: only part of the requested operation was verified.
+- `failed_no_mutation`: the operation failed before a known mutation.
+- `failed_manual_repair_required`: a partial mutation could not be compensated
+  automatically.
+
+`verified` is scoped to the verification object in that response. It does not
+implicitly mean “synced to iCloud,” “visible on iPhone,” or “observed by every
+shared-list participant.” For attachments, `mobile_visible_likely` or similar
+fields are sync evidence only. Actual device confirmation requires an actual
+device/UI observation.
 
 ## Requirements
 
-- macOS with Apple's Reminders app and a populated local Reminders store.
+- macOS with Apple Reminders available for the current user.
 - Python 3.10 or newer.
-- `osascript` for AppleScript-based public Reminders operations.
-- `sips` for image dimension reads on the SQLite diagnostic path.
-- Xcode command line tools, including `clang`, for the ReminderKit image helper.
-- Local filesystem access to `~/Library/Group Containers/group.com.apple.reminders/Container_v1/`.
-- Reminders/iCloud permissions configured for the current macOS user.
+- Xcode command-line tools for non-linking syntax checks and locally compiled
+  native helpers.
+- Reminders access for EventKit and, when used, Automation access for
+  AppleScript.
+- Explicit acceptance of the private-interface risk before using ReminderKit
+  or SQLite-backed advanced operations.
 
-## Architecture
+Do not assume support solely from the OS version. Run the doctor after macOS or
+Reminders updates and treat an unknown schema, missing entitlement/permission,
+or failed helper check as a blocked capability.
 
-- Skill layer: planning, safety, output conventions, bounded reads, and write policy.
-- Local adapter layer: AppleScript/EventKit for public reminder fields and final title/body UI sync; ReminderKit for mobile-visible image attachments; SQLite adapter for Reminders-only surfaces such as sections, tags, URL attachments, cache reads, and repair/audit flows.
-- Disposable cache layer: rebuildable JSON under `~/Library/Caches/apple-reminders-codex/` for lightweight list, section, reminder, tag, date, completion, priority, flag, image/URL attachment-count, and notes length/hash scans.
-- Verification layer: schema checks, transaction backups, dry-run previews, action journaling, and post-write reads.
+## Local Validation
 
-## Adapter CLI
-
-The local adapter is `scripts/reminders_adapter.py`. It is JSON-in/JSON-out friendly and can be wrapped by MCP later without moving business logic out of the adapter.
-
-Read and support commands:
-
-- `doctor`
-- `snapshot`
-- `list_lists`
-- `list_sections`
-- `search_reminders`
-- `read_reminder`
-- `list_tags`
-- `backup_store`
-- `cache_rebuild`
-- `cache_info`
-- `cache_search`
-- `cache_query`
-- `audit_attachments`
-
-Write commands:
-
-- `create_list`
-- `create_reminder`
-- `update_reminder`
-- `complete_reminder`
-- `delete_reminder`
-- `create_section`
-- `move_to_section`
-- `attach_image`
-- `attach_url`
-- `add_tag`
-- `remove_tag`
-- `cleanup_tags`
-- `list_attachments`
-- `repair_attachments`
-- `delete_attachment`
-- `replace_attachment`
-
-`cache_rebuild` reads the Reminders database and writes only the disposable cache. It does not write to the Reminders store. Cache search is intentionally lightweight: it searches cached IDs, titles, list names, section names, and cached date strings, but it does not store or search full note bodies.
-
-Date/time support covers timed reminders and all-day due dates. DB-created reminders immediately sync title/body back through AppleScript because native Reminders can otherwise render a newly inserted row with attachments/date but no visible text. Image attachments use the default `attach_image --backend reminderkit` path, which creates native attachment objects with CloudKit server-record evidence and is the expected path for iPhone-facing capture; image replacement uses the same ReminderKit path before soft-deleting the old attachment. `attach_image --backend db` remains only as a fallback/diagnostic path and should be considered Mac-local until `audit_attachments` proves mobile sync evidence. `repair_attachments` can dry-run or repair older local-only image attachments by reattaching through ReminderKit, then soft-deleting the old local-only attachment object. URL support uses native Reminders URL attachment rows so the URL appears in the app detail panel. Tag writes use Reminders hashtag label/object rows. Attachment deletion is a soft-delete of the native attachment object only; copied image files are not hard-deleted. Urgent alerts, location alerts, and message-when-messaging alerts are intentionally not exposed as write commands yet because those surfaces need more reverse-engineering before they are safe for delegated use.
-
-## Local-Only Boundary
-
-This plugin uses macOS-specific implementation details. It is intended for local Codex use on a Mac, not for App Store application code.
-
-- Private ReminderKit is used for reliable iPhone-visible image attachments.
-- Private SQLite-backed Reminders store access is used for sections, tags, URL attachments, cache reads, and bounded repair/audit flows.
-- The adapter stores a local action journal at `~/Library/Application Support/apple-reminders-codex/actions.jsonl`.
-- The adapter stores a disposable cache and compiled helper under `~/Library/Caches/apple-reminders-codex/`.
-- Plugin-owned directories are restricted to the current user, and journal, cache, helper lock, and backup files are written with owner-only permissions.
-- DB-backed write commands reject explicit database paths outside the discovered Reminders `Stores` directory.
-- Container backups are atomic archive-file writes but only best-effort snapshots of a live Reminders container; verify an archive before relying on it for recovery.
-- Apple Reminders and iCloud may sync reminder data through Apple services according to the user's account settings.
-
-## Verification
-
-Run the focused checks from the repository root:
+These checks do not launch Reminders or access live reminder rows:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests/test_reminders_adapter.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/reminders_adapter.py scripts/reminders_doctor.py scripts/validate_minis_export.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_plugin.py .
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_minis_export.py
-clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit -fsyntax-only scripts/remkit_attach_image.m
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/audit_source_package.py .
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-If PyYAML is installed in the active Python environment, validate the plugin
-manifest and skill contract:
+Native source checks on macOS:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
-PYTHONDONTWRITEBYTECODE=1 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/apple-reminders
+clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
+  -fsyntax-only scripts/remkit_attach_image.m
+clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
+  -fsyntax-only scripts/reminders_eventkit.m
+plutil -lint scripts/eventkit_bridge_info.plist
 ```
 
-## Minis Clean Export
+The EventKit request validator can be exercised without compiling a helper,
+requesting permission, or reading Reminders:
 
-For OpenMinis, do not contribute this full local plugin or copy the local
-`skills/apple-reminders/SKILL.md`. The repository includes a separate,
-allowlisted export at `minis/apple-reminders/`:
+```bash
+printf '%s\n' '{"schema_version":1,"operation":"capabilities"}' | \
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/eventkit_bridge.py --validate-only
+```
+
+The onboarding doctor is a separate local diagnostic. It intentionally reads
+filesystem metadata and the Reminders database schema, but not reminder rows,
+titles, notes, list/section/tag names, journal contents, cache contents, or
+backup contents; it does not write, launch Reminders, or request permission:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/reminders_doctor.py --compact
+```
+
+Read the emitted `privacy`, `checks`, and `capabilities` fields. A static pass
+is a prerequisite, not a guarantee that a future write is semantically safe.
+
+## Deterministic Source Package
+
+The release ZIP is built from a runtime-only allowlist. It contains the plugin
+manifest, MCP config/server/schema, reviewed brand assets, runtime skills, root
+license/privacy/readme files, and the adapter/native-helper sources required by
+those components. It intentionally excludes tests, contributor docs, GitHub
+workflows, the OpenMinis export, reverse-engineering screenshots, bytecode,
+databases, journals, caches, backups, and pre-existing archives.
+
+Build and audit without contacting Reminders:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/build_source_package.py \
+  --output-directory dist
+```
+
+The builder normalizes ZIP timestamps, permissions, member ordering, and
+compression mode, audits the resulting versioned archive, and prints its path
+and SHA-256. It refuses version/filename drift and unexpected package members.
+Ignored local artifacts are reported by name and excluded without opening
+screenshot, database, backup, or archive contents. Use `--strict-worktree`
+when a completely clean checkout is required.
+
+## MCP and Adapter Surfaces
+
+The MCP tool contract lives in `schemas/mcp-tools.json`; the adapter CLI is
+`scripts/reminders_adapter.py`. Inspect the current schema or run `--help`
+instead of relying on an old command list. Broadly, the implementation covers:
+
+- bounded account/list/section/reminder/tag and attachment reads;
+- exact-ID EventKit reminder create/update/complete/reopen/move operations and
+  exact-ID native deletion;
+- list creation by exact name with optional color and emblem, plus section and
+  tag operations;
+- first-class MCP tools for URL/image attachment, exact attachment replacement
+  and deletion, and digest-bound preview/apply repair workflows where the
+  current private-interface capability gate permits them;
+- local diagnostics, backup, cache, and privacy-log maintenance.
+
+Unsupported, ambiguous, permission-blocked, schema-unknown, or
+verification-pending requests must be reported as such. The plugin must not
+invent support or silently drop fields.
+
+## Local Files and Recovery
+
+Depending on the commands used, the adapter can create data under:
+
+- `~/Library/Application Support/apple-reminders-codex/`
+- `~/Library/Caches/apple-reminders-codex/`
+
+These locations can contain sensitive identifiers, cached titles/list names,
+operation metadata, compiled helpers, capability records, and optional full
+Reminders-container backups. Backups are best-effort snapshots of a live
+container, not guaranteed transactionally consistent recovery points. See
+[PRIVACY.md](PRIVACY.md) before enabling advanced writes or sharing diagnostic
+output.
+
+## OpenMinis Boundary
+
+Do not submit this full macOS plugin or its private adapter to OpenMinis. The
+allowlisted export is only:
 
 ```text
 minis/apple-reminders/
@@ -118,16 +189,14 @@ minis/apple-reminders/
     └── evals.json
 ```
 
-That export relies only on Minis' built-in `apple-reminders` commands: `list`,
-`create`, `update`, `complete`, and `delete`. It omits the macOS adapter,
-private ReminderKit helper, direct SQLite writes, local cache, attachment
-repair flows, local evals, and Codex plugin manifest files. Run
-`python3 scripts/validate_minis_export.py` before copying that directory to
-`OpenMinis/MinisSkills/apple-reminders`; the validator fails if extra files,
-symlinks, local paths, or private implementation tokens enter the package.
+Validate that export with `python3 scripts/validate_minis_export.py`. It targets
+only the built-in `apple-reminders` command and omits MCP, macOS adapters,
+private frameworks/storage, caches, backups, attachments, repair flows, and
+local evidence.
 
-Use an OpenMinis issue, not an app PR, for feature requests that need new native reminder surfaces such as sections, tags, or attachments.
+## License and Contributions
 
-## Safety Notes
-
-The macOS Reminders app exposes only part of its model through public APIs. Image attachments require private ReminderKit for reliable iPhone visibility; sections, tags, and URL attachments currently require a local adapter over the Reminders store. Those paths must stay narrow, transactional where applicable, schema-checked, audited, and easy to disable.
+See [LICENSE](LICENSE), [PRIVACY.md](PRIVACY.md), and the upstream
+[contribution guide](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
+Do not include real reminder data, screenshots, databases, archives, backups,
+journals, or caches in issues, fixtures, commits, or release artifacts.

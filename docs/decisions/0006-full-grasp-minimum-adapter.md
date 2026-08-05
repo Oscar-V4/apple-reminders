@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Superseded by 0009 after completing the v1 adapter milestone.
 
 ## Decision
 
@@ -52,5 +52,5 @@ The v1 adapter should therefore include those capabilities from the start, while
 ## Consequences
 
 - The adapter should be a local CLI/library first.
-- MCP can be added later as a thin wrapper.
+- The 0.2 line includes MCP as a thin typed wrapper over EventKit and the adapter.
 - The command contract should be stable before plugin tool exposure is attempted.

@@ -1,7 +1,7 @@
 {
   "name": "apple-reminders",
-  "version": "0.1.0+codex.20260729210121",
-  "description": "Connect Apple Reminders for task capture, review, organization, mobile-visible image attachments, and safe reminder changes.",
+  "version": "0.2.0",
+  "description": "Manage Apple Reminders through a local MCP and macOS adapters with explicit verification and private-API trust boundaries.",
   "author": {
     "name": "Soo",
     "url": "https://github.com/Oscar-V4"
@@ -15,13 +15,16 @@
     "tasks",
     "productivity",
     "attachments",
+    "local-mcp",
+    "macos",
     "codex"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders",
-    "shortDescription": "Manage Apple Reminders tasks and iPhone-visible attachments",
-    "longDescription": "Use Apple Reminders to inspect lists, sections, reminders, due dates, notes, tags, and mobile-visible image attachments, then draft or apply safe task changes directly from Codex.",
+    "shortDescription": "Manage reminders with explicit local trust boundaries",
+    "longDescription": "Inspect and change Apple Reminders through a local stdio MCP. Public macOS APIs are preferred; advanced fields use version-sensitive private interfaces and report verification limits explicitly.",
     "developerName": "Soo",
     "category": "Productivity",
     "capabilities": [
@@ -31,7 +34,7 @@
     "websiteURL": "https://github.com/Oscar-V4/apple-reminders",
     "privacyPolicyURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md",
     "defaultPrompt": [
-      "Summarize, organize, capture, attach iPhone-visible images to, or safely update my Apple Reminders"
+      "Brief, capture, organize, or safely update my Apple Reminders"
     ],
     "brandColor": "#007AFF",
     "composerIcon": "./assets/icon.png",

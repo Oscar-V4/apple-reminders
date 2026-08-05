@@ -9,7 +9,14 @@ description: Manage native Apple Reminders data from Codex. Use when the user wa
 
 Use this skill to turn Apple Reminders state into grounded task briefs, capture plans, organization proposals, and safe reminder updates. Keep answers tied to actual list names, section names, reminder titles, dates, notes, tags, URLs, completion state, and attachment evidence.
 
-For exact adapter invocation, backend selection, and command names, read [references/adapter-cli.md](references/adapter-cli.md). The bundled adapter is a local macOS helper for this personal plugin. It is not the OpenMinis contribution surface. Do not copy this local skill into MinisSkills; use the separately allowlisted `minis/apple-reminders/` export, which targets only Minis' built-in command surface.
+Use the bundled typed MCP tools as the normal operation surface. For private maintenance details, backend policy, or a missing MCP tool, read [references/adapter-cli.md](references/adapter-cli.md). The adapter is a local macOS implementation detail for this personal plugin, not the OpenMinis contribution surface. Do not copy this local skill into MinisSkills; use the separately allowlisted `minis/apple-reminders/` export, which targets only Minis' built-in command surface.
+
+## Purpose-Specific Routing
+
+- Use `$apple-reminders-daily-brief` for today/tomorrow/date briefs, overdue/due-today/this-week summaries, and no-due-date task readouts.
+- Use `$apple-reminders-quick-capture` for adding one or more new reminders, including list choice, typed due dates/alarms, recurrence, notes, priority, URLs, or image follow-up.
+- Use `$apple-reminders-organize-cleanup` for list/section organization, bounded moves, batch completion, deletion previews, tag cleanup, and deduplication proposals.
+- Use `$apple-reminders-attachment-maintenance` for screenshots, images, URLs, iPhone visibility, attachment audit, repair, replacement, or deletion.
 
 ## Preferred Deliverables
 
@@ -24,25 +31,26 @@ For exact adapter invocation, backend selection, and command names, read [refere
 
 ## Workflow
 
-1. Read the relevant Reminders state first so the request is grounded in actual lists, sections, reminders, and attachments.
-2. Normalize relative time language into explicit dates, times, and timezone-aware ranges before reasoning about due dates or reminders.
-3. Keep reads bounded. Prefer explicit list, section, status, date window, tag, or search text constraints. If the user does not state a horizon, choose a narrow default and say so.
-4. When a bounded read returns too much, page or summarize within that same scope before widening the scan.
-5. When the user leaves something ambiguous, inspect Reminders history and current list structure for a clear precedent before choosing a default.
-6. When a list, section, or reminder is referenced indirectly, search the bounded relevant state before asking the user for details.
-7. For image or URL attachments, resolve the exact target reminder first, attach/delete/replace the explicit file path, URL, or attachment id, then read back the reminder or attachment row to verify it. For image attachments, use the `attach_image` default ReminderKit background backend and verify mobile sync evidence before reporting success for user-facing work.
-8. For sections, preserve list-level section membership and ordering. Do not treat a section name as global unless the data proves it is unique.
-9. When creating a new list, choose a subject-appropriate emoji badge/emblem and color instead of leaving the default list icon. Infer a tasteful emoji from the list purpose, matching nearby user conventions when possible, and verify the list's visual identity after creation. If the adapter cannot set the badge/emblem, report that limitation instead of silently leaving a generic icon.
-10. For bulk edits, inspect a reasonable bounded set first. If the current user has granted standing delegation, apply the change and report the exact affected set afterward; otherwise restate the qualifying reminders before applying changes.
-11. Use foreground UI automation only as a fallback for verification or unsupported flows. Prefer public APIs and the local background Reminders adapter for normal operation.
-12. Surface conflicts, duplicate matches, missing target lists, sync uncertainty, and destructive effects before writing.
-13. If the request is still ambiguous after checking for precedent or scanning a reasonable bounded scope, summarize the candidate targets or exact diff before writing anything.
+1. On first use or after an environment change, run `reminders_plugin_doctor` and `get_reminders_capabilities`. Call `request_reminders_access` only when EventKit permission is needed and the user has requested a Reminders operation; it is the explicit TCC-prompting step.
+2. Read the relevant Reminders state first so the request is grounded in actual lists, sections, reminders, and attachments. Prefer `list_reminder_lists`, `fetch_reminders`, and `read_reminder` for public fields.
+3. Normalize relative time language into explicit dates, times, and timezone-aware ranges before reasoning about due dates or alarms. Keep all-day/timed due values and alarm triggers distinct.
+4. Keep reads semantically bounded. Use calendar IDs, the matching incomplete-due/completed-completion range, or a narrower private scope in addition to a limit. Text search or `modified_after` alone is not a native EventKit bound.
+5. When a bounded read returns a continuation cursor, page within the same immutable scope; never reuse a cursor after changing filters, sort, or page size.
+6. When the user leaves something ambiguous, inspect current list structure and bounded matching state for a clear precedent before choosing a default.
+7. When a list, section, or reminder is referenced indirectly, search the bounded relevant state before asking the user for details.
+8. For image or URL attachments, resolve the exact target reminder first, act on an explicit source path, URL, or attachment ID, then read back attachment evidence. For images, use `attach_image_to_reminder`; its normal backend is ReminderKit and success still requires mobile-sync evidence.
+9. For sections, preserve list-level section membership and ordering. Do not treat a section name as global unless the data proves it is unique.
+10. When creating a new list, choose a subject-appropriate emoji badge/emblem and color instead of leaving the default list icon. Infer a tasteful emoji from the list purpose, matching nearby user conventions when possible, and verify the list's visual identity after creation. If the available tool cannot set the badge/emblem, report that limitation instead of silently promising it.
+11. For bulk edits, inspect a reasonable bounded set first. If the current user has granted standing delegation, apply the change and report the exact affected set afterward; otherwise restate the qualifying reminders before applying changes.
+12. Use `show_reminder` only when the user asks for a native UI handoff or visual inspection. Foreground UI automation is not the normal data path.
+13. Surface conflicts, duplicate matches, missing target lists, sync uncertainty, and destructive effects before writing.
+14. If the request is still ambiguous after checking for precedent or scanning a reasonable bounded scope, summarize the candidate targets or exact diff before writing anything.
 
 ## Daily Brief Defaults
 
 - Use active incomplete reminders only unless the user asks for completed items.
 - Resolve “today” in the current local timezone. Treat overdue as before today's local midnight, due today by local display date, and “this week” as after today through the coming Sunday. Use a rolling seven-day window only when the user says “next seven days.”
-- Bound the initial snapshot at 100 reminders. Show at most 20 no-due-date items, group them by list or section, and report omitted or truncated counts.
+- Enumerate the intended lists, then call `fetch_reminders` with their `calendar_ids`, `status=incomplete`, and a limit of at most 100 per page. This calendar scope includes unscheduled items; a due-date-only range does not. Follow opaque cursors only within the same scope. Show at most 20 no-due-date items and report omitted or truncated counts.
 - Treat all-day and timed reminders by their local display date. State the date and timezone basis in the brief.
 - Do not include note bodies, URLs, attachment metadata, source paths, or raw database paths unless the request requires them or they are necessary to disambiguate a target.
 
@@ -53,22 +61,24 @@ For exact adapter invocation, backend selection, and command names, read [refere
 - When standing delegation applies, high-impact writes may be executed without a separate confirmation, but they must be bounded, logged, and verified with a read-back.
 - When standing delegation does not apply, restate the qualifying reminder set and scope before applying high-impact writes.
 - If multiple similarly named reminders, lists, or sections exist, identify the intended one explicitly before editing.
-- Prefer structured local adapter calls over free-form AppleScript or UI gestures; use foreground UI automation only when the adapter cannot do the job or a UI read-back is required.
-- Prefer EventKit or AppleScript-backed behavior for public reminder fields and deletion.
+- Prefer typed MCP tools over direct CLI, free-form AppleScript, or UI gestures.
+- Public reminder reads and writes use EventKit. Create calls require an idempotency key; updates, completion/reopen, and list-to-list moves require the exact ID and `expected_last_modified` from a fresh read.
+- Preserve omitted fields on update. Use typed `due`, `alarms`, and `recurrence_rules`; never infer an alarm merely from a due date.
+- EventKit does not expose the native Reminders flag field. If the user explicitly asks to set or clear it, follow the exact-ID, version-checked AppleScript fallback in the adapter reference and read back; never claim the typed create/update tool wrote a flag.
 - For image attachments and image replacement, prefer the ReminderKit background path. It creates native Reminders attachments with CloudKit server-record evidence and is the normal path for iPhone-facing capture.
 - Resolve one explicit source image before writing. If “this screenshot” could refer to multiple local files or no attached conversation image is available, identify or request the exact source instead of guessing.
-- Use the SQLite-backed adapter for Reminders surfaces not exposed through public APIs, such as URL attachments, sections, tags, full-grasp cache reads, and verified audit or repair flows.
-- When creating or updating reminders through the local adapter, rely on the adapter's AppleScript title/body sync for visible native UI text; do not treat DB-only title/body writes as sufficient.
+- Use the private adapter-backed MCP tools only for Reminders surfaces not exposed through public APIs, such as attachment objects, sections, tags, and verified audit or repair flows.
 - The SQLite-backed adapter must run schema checks, use transactions, update related cloud-state rows, and verify with a read-back.
-- Deletion must use native Reminders delete behavior so deleted reminders go through Reminders' Recently Deleted flow. Never hard-delete rows directly from the database.
+- Use `delete_reminder` with its default `backend=auto` policy. A DB soft-delete is eligible only when a capability record proves recovery and sync parity for the exact OS, Reminders build, and schema fingerprint; otherwise it uses native AppleScript. Never force a retry through DB after a native mutation becomes uncertain, and never hard-delete reminder rows.
 - Do not make direct database writes outside the Reminders group container discovered on the user's machine.
 - Keep iCloud sync caveats explicit when a change relies on private ReminderKit or storage details.
-- Use safe tag writes only through scoped adapter commands; do not hard-delete tag labels as part of ordinary tag removal.
+- Use `add_reminder_tag` and `remove_reminder_tag` for ordinary assignment changes; those do not hard-delete labels. Unused-label maintenance is intentionally separate: preview with `preview_unused_reminder_tags`, review the bounded/account-aware candidate set, and pass its exact digest to `cleanup_unused_reminder_tags`. That apply operation hard-deletes only revalidated zero-reference label rows and reports backup/recovery semantics.
 - Use safe attachment removal only through scoped adapter commands; these soft-delete Reminders attachment objects and do not hard-delete copied image files.
 - Treat SQLite-created image attachments as local-only unless audit/read-back shows mobile sync evidence. Do not use local-only image attachments for ordinary user-facing task capture when the user will review the reminder on iPhone.
 - `mobile_visible_likely: true` is CloudKit/mobile-sync evidence, not direct inspection of an iPhone screen. Say “mobile visibility evidence was found”; claim “confirmed on iPhone” only after an actual device/UI read-back.
-- When attachment audit finds local-only image attachments, prefer a dry-run repair first, then a bounded, backed-up repair when the user has delegated cleanup.
-- Do not write urgent alerts, location alerts, or message-when-messaging alerts until the adapter exposes verified commands for those surfaces.
+- When attachment audit finds local-only image attachments, call `preview_reminder_attachment_repairs`, then pass its unchanged candidate digest to a bounded, backed-up `apply_reminder_attachment_repairs` after delegation.
+- Absolute alarms and coordinate-backed enter/leave location alarms are supported through EventKit. Do not write urgent alerts, relative alarms, or message-when-messaging alerts; those surfaces are not verified.
+- Report the normalized receipt status exactly: `unchanged`, `verified`, `committed_verification_pending`, or `partial_success`. Failed operations use stable error codes and must not be described as success.
 
 ## Output Conventions
 
@@ -81,7 +91,7 @@ For exact adapter invocation, backend selection, and command names, read [refere
 
 ## Adapter Command Surface
 
-Use the local adapter for available commands such as reads, search, create/update/complete/delete, section moves, tags, attachments, cache, backup, and diagnostics. Before invoking detailed or uncommon commands, read [references/adapter-cli.md](references/adapter-cli.md) and run the command's `--help`.
+Use the bundled MCP tools for reads, create/update/complete/reopen/delete, list/section moves, tags, attachments, repair, diagnostics, permission handling, and native UI handoff. Read [references/adapter-cli.md](references/adapter-cli.md) only for the private implementation boundary or an advanced maintenance flow that is not exposed as a tool.
 
 ## Example Requests
 

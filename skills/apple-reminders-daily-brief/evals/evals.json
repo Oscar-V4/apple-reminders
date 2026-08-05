@@ -1,0 +1,24 @@
+{
+  "skill_name": "apple-reminders-daily-brief",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "오늘 할 일 브리핑해줘. 지난 항목, 오늘 마감, 이번 주 예정, 기한 없는 항목으로 나눠줘.",
+      "expected_output": "Reads a bounded incomplete reminder scope, resolves today's local date and timezone, runs the deterministic renderer, and returns overdue, due today, later this week, and no-due-date sections with exact IDs and no note bodies.",
+      "assertions": [
+        "Uses list_reminder_lists and fetch_reminders with explicit calendar IDs and a limit before summarizing.",
+        "States the date and timezone basis.",
+        "Does not expose raw database paths, full JSON rows, or unrelated notes."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "내일 리마인더 브리핑을 아주 간단히 보여줘.",
+      "expected_output": "Normalizes tomorrow to an exact date, feeds bounded MCP/EventKit JSON to render_daily_brief.py, and returns a compact version of the generated sections without widening the read.",
+      "assertions": [
+        "Uses an explicit date window or bounded read.",
+        "Preserves reminder titles and IDs from tool output."
+      ]
+    }
+  ]
+}

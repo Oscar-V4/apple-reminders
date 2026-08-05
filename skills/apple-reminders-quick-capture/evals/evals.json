@@ -1,0 +1,23 @@
+{
+  "skill_name": "apple-reminders-quick-capture",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "쇼핑 목록에 우유 사기를 오늘 저녁 7시로 추가해줘.",
+      "expected_output": "Reads list state first, normalizes the due time to typed EventKit due data with an explicit offset and timezone, calls create_reminder with only requested fields and an idempotency key, reads it back, and reports the created ID and receipt status without inventing an alarm.",
+      "assertions": [
+        "Does not create a missing list without delegation.",
+        "Reports partial_success or committed_verification_pending truthfully if returned."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "이 URL을 취업캠프 준비에 참고 링크로 저장해줘: https://example.com",
+      "expected_output": "Creates or resolves the target reminder/list scope, attaches the normalized URL only after exact target resolution, reads back attachment evidence, and reports the reminder ID plus attachment status.",
+      "assertions": [
+        "Uses exact target IDs for follow-up attachment work.",
+        "Does not claim unsupported fields were written."
+      ]
+    }
+  ]
+}

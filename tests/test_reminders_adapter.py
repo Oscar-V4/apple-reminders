@@ -63,6 +63,16 @@ class ScheduleHelperTests(unittest.TestCase):
                 all_day_due_date="2026-07-03",
             )
 
+    def test_schedule_values_rejects_alert_due_date_conflation(self) -> None:
+        with self.assertRaises(reminders_adapter.AdapterError) as raised:
+            reminders_adapter.schedule_values(remind_at="2026-07-03T14:30:00+09:00")
+
+        self.assertEqual(raised.exception.code, "unsupported_capability")
+
+    def test_timed_schedule_requires_explicit_timezone(self) -> None:
+        with self.assertRaises(reminders_adapter.AdapterError):
+            reminders_adapter.schedule_values(due_at="2026-07-03T14:30:00")
+
     def test_normalized_url_requires_scheme(self) -> None:
         with self.assertRaises(reminders_adapter.AdapterError):
             reminders_adapter.normalized_url("example.com/no-scheme")
@@ -308,11 +318,12 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertTrue(raised.exception.details["missing_columns"])
 
     def test_replace_image_uses_reminderkit_backend(self) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
         args = mock.Mock(
             db="/tmp/reminders.sqlite",
             image="/tmp/example.png",
             url=None,
-            id="REM-1",
+            id=reminder_id,
             title=None,
             list=None,
             type=None,
@@ -332,12 +343,29 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/reminders.sqlite"),
             ),
             mock.patch.object(reminders_adapter, "connect", return_value=con),
-            mock.patch.object(reminders_adapter, "find_reminder", return_value={"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}),
+            mock.patch.object(
+                reminders_adapter,
+                "require_command_capability",
+                return_value={"supported": True},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_reminder",
+                return_value={"Z_PK": 1, "ZCKIDENTIFIER": reminder_id},
+            ),
             mock.patch.object(reminders_adapter, "resolve_attachment_selection", return_value=(selected, [], None)),
             mock.patch.object(reminders_adapter, "attachment_payload", return_value={"pk": 10, "id": "ATTACH-OLD"}),
             mock.patch.object(reminders_adapter, "attach_image_reminderkit_record", return_value=new_result) as attach_reminderkit,
             mock.patch.object(reminders_adapter, "attach_image_record") as attach_db,
             mock.patch.object(reminders_adapter, "soft_delete_attachment_record", return_value={"pk": 10}),
+            mock.patch.object(
+                reminders_adapter,
+                "attachment_replacement_readback",
+                return_value={
+                    "old_attachment_soft_deleted": True,
+                    "new_attachment_active": True,
+                },
+            ),
             mock.patch.object(reminders_adapter, "log_action"),
             mock.patch.object(reminders_adapter, "json_out"),
         ):
@@ -400,7 +428,7 @@ class AttachmentSyncTests(unittest.TestCase):
                 with (
                     mock.patch.object(reminders_adapter, "reminderkit_attach_helper", return_value=helper),
                     mock.patch.object(reminders_adapter.subprocess, "run", return_value=proc),
-                    self.assertRaises(reminders_adapter.AdapterError),
+                    self.assertRaises(reminders_adapter.AdapterError) as raised,
                 ):
                     reminders_adapter.attach_image_reminderkit_record(
                         con,
@@ -409,6 +437,10 @@ class AttachmentSyncTests(unittest.TestCase):
                     )
             finally:
                 con.close()
+
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["partial_failure"])
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
 
     def test_helper_attach_raises_partial_failure_when_new_row_is_not_mobile_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -606,6 +638,59 @@ class AttachmentSyncTests(unittest.TestCase):
                 con.close()
 
         self.assertIn("timed out", str(raised.exception))
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["partial_failure"])
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
+
+    def test_attach_image_unknown_helper_outcome_returns_pending_full_receipt(self) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        args = argparse.Namespace(
+            db="/tmp/reminders.sqlite",
+            id=reminder_id,
+            title=None,
+            list=None,
+            image="/tmp/example.png",
+            backend="reminderkit",
+            if_version=3,
+            idempotency_key=None,
+        )
+        con = mock.Mock()
+        reminder = {
+            "Z_PK": 1,
+            "ZCKIDENTIFIER": reminder_id,
+            "Z_OPT": 3,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZMARKEDFORDELETION": 0,
+        }
+        uncertain = reminders_adapter.AdapterError(
+            "helper timed out",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+
+        with (
+            mock.patch.object(reminders_adapter, "resolve_database", return_value=Path("/tmp/reminders.sqlite")),
+            mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(reminders_adapter, "require_command_capability", return_value={"supported": True}),
+            mock.patch.object(reminders_adapter, "find_reminder", return_value=reminder),
+            mock.patch.object(reminders_adapter, "attach_image_reminderkit_record", side_effect=uncertain),
+            mock.patch.object(reminders_adapter, "reread_reminder", return_value=reminder),
+            mock.patch.object(reminders_adapter, "log_action", return_value=None),
+        ):
+            receipt = reminders_adapter.attach_image_once(args)
+
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["status"], "committed_verification_pending")
+        self.assertEqual(receipt["operation"], "attach_image")
+        self.assertEqual(receipt["target"]["reminder_id"], reminder_id)
+        self.assertIsNone(receipt["target"]["attachment_id"])
+        self.assertTrue(receipt["verification"]["mutation_outcome_unknown"])
+        self.assertEqual(
+            receipt["recovery"]["semantics"],
+            "inspect_reminder_attachments_before_retry",
+        )
 
     def test_image_size_wraps_sips_timeout_as_adapter_error(self) -> None:
         image = Path("/tmp/example.png")
@@ -652,6 +737,11 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/reminders.sqlite"),
             ),
             mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(
+                reminders_adapter,
+                "require_command_capability",
+                return_value={"supported": True},
+            ),
             mock.patch.object(reminders_adapter, "find_reminder", return_value=reminder),
             mock.patch.object(reminders_adapter, "resolve_attachment_selection", return_value=(selected, [], None)),
             mock.patch.object(reminders_adapter, "attachment_payload", return_value={"pk": 10, "id": "ATTACH-OLD"}),
@@ -659,14 +749,15 @@ class AttachmentSyncTests(unittest.TestCase):
             mock.patch.object(reminders_adapter, "soft_delete_attachment_record", side_effect=reminders_adapter.AdapterError("delete failed")),
             mock.patch.object(reminders_adapter, "compensate_new_attachment", return_value={"pk": 11}) as compensate,
             mock.patch.object(reminders_adapter, "json_out") as json_out,
-            self.assertRaises(reminders_adapter.AdapterError) as raised,
         ):
-            reminders_adapter.cmd_replace_attachment(args)
+            result = reminders_adapter.cmd_replace_attachment(args)
 
         compensate.assert_called_once_with(con, reminder, new_result)
-        json_out.assert_not_called()
-        self.assertTrue(raised.exception.details["partial_failure"])
-        self.assertTrue(raised.exception.details["compensated"])
+        receipt = json_out.call_args.args[0]
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["status"], "failed_no_mutation")
+        self.assertEqual(receipt["verification"]["state"], "compensated")
+        self.assertTrue(receipt["verification"]["compensation_succeeded"])
 
     def test_replace_image_compensates_unverified_new_attachment(self) -> None:
         args = mock.Mock(
@@ -697,6 +788,7 @@ class AttachmentSyncTests(unittest.TestCase):
             partial_failure=True,
             attachment=new_attachment,
         )
+        self.assertEqual(verification_error.code, "sync_pending")
         expected_result = {"attachment": new_attachment, "_row": new_row}
 
         with (
@@ -706,6 +798,11 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/reminders.sqlite"),
             ),
             mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(
+                reminders_adapter,
+                "require_command_capability",
+                return_value={"supported": True},
+            ),
             mock.patch.object(reminders_adapter, "find_reminder", return_value=reminder),
             mock.patch.object(
                 reminders_adapter,
@@ -727,11 +824,118 @@ class AttachmentSyncTests(unittest.TestCase):
                 "compensate_new_attachment",
                 return_value={"pk": 11},
             ) as compensate,
-            self.assertRaises(reminders_adapter.AdapterError),
+            mock.patch.object(reminders_adapter, "json_out") as json_out,
         ):
-            reminders_adapter.cmd_replace_attachment(args)
+            result = reminders_adapter.cmd_replace_attachment(args)
 
         compensate.assert_called_once_with(con, reminder, expected_result)
+        receipt = json_out.call_args.args[0]
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["status"], "failed_no_mutation")
+        self.assertEqual(receipt["error"]["code"], "sync_pending")
+
+    def test_replace_image_compensation_failure_returns_full_manual_repair_receipt(self) -> None:
+        args = mock.Mock(
+            db="/tmp/reminders.sqlite",
+            image="/tmp/example.png",
+            url=None,
+            id="REM-1",
+            title=None,
+            list=None,
+            type=None,
+            attachment_id="ATTACH-OLD",
+            attachment_pk=None,
+            filename=None,
+            old_url=None,
+        )
+        con = mock.Mock()
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        selected = {
+            "Z_PK": 10,
+            "ZCKIDENTIFIER": "ATTACH-OLD",
+            "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT,
+        }
+        new_result = {
+            "attachment": {"pk": 11, "id": "ATTACH-NEW"},
+            "_row": {"Z_PK": 11, "ZCKIDENTIFIER": "ATTACH-NEW"},
+        }
+
+        with (
+            mock.patch.object(reminders_adapter, "resolve_database", return_value=Path("/tmp/reminders.sqlite")),
+            mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(reminders_adapter, "require_command_capability", return_value={"supported": True}),
+            mock.patch.object(reminders_adapter, "find_reminder", return_value=reminder),
+            mock.patch.object(reminders_adapter, "resolve_attachment_selection", return_value=(selected, [], None)),
+            mock.patch.object(reminders_adapter, "attachment_payload", return_value={"pk": 10, "id": "ATTACH-OLD"}),
+            mock.patch.object(reminders_adapter, "attach_image_reminderkit_record", return_value=new_result),
+            mock.patch.object(reminders_adapter, "soft_delete_attachment_record", side_effect=reminders_adapter.AdapterError("delete failed")),
+            mock.patch.object(reminders_adapter, "compensate_new_attachment", side_effect=reminders_adapter.AdapterError("cleanup failed")),
+            mock.patch.object(reminders_adapter, "json_out") as json_out,
+        ):
+            result = reminders_adapter.cmd_replace_attachment(args)
+
+        receipt = json_out.call_args.args[0]
+        self.assertEqual(result, 1)
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["status"], "failed_manual_repair_required")
+        self.assertEqual(receipt["operation"], "replace_attachment")
+        self.assertEqual(receipt["target"]["new_attachment_id"], "ATTACH-NEW")
+        self.assertEqual(receipt["verification"]["state"], "manual_repair_required")
+        self.assertEqual(receipt["recovery"]["semantics"], "delete_new_attachment_manually")
+        self.assertEqual(receipt["error"]["code"], "sync_pending")
+
+    def test_replace_postcommit_inconclusive_returns_full_manual_repair_receipt(self) -> None:
+        args = mock.Mock(
+            db="/tmp/reminders.sqlite",
+            image="/tmp/example.png",
+            url=None,
+            id="REM-1",
+            title=None,
+            list=None,
+            type=None,
+            attachment_id="ATTACH-OLD",
+            attachment_pk=None,
+            filename=None,
+            old_url=None,
+        )
+        con = mock.Mock()
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        selected = {
+            "Z_PK": 10,
+            "ZCKIDENTIFIER": "ATTACH-OLD",
+            "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT,
+        }
+        new_result = {
+            "attachment": {"pk": 11, "id": "ATTACH-NEW"},
+            "_row": {"Z_PK": 11, "ZCKIDENTIFIER": "ATTACH-NEW"},
+            "sync": {"mobile_visible_likely": True},
+        }
+
+        with (
+            mock.patch.object(reminders_adapter, "resolve_database", return_value=Path("/tmp/reminders.sqlite")),
+            mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(reminders_adapter, "require_command_capability", return_value={"supported": True}),
+            mock.patch.object(reminders_adapter, "find_reminder", return_value=reminder),
+            mock.patch.object(reminders_adapter, "resolve_attachment_selection", return_value=(selected, [], None)),
+            mock.patch.object(reminders_adapter, "attachment_payload", return_value={"pk": 10, "id": "ATTACH-OLD"}),
+            mock.patch.object(reminders_adapter, "attach_image_reminderkit_record", return_value=new_result),
+            mock.patch.object(reminders_adapter, "soft_delete_attachment_record", return_value={"id": "ATTACH-OLD", "marked_for_deletion": True}),
+            mock.patch.object(
+                reminders_adapter,
+                "attachment_replacement_readback",
+                return_value={"old_attachment_soft_deleted": True, "new_attachment_active": False},
+            ),
+            mock.patch.object(reminders_adapter, "json_out") as json_out,
+        ):
+            result = reminders_adapter.cmd_replace_attachment(args)
+
+        receipt = json_out.call_args.args[0]
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["status"], "failed_manual_repair_required")
+        self.assertEqual(receipt["target"]["old_attachment_id"], "ATTACH-OLD")
+        self.assertEqual(receipt["target"]["new_attachment_id"], "ATTACH-NEW")
+        self.assertTrue(receipt["verification"]["replacement_committed"])
+        self.assertEqual(receipt["recovery"]["semantics"], "inspect_both_attachments_and_restore_manually")
 
     def test_repair_compensates_unverified_new_attachment(self) -> None:
         args = argparse.Namespace(
@@ -752,6 +956,17 @@ class AttachmentSyncTests(unittest.TestCase):
             "_row": old_row,
         }
         source = Path("/tmp/source.png")
+        args.preview_digest = reminders_adapter.repair_candidate_digest(
+            [
+                {
+                    "reminder": item["reminder"],
+                    "attachment": item["attachment"],
+                    "problem": item["problem"],
+                    "source_files": [source.name],
+                    "repairable": True,
+                }
+            ]
+        )
         new_row = {"Z_PK": 11, "ZCKIDENTIFIER": "ATTACH-NEW"}
         new_attachment = {"pk": 11, "id": "ATTACH-NEW"}
         verification_error = reminders_adapter.AttachmentVerificationError(
@@ -1047,12 +1262,12 @@ class CacheHelperTests(unittest.TestCase):
         self.assertEqual(args.limit, 7)
         self.assertEqual(args.priority, 3)
 
-    def test_delete_reminder_defaults_to_applescript_backend(self) -> None:
+    def test_delete_reminder_defaults_to_verified_auto_backend(self) -> None:
         parser = reminders_adapter.build_parser()
 
         args = parser.parse_args(["delete_reminder", "--id", "7718459E-2672-4E99-9E6A-B9AA430E570F"])
 
-        self.assertEqual(args.backend, "applescript")
+        self.assertEqual(args.backend, "auto")
 
     def test_notes_metadata_never_returns_full_notes(self) -> None:
         notes = "Private notes that should not be cached verbatim"

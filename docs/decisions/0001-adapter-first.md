@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted.
+Accepted as historical sequencing; amended by 0009.
 
 ## Decision
 
 Build the Apple Reminders integration around a dependency-light local JSON adapter first.
 
-MCP is optional and should only be a thin shim over the adapter if Codex needs first-class tool exposure later.
+The original implementation made MCP optional. ADR 0009 now requires a bundled typed MCP shim while retaining this decision's boundary: transport does not own business logic.
 
 ## Rationale
 
@@ -25,5 +25,5 @@ The integration should therefore be background-first and local-first:
 
 - The first implementation target is a CLI/library with JSON input and output.
 - The skill layer can call or reason over this adapter contract.
-- A future MCP server can expose the same operations without owning the business logic.
+- The bundled MCP server exposes EventKit and adapter operations without owning the business logic.
 - Adapter operations must remain schema-checked, transactional, and easy to verify.
