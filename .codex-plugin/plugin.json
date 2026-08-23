@@ -1,11 +1,12 @@
 {
   "name": "apple-reminders",
-  "version": "0.1.0+codex.20260702084002",
-  "description": "Connect Apple Reminders for task capture, review, organization, attachments, and safe reminder changes.",
+  "version": "0.2.0+codex.20260823122253",
+  "description": "Manage Apple Reminders through a local MCP and macOS adapters with explicit verification and private-API trust boundaries.",
   "author": {
-    "name": "Soo"
+    "name": "Soo",
+    "url": "https://github.com/Oscar-V4"
   },
-  "homepage": "https://support.apple.com/guide/reminders/welcome/mac",
+  "homepage": "https://github.com/Oscar-V4/apple-reminders",
   "repository": "https://github.com/Oscar-V4/apple-reminders",
   "license": "MIT",
   "keywords": [
@@ -14,26 +15,30 @@
     "tasks",
     "productivity",
     "attachments",
+    "local-mcp",
+    "macos",
     "codex"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders",
-    "shortDescription": "Manage Apple Reminders tasks and attachments",
-    "longDescription": "Use Apple Reminders to inspect lists, sections, reminders, due dates, notes, and image attachments, then draft or apply safe task changes directly from Codex.",
+    "shortDescription": "Manage reminders with explicit local trust boundaries",
+    "longDescription": "Inspect and change Apple Reminders through a local stdio MCP. Public macOS APIs are preferred; advanced fields use version-sensitive private interfaces and report verification limits explicitly.",
     "developerName": "Soo",
     "category": "Productivity",
     "capabilities": [
       "Interactive",
       "Write"
     ],
-    "websiteURL": "https://support.apple.com/guide/reminders/welcome/mac",
+    "websiteURL": "https://github.com/Oscar-V4/apple-reminders",
+    "privacyPolicyURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md",
     "defaultPrompt": [
-      "Summarize, organize, capture, attach images to, or safely update my Apple Reminders"
+      "Brief, capture, organize, or safely update my Apple Reminders"
     ],
     "brandColor": "#007AFF",
-    "screenshots": []
-  },
-  "mcpServers": "./.mcp.json",
-  "apps": "./.app.json"
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
+    "logoDark": "./assets/icon.png"
+  }
 }

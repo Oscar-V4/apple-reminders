@@ -1,12 +1,74 @@
-.DS_Store
-__pycache__/
-*.pyc
+# macOS and editor metadata
+**/.DS_Store
+*~
+*.bak
+*.backup
+*.orig
+*.old
+*.save
+*.swp
+*.swo
+
+# Python caches and local environments
+**/__pycache__/
+*.py[cod]
 .venv/
-dist/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Native build products
 build/
+dist/
+*.o
+*.dSYM/
+*.app/
+
+# Reminders stores and plugin-owned operational data
 *.sqlite
+*.sqlite3
+*.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
-reminders-container-backup-*.tgz
+*.db
+*.db3
+*.db-journal
+*.db-shm
+*.db-wal
+*.journal
+*.jsonl
+*.log
+*.sql
+*.dump
+actions.jsonl
+cache.json
+idempotency.json
+idempotency.lock
+verified-capabilities.json
+Container_v1/
+reminders-container-backup-*
+
+# Archives and recovery copies never belong in a source package
+*.7z
+*.rar
+*.tar
+*.tar.gz
 *.tgz
+*.zip
+*.dmg
+*.pkg
+
+# Local reverse-engineering/UI evidence is not a distributable brand asset
 db-first-*-ui.png
+Screenshot*.png
+Screen Shot*.png
+screenshots/
+*.bmp
+*.heic
+*.tif
+*.tiff
+*.mov
+*.mp4
+*.m4v

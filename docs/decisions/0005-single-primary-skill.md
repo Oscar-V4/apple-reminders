@@ -2,13 +2,16 @@
 
 ## Status
 
-Accepted.
+Superseded by [0009. Google Calendar parity with hybrid backends](0009-google-calendar-parity-hybrid-backends.md).
 
 ## Decision
 
-Start with one primary `apple-reminders` skill.
+The original v1 decision was to start with one primary `apple-reminders` skill.
 
-Do not create purpose-specific Reminders skills in v1.
+Purpose-specific skills were intentionally deferred in v1. Version 0.2.0 later
+added four small workflow skills after the primary contract and tool surface had
+stabilized. They remain routing and presentation layers over the same MCP and do
+not duplicate backend implementations.
 
 ## Rationale
 

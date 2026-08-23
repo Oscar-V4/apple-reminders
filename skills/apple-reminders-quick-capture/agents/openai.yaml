@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reminders Quick Capture"
+  short_description: "Capture reminders with safe read-back"
+  default_prompt: "Use $apple-reminders-quick-capture to add this task to Apple Reminders with exact fields and read-back verification."

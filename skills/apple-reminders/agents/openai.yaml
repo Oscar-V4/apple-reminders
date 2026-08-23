@@ -1,5 +1,5 @@
 interface:
   display_name: "Apple Reminders"
-  short_description: "Manage reminders, sections, and attachments"
+  short_description: "Manage reminders, sections, and attachments safely"
   brand_color: "#007AFF"
-  default_prompt: "Use $apple-reminders to summarize tasks, capture reminders, organize lists and sections, attach images, or draft safe reminder changes."
+  default_prompt: "Use $apple-reminders to brief today's tasks, capture reminders, organize sections, attach images, or draft safe changes."

@@ -1,28 +1,49 @@
 #!/usr/bin/env python3
 """Dependency-light Apple Reminders adapter.
 
-This is the core local adapter. It is intentionally a JSON CLI first; an MCP
-server can wrap these commands later without owning the business logic.
+This is the core local adapter. It remains a JSON CLI/library behind the
+bundled MCP server; the transport layer does not own its business logic.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import gzip
 import hashlib
 import json
 import os
+import platform
+import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from receipt_contract import (  # noqa: E402
+    FAILURE_RECEIPT_STATUSES,
+    RESULT_RECEIPT_STATUSES,
+    STABLE_ERROR_CODES,
+    build_operation_receipt,
+)
+from reminders_contracts import (  # noqa: E402
+    REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
+    command_schema_requirements,
+)
 
 
 HOME = Path.home()
@@ -31,6 +52,9 @@ STORES = GROUP / "Stores"
 FILES = GROUP / "Files"
 APP_SUPPORT = HOME / "Library/Application Support/apple-reminders-codex"
 JOURNAL = APP_SUPPORT / "actions.jsonl"
+CAPABILITY_RECORD = APP_SUPPORT / "verified-capabilities.json"
+IDEMPOTENCY_STORE = APP_SUPPORT / "idempotency.json"
+IDEMPOTENCY_LOCK = APP_SUPPORT / "idempotency.lock"
 CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 CACHE_FILE = CACHE_DIR / "cache.json"
 CACHE_VERSION = 1
@@ -38,29 +62,173 @@ APPLE_EPOCH_OFFSET = 978307200
 IMAGE_ATTACHMENT_ENT = 25
 URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
+SUBPROCESS_TIMEOUT_SECONDS = 30
+ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 6
+SECTION_SYNC_VERIFY_TIMEOUT_SECONDS = 10
+JOURNAL_MAX_BYTES = 1_000_000
+JOURNAL_RETENTION_DAYS = 30
+IDEMPOTENCY_RETENTION_DAYS = 30
+IDEMPOTENCY_MAX_ENTRIES = 500
 
-REQUIRED_TABLES = {
-    "ZREMCDREMINDER",
-    "ZREMCDBASELIST",
-    "ZREMCDBASESECTION",
-    "ZREMCDHASHTAGLABEL",
-    "ZREMCDOBJECT",
-    "ZREMCKCLOUDSTATE",
-    "Z_PRIMARYKEY",
-}
+RESULT_STATUSES = set(RESULT_RECEIPT_STATUSES)
+ERROR_CODES = set(STABLE_ERROR_CODES)
+REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
+COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("runtime")
+MUTATION_COMMANDS = frozenset(
+    {
+        "purge_logs",
+        "cleanup_tags",
+        "create_list",
+        "create_reminder",
+        "update_reminder",
+        "complete_reminder",
+        "reopen_reminder",
+        "delete_reminder",
+        "show_reminder",
+        "add_tag",
+        "remove_tag",
+        "create_section",
+        "move_to_section",
+        "attach_image",
+        "attach_url",
+        "repair_attachments",
+        "delete_attachment",
+        "replace_attachment",
+    }
+)
 
 
 class AdapterError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "invalid_input", **details: Any) -> None:
+        super().__init__(message)
+        self.code = code if code in ERROR_CODES else "unexpected_error"
+        self.details = details
+
+
+class AttachmentVerificationError(AdapterError):
+    def __init__(self, message: str, row: dict[str, Any], **details: Any) -> None:
+        code = details.pop("code", "sync_pending")
+        super().__init__(message, code=code, **details)
+        self.row = row
+
+    def compensation_result(self) -> dict[str, Any]:
+        return {"attachment": self.details.get("attachment", {}), "_row": self.row}
 
 
 def json_out(payload: Any) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def fail(message: str, **extra: Any) -> int:
-    json_out({"ok": False, "error": message, **extra})
+def fail(
+    message: str,
+    *,
+    code: str = "unexpected_error",
+    status: str = "failed_no_mutation",
+    **extra: Any,
+) -> int:
+    if status not in FAILURE_RECEIPT_STATUSES:
+        status = "failed_no_mutation"
+    json_out(
+        {
+            "ok": False,
+            "status": status,
+            "error": {"code": code, "message": message, **extra},
+        }
+    )
     return 1
+
+
+def new_operation_id() -> str:
+    return str(uuid.uuid4()).upper()
+
+
+def operation_receipt(
+    *,
+    status: str,
+    operation: str,
+    backend: str,
+    target: dict[str, Any] | None = None,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    verification: dict[str, Any] | None = None,
+    recovery: dict[str, Any] | None = None,
+    warnings: list[dict[str, Any] | str] | None = None,
+    operation_id: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    return build_operation_receipt(
+        status=status,
+        operation=operation,
+        operation_id=operation_id or new_operation_id(),
+        backend=backend,
+        target=target,
+        before=before,
+        after=after,
+        verification=verification,
+        recovery=recovery,
+        warnings=warnings,
+        **extra,
+    )
+
+
+def command_failure_receipt(
+    args: argparse.Namespace,
+    message: str,
+    *,
+    code: str,
+    status: str,
+    **details: Any,
+) -> dict[str, Any]:
+    target = {
+        name: value
+        for name in ("id", "list_id", "section_id", "attachment_id")
+        if (value := getattr(args, name, None)) is not None
+    }
+    mutation_not_performed = status == "failed_no_mutation"
+    return operation_receipt(
+        status=status,
+        operation=args.command,
+        backend="adapter_boundary",
+        target=target,
+        after={},
+        verification={
+            "state": "not_performed" if mutation_not_performed else "manual_repair_required",
+            "write_performed": False if mutation_not_performed else None,
+        },
+        recovery={
+            "semantics": "not_applicable"
+            if mutation_not_performed
+            else "manual_inspection_required"
+        },
+        error={"code": code, "message": message, **details},
+    )
+
+
+def ensure_private_dir(path: Path) -> None:
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    is_plugin_data = (
+        path == APP_SUPPORT
+        or APP_SUPPORT in path.parents
+        or path == CACHE_DIR
+        or CACHE_DIR in path.parents
+    )
+    if not existed or is_plugin_data:
+        path.chmod(0o700)
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def reminder_priority(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 9:
+        raise argparse.ArgumentTypeError("must be between 0 and 9")
+    return parsed
 
 
 def core_now() -> float:
@@ -100,7 +268,10 @@ def parse_local_datetime(value: str) -> dt.datetime:
     except ValueError as exc:
         raise AdapterError(f"Invalid datetime: {value}. Use ISO format like 2026-07-03T14:30:00+09:00.") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+        raise AdapterError(
+            f"Datetime must include an explicit UTC offset or Z: {value}",
+            code="invalid_input",
+        )
     return parsed.astimezone()
 
 
@@ -114,11 +285,17 @@ def schedule_values(
     all_day_due_date: str | None = None,
     clear_due: bool = False,
 ) -> dict[str, Any] | None:
+    if remind_at is not None:
+        raise AdapterError(
+            "The private SQLite schedule path cannot represent an alert independently from a due date; use the EventKit alarms field",
+            code="unsupported_capability",
+            remediation="Use the MCP/EventKit create or update tool with an absolute or location alarm.",
+        )
     provided = [item is not None for item in (due_at, remind_at, all_day_due_date)].count(True)
     if clear_due and provided:
         raise AdapterError("--clear-due cannot be combined with due date options")
     if provided > 1:
-        raise AdapterError("Use only one of --due-at, --remind-at, or --all-day-due-date")
+        raise AdapterError("Use only one of --due-at or --all-day-due-date")
     if clear_due:
         return {
             "ZALLDAY": 0,
@@ -147,7 +324,7 @@ def schedule_values(
             "ZTIMEZONE": None,
             "ZDISPLAYDATETIMEZONE": None,
         }
-    timestamp_text = due_at if due_at is not None else remind_at
+    timestamp_text = due_at
     if timestamp_text is not None:
         parsed = parse_local_datetime(timestamp_text)
         core_value = core_from_datetime(parsed)
@@ -238,10 +415,30 @@ def reminder_text_document(text: str) -> bytes:
 
 
 def connect(db: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(db)
+    path = Path(db).expanduser()
+    if not path.exists():
+        raise AdapterError(f"Reminders database not found: {path}")
+    uri = f"file:{urllib.parse.quote(str(path.resolve()))}?mode=rw"
+    con = sqlite3.connect(uri, uri=True)
     con.row_factory = sqlite3.Row
     con.execute("pragma busy_timeout=5000")
     return con
+
+
+def resolve_database(value: str | None, *, write: bool = False) -> Path:
+    path = Path(value).expanduser().resolve() if value else main_db().resolve()
+    if not path.exists():
+        raise AdapterError(f"Reminders database not found: {path}")
+    if write:
+        stores = STORES.expanduser().resolve()
+        try:
+            path.relative_to(stores)
+        except ValueError as exc:
+            raise AdapterError(
+                "Refusing to write to a database outside the Reminders store",
+                database=path.name,
+            ) from exc
+    return path
 
 
 def table_names(con: sqlite3.Connection) -> set[str]:
@@ -249,6 +446,49 @@ def table_names(con: sqlite3.Connection) -> set[str]:
         row["name"]
         for row in con.execute("select name from sqlite_master where type='table'")
     }
+
+
+def column_names(con: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in con.execute(f"pragma table_info({table})")}
+
+
+def command_capability(con: sqlite3.Connection, command: str) -> dict[str, Any]:
+    requirements = COMMAND_SCHEMA_REQUIREMENTS.get(command, {})
+    existing_tables = table_names(con)
+    missing_tables = sorted(set(requirements) - existing_tables)
+    missing_columns: dict[str, list[str]] = {}
+    if not missing_tables:
+        for table, required in requirements.items():
+            missing = sorted(required - column_names(con, table))
+            if missing:
+                missing_columns[table] = missing
+    supported = not missing_tables and not missing_columns
+    fingerprint_payload = {
+        table: sorted(column_names(con, table))
+        for table in sorted(requirements)
+        if table in existing_tables
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "command": command,
+        "supported": supported,
+        "missing_tables": missing_tables,
+        "missing_columns": missing_columns,
+        "schema_fingerprint": fingerprint,
+    }
+
+
+def require_command_capability(con: sqlite3.Connection, command: str) -> dict[str, Any]:
+    capability = command_capability(con, command)
+    if not capability["supported"]:
+        raise AdapterError(
+            f"Reminders schema does not support {command}",
+            code="schema_mismatch",
+            capability=capability,
+        )
+    return capability
 
 
 def usable_dbs() -> list[Path]:
@@ -266,10 +506,10 @@ def usable_dbs() -> list[Path]:
     return paths
 
 
-def db_counts(db: Path) -> dict[str, int]:
+def db_counts(db: Path) -> dict[str, int | None]:
     con = connect(db)
     try:
-        return {
+        counts = {
             "lists": con.execute(
                 "select count(*) from ZREMCDBASELIST where coalesce(ZMARKEDFORDELETION,0)=0"
             ).fetchone()[0],
@@ -291,6 +531,8 @@ def db_counts(db: Path) -> dict[str, int]:
                 (TAG_OBJECT_ENT,),
             ).fetchone()[0],
         }
+        counts.update(image_attachment_sync_counts(con))
+        return counts
     finally:
         con.close()
 
@@ -302,31 +544,432 @@ def main_db() -> Path:
     return max(dbs, key=lambda path: (db_counts(path)["reminders"], db_counts(path)["lists"]))
 
 
+def reminders_build_info() -> dict[str, str | None]:
+    info_path = Path("/System/Applications/Reminders.app/Contents/Info.plist")
+    try:
+        with info_path.open("rb") as fh:
+            payload = plistlib.load(fh)
+    except (OSError, plistlib.InvalidFileException):
+        return {"version": None, "build": None}
+    return {
+        "version": payload.get("CFBundleShortVersionString"),
+        "build": payload.get("CFBundleVersion"),
+    }
+
+
+def capability_identity(schema_fingerprint: str) -> dict[str, Any]:
+    app = reminders_build_info()
+    return {
+        "macos_version": platform.mac_ver()[0] or None,
+        "reminders_version": app["version"],
+        "reminders_build": app["build"],
+        "schema_fingerprint": schema_fingerprint,
+    }
+
+
+def load_verified_capabilities() -> dict[str, Any]:
+    try:
+        with CAPABILITY_RECORD.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {"version": 1, "records": []}
+    if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
+        return {"version": 1, "records": []}
+    return payload
+
+
+def db_soft_delete_verified(con: sqlite3.Connection) -> tuple[bool, dict[str, Any]]:
+    capability = command_capability(con, "delete_reminder_db")
+    if not capability["supported"]:
+        return False, {"capability": capability, "verified": False}
+    identity = capability_identity(capability["schema_fingerprint"])
+    matched = False
+    for record in load_verified_capabilities().get("records", []):
+        if not isinstance(record, dict):
+            continue
+        if record.get("capability") != "db_soft_delete_recently_deleted":
+            continue
+        if record.get("verified") is not True:
+            continue
+        if all(record.get(key) == value for key, value in identity.items()):
+            matched = True
+            break
+    return matched, {"identity": identity, "verified": matched}
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return None if row is None else dict(row)
 
 
-def log_action(action: str, payload: dict[str, Any]) -> None:
-    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "time": dt.datetime.now().astimezone().isoformat(),
-        "action": action,
-        "payload": payload,
+SENSITIVE_LOG_KEY = re.compile(
+    r"(?:title|name|notes?|url|path|image|filename|list|section|tag|deleted|payload|database|db)$",
+    re.IGNORECASE,
+)
+
+
+def redacted_log_value(value: Any) -> dict[str, Any]:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = repr(value).encode("utf-8", errors="replace")
+    metadata: dict[str, Any] = {
+        "redacted": True,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "bytes": len(encoded),
     }
-    with JOURNAL.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    if isinstance(value, (list, tuple, set, dict)):
+        metadata["items"] = len(value)
+    return metadata
 
 
-def run_osascript(script: str, args: list[str]) -> str:
-    proc = subprocess.run(
-        ["osascript", "-e", script, *args],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+def redact_log_payload(value: Any, *, key: str | None = None) -> Any:
+    if key and SENSITIVE_LOG_KEY.search(key):
+        return redacted_log_value(value)
+    if isinstance(value, dict):
+        return {str(item_key): redact_log_payload(item, key=str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [redact_log_payload(item) for item in value]
+    return value
+
+
+def journal_paths() -> list[Path]:
+    return [JOURNAL, JOURNAL.with_name(f"{JOURNAL.name}.1")]
+
+
+def rotate_journal_if_needed() -> None:
+    if not JOURNAL.exists() or JOURNAL.stat().st_size < JOURNAL_MAX_BYTES:
+        return
+    rotated = JOURNAL.with_name(f"{JOURNAL.name}.1")
+    rotated.unlink(missing_ok=True)
+    os.replace(JOURNAL, rotated)
+    rotated.chmod(0o600)
+
+
+def purge_expired_journals(*, now: float | None = None) -> list[str]:
+    cutoff = (now if now is not None else time.time()) - JOURNAL_RETENTION_DAYS * 86400
+    removed: list[str] = []
+    for path in journal_paths():
+        try:
+            if path.exists() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed.append(path.name)
+        except OSError:
+            continue
+    return removed
+
+
+def log_action(action: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Write a redacted audit entry without changing a committed mutation into failure."""
+
+    try:
+        ensure_private_dir(APP_SUPPORT)
+        purge_expired_journals()
+        rotate_journal_if_needed()
+        entry = {
+            "time": dt.datetime.now().astimezone().isoformat(),
+            "action": action,
+            "payload": redact_log_payload(payload),
+        }
+        with JOURNAL.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        JOURNAL.chmod(0o600)
+        return None
+    except OSError as exc:
+        return {
+            "code": "journal_write_failed",
+            "message": "The operation completed, but its redacted local audit entry could not be written.",
+            "detail": type(exc).__name__,
+        }
+
+
+def cmd_purge_logs(_: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    removed: list[str] = []
+    errors: list[dict[str, str]] = []
+    for path in journal_paths():
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(path.name)
+        except OSError as exc:
+            errors.append({"file": path.name, "error": type(exc).__name__})
+    json_out(
+        operation_receipt(
+            status="verified" if not errors else "partial_success",
+            operation="purge_logs",
+            operation_id=operation_id,
+            backend="local_filesystem",
+            target={"files": [path.name for path in journal_paths()]},
+            before={"existing_files": sorted([*removed, *[item["file"] for item in errors]])},
+            after={"removed": removed, "errors": errors},
+            verification={
+                "state": "read_back",
+                "remaining_files": [path.name for path in journal_paths() if path.exists()],
+            },
+            recovery={"semantics": "irreversible_redacted_log_purge"},
+        )
     )
+    return 0 if not errors else 1
+
+
+def stable_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
+    """Keep retry-critical identifiers/status while excluding user-authored content."""
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for item_key, item in value.items():
+            normalized = str(item_key).casefold()
+            keep = (
+                normalized
+                in {
+                    "ok",
+                    "status",
+                    "operation",
+                    "operation_id",
+                    "backend",
+                    "backend_requested",
+                    "id",
+                    "pk",
+                    "count",
+                    "state",
+                    "semantics",
+                    "reason",
+                    "verified",
+                    "replayed",
+                }
+                or normalized.endswith("_id")
+                or normalized.endswith("_ids")
+                or normalized.endswith("_pk")
+                or normalized.endswith("_count")
+            )
+            if keep:
+                result[str(item_key)] = idempotency_result_snapshot(item, key=str(item_key))
+            elif isinstance(item, (dict, list, tuple)):
+                nested = idempotency_result_snapshot(item, key=str(item_key))
+                preserve_empty_receipt_object = (
+                    isinstance(item, dict)
+                    and normalized
+                    in {"target", "before", "after", "verification", "recovery"}
+                )
+                if nested not in ({}, []) or preserve_empty_receipt_object:
+                    result[str(item_key)] = nested
+        return result
+    if isinstance(value, (list, tuple)):
+        return [idempotency_result_snapshot(item, key=key) for item in value]
+    return value
+
+
+def load_idempotency_store() -> dict[str, Any]:
+    try:
+        with IDEMPOTENCY_STORE.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {"version": 1, "entries": {}}
+    if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
+        return {"version": 1, "entries": {}}
+    return payload
+
+
+def prune_idempotency_entries(entries: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    current = now if now is not None else time.time()
+    cutoff = current - IDEMPOTENCY_RETENTION_DAYS * 86400
+    retained = {
+        key: value
+        for key, value in entries.items()
+        if isinstance(value, dict) and float(value.get("created_at_epoch", 0)) >= cutoff
+    }
+    ordered = sorted(
+        retained.items(),
+        key=lambda item: float(item[1].get("created_at_epoch", 0)),
+        reverse=True,
+    )[:IDEMPOTENCY_MAX_ENTRIES]
+    return dict(ordered)
+
+
+def write_idempotency_store(payload: dict[str, Any]) -> None:
+    ensure_private_dir(APP_SUPPORT)
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix=".idempotency.",
+        suffix=".tmp",
+        dir=APP_SUPPORT,
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    )
+    temp_path = Path(temp_handle.name)
+    try:
+        with temp_handle as fh:
+            json.dump(payload, fh, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        temp_path.chmod(0o600)
+        os.replace(temp_path, IDEMPOTENCY_STORE)
+        IDEMPOTENCY_STORE.chmod(0o600)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def with_idempotency_lock(callback: Any) -> Any:
+    ensure_private_dir(APP_SUPPORT)
+    with IDEMPOTENCY_LOCK.open("a+", encoding="utf-8") as lock:
+        IDEMPOTENCY_LOCK.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return callback()
+
+
+def idempotency_lookup(
+    *,
+    operation: str,
+    key: str | None,
+    input_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not key:
+        return None
+    key_hash = stable_hash({"operation": operation, "key": key})
+    input_hash = stable_hash(input_payload)
+
+    def lookup() -> dict[str, Any] | None:
+        payload = load_idempotency_store()
+        entries = prune_idempotency_entries(payload.get("entries", {}))
+        record = entries.get(key_hash)
+        if not record:
+            return None
+        if record.get("input_hash") != input_hash:
+            raise AdapterError(
+                "Idempotency key was already used with different input",
+                code="concurrent_modification",
+                operation=operation,
+            )
+        result = dict(record.get("result") or {})
+        result["replayed"] = True
+        result["idempotency_key_hash"] = key_hash
+        return result
+
+    return with_idempotency_lock(lookup)
+
+
+def idempotency_store_result(
+    *,
+    operation: str,
+    key: str | None,
+    input_payload: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    if not key:
+        return
+    key_hash = stable_hash({"operation": operation, "key": key})
+    input_hash = stable_hash(input_payload)
+
+    def store_result() -> None:
+        payload = load_idempotency_store()
+        entries = prune_idempotency_entries(payload.get("entries", {}))
+        existing = entries.get(key_hash)
+        if existing and existing.get("input_hash") != input_hash:
+            raise AdapterError(
+                "Idempotency key was already used with different input",
+                code="concurrent_modification",
+                operation=operation,
+            )
+        entries[key_hash] = {
+            "operation": operation,
+            "input_hash": input_hash,
+            "created_at_epoch": time.time(),
+            "result": idempotency_result_snapshot(result),
+        }
+        write_idempotency_store({"version": 1, "entries": prune_idempotency_entries(entries)})
+
+    with_idempotency_lock(store_result)
+
+
+def execute_idempotent(
+    *,
+    operation: str,
+    key: str | None,
+    input_payload: dict[str, Any],
+    callback: Any,
+) -> dict[str, Any]:
+    if not key:
+        return callback()
+    ensure_private_dir(APP_SUPPORT)
+    key_hash = stable_hash({"operation": operation, "key": key})
+    input_hash = stable_hash(input_payload)
+    with IDEMPOTENCY_LOCK.open("a+", encoding="utf-8") as lock:
+        IDEMPOTENCY_LOCK.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        payload = load_idempotency_store()
+        entries = prune_idempotency_entries(payload.get("entries", {}))
+        record = entries.get(key_hash)
+        if record:
+            if record.get("input_hash") != input_hash:
+                raise AdapterError(
+                    "Idempotency key was already used with different input",
+                    code="concurrent_modification",
+                    operation=operation,
+                )
+            replay = dict(record.get("result") or {})
+            replay["replayed"] = True
+            replay["idempotency_key_hash"] = key_hash
+            return replay
+
+        result = callback()
+        entries[key_hash] = {
+            "operation": operation,
+            "input_hash": input_hash,
+            "created_at_epoch": time.time(),
+            "result": idempotency_result_snapshot(result),
+        }
+        try:
+            write_idempotency_store({"version": 1, "entries": prune_idempotency_entries(entries)})
+        except OSError as exc:
+            result.setdefault("warnings", []).append(
+                {
+                    "code": "idempotency_receipt_write_failed",
+                    "message": "The mutation completed, but its local retry receipt could not be persisted.",
+                    "detail": type(exc).__name__,
+                }
+            )
+        result["idempotency_key_hash"] = key_hash
+        return result
+
+
+def run_osascript(script: str, args: list[str], *, mutation: bool = False) -> str:
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script, *args],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "Reminders AppleScript timed out",
+            code="sync_pending" if mutation else "unexpected_error",
+            partial_failure=mutation,
+            mutation_outcome_unknown=mutation,
+        ) from exc
     if proc.returncode != 0:
-        raise AdapterError(proc.stderr.strip() or proc.stdout.strip() or "osascript failed")
+        detail = proc.stderr.strip() or proc.stdout.strip() or "osascript failed"
+        lowered = detail.casefold()
+        permission_denied = any(
+            marker in lowered
+            for marker in ("not authorized", "not permitted", "permission", "-1743")
+        )
+        raise AdapterError(
+            detail,
+            code="permission_denied" if permission_denied else "unexpected_error",
+            partial_failure=mutation and not permission_denied,
+            mutation_outcome_unknown=mutation and not permission_denied,
+        )
     return proc.stdout.strip()
 
 
@@ -353,6 +996,7 @@ end run
             title if title is not None else "__NO_CHANGE__",
             notes if notes is not None else "__NO_CHANGE__",
         ],
+        mutation=True,
     )
 
 
@@ -449,7 +1093,7 @@ def find_reminder(
         params,
     ).fetchall()
     if not rows:
-        raise AdapterError("Reminder not found")
+        raise AdapterError("Reminder not found", code="invalid_input")
     if len(rows) > 1 and not reminder_id:
         candidates = [
             {
@@ -460,8 +1104,93 @@ def find_reminder(
             }
             for row in rows[:10]
         ]
-        raise AdapterError(f"Multiple reminders matched; use an id. Candidates: {candidates}")
+        raise AdapterError(
+            "Multiple reminders matched; use an id",
+            code="ambiguous_target",
+            candidates=candidates,
+        )
     return dict(rows[0])
+
+
+def require_exact_reminder_selector(
+    *,
+    reminder_id: str | None,
+    title: str | None,
+    list_name: str | None,
+) -> None:
+    if reminder_id:
+        return
+    if title and list_name:
+        return
+    raise AdapterError(
+        "Use an exact reminder id, or provide both title and list",
+        code="ambiguous_target",
+        required_selector="id | (title + list)",
+    )
+
+
+def reminder_mutation_snapshot(reminder: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": reminder.get("ZCKIDENTIFIER"),
+        "title": reminder.get("ZTITLE"),
+        "list": reminder.get("LIST_NAME"),
+        "list_pk": reminder.get("ZLIST"),
+        "completed": bool(reminder.get("ZCOMPLETED")),
+        "completed_at": core_to_iso(reminder.get("ZCOMPLETIONDATE")),
+        "flagged": bool(reminder.get("ZFLAGGED")),
+        "priority": reminder.get("ZPRIORITY"),
+        "due_at": core_to_iso(reminder.get("ZDUEDATE")),
+        "display_at": core_to_iso(reminder.get("ZDISPLAYDATEDATE")),
+        "all_day": bool(reminder.get("ZALLDAY")),
+        "timezone": reminder.get("ZTIMEZONE"),
+        "has_notes": bool(reminder.get("ZNOTES")),
+        "marked_for_deletion": bool(reminder.get("ZMARKEDFORDELETION")),
+        "version": reminder.get("Z_OPT"),
+        "last_modified_at": core_to_iso(reminder.get("ZLASTMODIFIEDDATE")),
+    }
+
+
+def require_reminder_version(
+    reminder: dict[str, Any],
+    expected: int | None,
+    *,
+    required: bool = False,
+) -> None:
+    if expected is None:
+        if required:
+            raise AdapterError(
+                "A fresh reminder version is required for this private-store mutation",
+                code="invalid_input",
+                required_field="if_version",
+                current_version=reminder.get("Z_OPT"),
+            )
+        return
+    if reminder.get("Z_OPT") != expected:
+        raise AdapterError(
+            "Reminder changed since it was read",
+            code="concurrent_modification",
+            expected_version=expected,
+            current_version=reminder.get("Z_OPT"),
+        )
+
+
+def reread_reminder(con: sqlite3.Connection, reminder_pk: int) -> dict[str, Any]:
+    row = con.execute(
+        """
+        select r.*, l.ZNAME as LIST_NAME
+        from ZREMCDREMINDER r
+        left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+        where r.Z_PK=?
+        """,
+        (reminder_pk,),
+    ).fetchone()
+    if not row:
+        raise AdapterError(
+            "Reminder disappeared during read-back",
+            code="concurrent_modification",
+            reminder_pk=reminder_pk,
+        )
+    return dict(row)
 
 
 def account_identifier(con: sqlite3.Connection, account_pk: int | None) -> str | None:
@@ -619,9 +1348,68 @@ def attachment_ent_for_type(value: str | None) -> int | None:
     raise AdapterError("Attachment type must be image or url")
 
 
+def attachment_sync_capabilities(con: sqlite3.Connection) -> dict[str, Any]:
+    object_columns = column_names(con, "ZREMCDOBJECT")
+    cloud_columns = column_names(con, "ZREMCKCLOUDSTATE")
+    required_object = {"ZCKSERVERRECORDDATA"}
+    required_cloud = {
+        "ZINCLOUD",
+        "ZCURRENTLOCALVERSION",
+        "ZLATESTVERSIONSYNCEDTOCLOUD",
+    }
+    missing = sorted(
+        [f"ZREMCDOBJECT.{name}" for name in required_object - object_columns]
+        + [f"ZREMCKCLOUDSTATE.{name}" for name in required_cloud - cloud_columns]
+    )
+    return {"available": not missing, "missing_columns": missing}
+
+
+def attachment_sync_select(con: sqlite3.Connection) -> str:
+    capabilities = attachment_sync_capabilities(con)
+    if not capabilities["available"]:
+        return """
+               0 as SYNC_FIELDS_AVAILABLE,
+               null as HAS_SERVER_RECORD,
+               null as SERVER_RECORD_BYTES,
+               null as ZINCLOUD,
+               null as ZCURRENTLOCALVERSION,
+               null as ZLATESTVERSIONSYNCEDTOCLOUD
+        """
+    return """
+               1 as SYNC_FIELDS_AVAILABLE,
+               o.ZCKSERVERRECORDDATA is not null as HAS_SERVER_RECORD,
+               length(o.ZCKSERVERRECORDDATA) as SERVER_RECORD_BYTES,
+               cs.ZINCLOUD,cs.ZCURRENTLOCALVERSION,cs.ZLATESTVERSIONSYNCEDTOCLOUD
+    """
+
+
 def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = dict(row)
     ent = int(data["Z_ENT"])
+    sync_fields_available = data.get("SYNC_FIELDS_AVAILABLE")
+    if sync_fields_available is None:
+        sync_fields_available = any(
+            key in data
+            for key in (
+                "HAS_SERVER_RECORD",
+                "has_server_record",
+                "ZINCLOUD",
+                "ZCURRENTLOCALVERSION",
+                "ZLATESTVERSIONSYNCEDTOCLOUD",
+            )
+        )
+    has_server_record = (
+        bool(data.get("HAS_SERVER_RECORD") or data.get("has_server_record"))
+        if sync_fields_available
+        else None
+    )
+    server_record_bytes = data.get("SERVER_RECORD_BYTES") or data.get("server_record_bytes")
+    in_cloud = data.get("ZINCLOUD")
+    current_local_version = data.get("ZCURRENTLOCALVERSION")
+    latest_synced_version = data.get("ZLATESTVERSIONSYNCEDTOCLOUD")
+    mobile_visible_likely = None
+    if ent == IMAGE_ATTACHMENT_ENT and sync_fields_available:
+        mobile_visible_likely = bool(has_server_record and in_cloud == 1)
     payload = {
         "pk": data["Z_PK"],
         "id": data["ZCKIDENTIFIER"],
@@ -629,6 +1417,15 @@ def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "uti": data["ZUTI"],
         "order": data["Z_FOK_REMINDER1"],
         "marked_for_deletion": bool(data["ZMARKEDFORDELETION"]),
+        "sync": {
+            "mobile_visible_likely": mobile_visible_likely,
+            "has_server_record": has_server_record,
+            "server_record_bytes": server_record_bytes,
+            "in_cloud": in_cloud,
+            "current_local_version": current_local_version,
+            "latest_synced_version": latest_synced_version,
+            "fields_available": bool(sync_fields_available),
+        },
     }
     if ent == IMAGE_ATTACHMENT_ENT:
         payload.update(
@@ -645,32 +1442,225 @@ def attachment_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def image_attachment_sync_counts(con: sqlite3.Connection) -> dict[str, int | None]:
+    capabilities = attachment_sync_capabilities(con)
+    if not capabilities["available"]:
+        total = con.execute(
+            """
+            select count(*)
+            from ZREMCDOBJECT
+            where Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (IMAGE_ATTACHMENT_ENT,),
+        ).fetchone()[0]
+        return {
+            "mobile_visible_image_attachments": None,
+            "local_only_image_attachments": None,
+            "unverified_image_attachments": int(total),
+        }
+    row = con.execute(
+        """
+        select
+          count(*) as total,
+          coalesce(sum(
+            case
+              when o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1 then 1
+              else 0
+            end
+          ),0) as local_only
+        from ZREMCDOBJECT o
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where o.Z_ENT=? and coalesce(o.ZMARKEDFORDELETION,0)=0
+        """,
+        (IMAGE_ATTACHMENT_ENT,),
+    ).fetchone()
+    return {
+        "mobile_visible_image_attachments": int(row["total"] - row["local_only"]),
+        "local_only_image_attachments": int(row["local_only"]),
+        "unverified_image_attachments": 0,
+    }
+
+
 def active_attachment_rows(
     con: sqlite3.Connection,
     reminder_pk: int,
     attachment_ent: int | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [reminder_pk, IMAGE_ATTACHMENT_ENT, URL_ATTACHMENT_ENT]
     where = [
-        "ZREMINDER2=?",
-        "Z_ENT in (?,?)",
-        "coalesce(ZMARKEDFORDELETION,0)=0",
+        "o.ZREMINDER2=?",
+        "o.Z_ENT in (?,?)",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
     ]
     if attachment_ent is not None:
-        where.append("Z_ENT=?")
+        where.append("o.Z_ENT=?")
         params.append(attachment_ent)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "limit ?"
+        params.append(limit)
+    sync_select = attachment_sync_select(con)
     rows = con.execute(
         f"""
-        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
-               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
-               ZMARKEDFORDELETION
-        from ZREMCDOBJECT
+        select o.Z_PK,o.Z_ENT,o.ZCKIDENTIFIER,o.ZCKCLOUDSTATE,o.ZREMINDER2,o.Z_FOK_REMINDER1,
+               o.ZFILENAME,o.ZSHA512SUM,o.ZUTI,o.ZFILESIZE,o.ZWIDTH,o.ZHEIGHT,o.ZURL,o.ZHOSTURL,
+               o.ZMARKEDFORDELETION,
+               {sync_select}
+        from ZREMCDOBJECT o
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
         where {" and ".join(where)}
-        order by Z_FOK_REMINDER1, Z_PK
+        order by o.Z_FOK_REMINDER1, o.Z_PK
+        {limit_sql}
         """,
         params,
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def image_attachment_audit_items(
+    con: sqlite3.Connection,
+    *,
+    search: str | None = None,
+    list_name: str | None = None,
+    problems_only: bool = False,
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    params: list[Any] = [IMAGE_ATTACHMENT_ENT]
+    where = [
+        "o.Z_ENT=?",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
+        "coalesce(r.ZMARKEDFORDELETION,0)=0",
+    ]
+    if search:
+        where.append("(r.ZTITLE like ? or coalesce(r.ZNOTES,'') like ?)")
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+    if list_name:
+        where.append("l.ZNAME=?")
+        params.append(list_name)
+    if problems_only and attachment_sync_capabilities(con)["available"]:
+        where.append("(o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1)")
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "limit ?"
+        params.append(limit)
+    sync_select = attachment_sync_select(con)
+    rows = con.execute(
+        f"""
+        select r.Z_PK as reminder_pk,r.ZCKIDENTIFIER as reminder_id,r.ZTITLE as reminder_title,
+               r.ZACCOUNT as reminder_account,r.Z_OPT as reminder_version,l.ZNAME as list_name,
+               o.Z_PK,o.Z_ENT,o.ZCKIDENTIFIER,o.ZCKCLOUDSTATE,o.ZREMINDER2,o.Z_FOK_REMINDER1,
+               o.ZFILENAME,o.ZSHA512SUM,o.ZUTI,o.ZFILESIZE,o.ZWIDTH,o.ZHEIGHT,o.ZURL,o.ZHOSTURL,
+               o.ZMARKEDFORDELETION,
+               {sync_select}
+        from ZREMCDOBJECT o
+        join ZREMCDREMINDER r on r.Z_PK=o.ZREMINDER2
+        left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where {" and ".join(where)}
+        order by lower(l.ZNAME), lower(r.ZTITLE), o.Z_FOK_REMINDER1, o.Z_PK
+        {limit_sql}
+        """,
+        params,
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    problem_count = 0
+    for row in rows:
+        attachment = attachment_payload(row)
+        mobile_visible = attachment["sync"]["mobile_visible_likely"]
+        problem = mobile_visible is not True
+        if problem:
+            problem_count += 1
+        if problems_only and not problem:
+            continue
+        items.append(
+            {
+                "reminder": {
+                    "pk": row["reminder_pk"],
+                    "id": row["reminder_id"],
+                    "title": row["reminder_title"],
+                    "list": row["list_name"],
+                    "account": row["reminder_account"],
+                    "version": row["reminder_version"],
+                },
+                "attachment": attachment,
+                "problem": (
+                    "image_attachment_local_only"
+                    if mobile_visible is False
+                    else "image_attachment_sync_unverifiable"
+                    if mobile_visible is None
+                    else None
+                ),
+                "_row": dict(row),
+            }
+        )
+    return items, problem_count
+
+
+def image_attachment_audit_counts(
+    con: sqlite3.Connection,
+    *,
+    search: str | None = None,
+    list_name: str | None = None,
+) -> dict[str, int]:
+    params: list[Any] = [IMAGE_ATTACHMENT_ENT]
+    where = [
+        "o.Z_ENT=?",
+        "coalesce(o.ZMARKEDFORDELETION,0)=0",
+        "coalesce(r.ZMARKEDFORDELETION,0)=0",
+    ]
+    if search:
+        where.append("(r.ZTITLE like ? or coalesce(r.ZNOTES,'') like ?)")
+        needle = f"%{search}%"
+        params.extend([needle, needle])
+    if list_name:
+        where.append("l.ZNAME=?")
+        params.append(list_name)
+    capabilities = attachment_sync_capabilities(con)
+    problem_expression = (
+        "(o.ZCKSERVERRECORDDATA is null or coalesce(cs.ZINCLOUD,0)<>1)"
+        if capabilities["available"]
+        else "1"
+    )
+    row = con.execute(
+        f"""
+        select count(*) as total,
+               coalesce(sum(case when {problem_expression} then 1 else 0 end),0) as problems
+        from ZREMCDOBJECT o
+        join ZREMCDREMINDER r on r.Z_PK=o.ZREMINDER2
+        left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=o.ZCKCLOUDSTATE
+        where {" and ".join(where)}
+        """,
+        params,
+    ).fetchone()
+    return {"total": int(row["total"]), "problems": int(row["problems"])}
+
+
+def source_paths_for_attachment(attachment: dict[str, Any]) -> list[Path]:
+    sha512 = attachment.get("sha512")
+    if not sha512:
+        return []
+    ext_candidates: list[str] = []
+    filename = attachment.get("filename")
+    if filename and Path(filename).suffix:
+        ext_candidates.append(Path(filename).suffix.lower().lstrip("."))
+    if attachment.get("uti") == "public.jpeg":
+        ext_candidates.extend(["jpg", "jpeg"])
+    if attachment.get("uti") == "public.png":
+        ext_candidates.append("png")
+    ext_candidates.extend(["png", "jpg", "jpeg", "heic"])
+    seen_exts = list(dict.fromkeys(ext for ext in ext_candidates if ext))
+    dirs = sorted(FILES.glob("Account-*/Attachments"))
+    paths: list[Path] = []
+    for directory in dirs:
+        for ext in seen_exts:
+            candidate = directory / f"{sha512}.{ext}"
+            if candidate.exists():
+                paths.append(candidate)
+        paths.extend(sorted(directory.glob(f"{sha512}.*")))
+    return list(dict.fromkeys(paths))
 
 
 def resolve_attachment_selection(
@@ -724,13 +1714,17 @@ def attachment_dir_for_account(account_uuid: str | None = None) -> Path:
 
 
 def image_size(path: Path) -> tuple[int, int]:
-    proc = subprocess.run(
-        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError("Image metadata inspection timed out", image=path.name) from exc
     if proc.returncode != 0:
         raise AdapterError(proc.stderr.strip() or "Unable to read image dimensions")
     width = height = None
@@ -743,6 +1737,312 @@ def image_size(path: Path) -> tuple[int, int]:
     if width is None or height is None:
         raise AdapterError("Unable to parse image dimensions")
     return width, height
+
+
+def reminderkit_attach_helper() -> Path:
+    source = Path(__file__).resolve().with_name("remkit_attach_image.m")
+    if not source.exists():
+        raise AdapterError(f"ReminderKit helper source not found: {source.name}")
+    helper = CACHE_DIR / "remkit_attach_image"
+    ensure_private_dir(CACHE_DIR)
+    lock_path = CACHE_DIR / "remkit_attach_image.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        needs_build = (
+            not helper.exists()
+            or not os.access(helper, os.X_OK)
+            or source.stat().st_mtime > helper.stat().st_mtime
+        )
+        if not needs_build:
+            return helper
+        clang = shutil.which("clang")
+        if not clang:
+            raise AdapterError("clang is required to build the ReminderKit attachment helper")
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=".remkit_attach_image.",
+            dir=CACHE_DIR,
+            delete=False,
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            try:
+                proc = subprocess.run(
+                    [
+                        clang,
+                        "-x",
+                        "objective-c",
+                        "-fobjc-arc",
+                        "-framework",
+                        "Foundation",
+                        "-framework",
+                        "AppKit",
+                        "-o",
+                        str(temp_path),
+                        str(source),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("ReminderKit helper build timed out") from exc
+            if proc.returncode != 0:
+                raise AdapterError(
+                    (proc.stderr or proc.stdout).strip()
+                    or "Failed to build ReminderKit attachment helper"
+                )
+            temp_path.chmod(0o700)
+            os.replace(temp_path, helper)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return helper
+
+
+def reminderkit_sections_helper() -> Path:
+    source = Path(__file__).resolve().with_name("remkit_sections.m")
+    if not source.exists():
+        raise AdapterError(f"ReminderKit section helper source not found: {source.name}")
+    helper = CACHE_DIR / "remkit_sections"
+    ensure_private_dir(CACHE_DIR)
+    lock_path = CACHE_DIR / "remkit_sections.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        needs_build = (
+            not helper.exists()
+            or not os.access(helper, os.X_OK)
+            or source.stat().st_mtime > helper.stat().st_mtime
+        )
+        if not needs_build:
+            return helper
+        clang = shutil.which("clang")
+        if not clang:
+            raise AdapterError("clang is required to build the ReminderKit section helper")
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=".remkit_sections.",
+            dir=CACHE_DIR,
+            delete=False,
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            try:
+                proc = subprocess.run(
+                    [
+                        clang,
+                        "-x",
+                        "objective-c",
+                        "-fobjc-arc",
+                        "-framework",
+                        "Foundation",
+                        "-framework",
+                        "AppKit",
+                        "-o",
+                        str(temp_path),
+                        str(source),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("ReminderKit section helper build timed out") from exc
+            if proc.returncode != 0:
+                raise AdapterError(
+                    (proc.stderr or proc.stdout).strip()
+                    or "Failed to build ReminderKit section helper"
+                )
+            temp_path.chmod(0o700)
+            os.replace(temp_path, helper)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return helper
+
+
+def invoke_reminderkit_section(operation: str, *arguments: str) -> dict[str, Any]:
+    helper = reminderkit_sections_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), operation, *arguments],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit section operation timed out",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            operation=operation,
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit section helper returned invalid JSON",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_output_present=bool(raw or proc.stderr.strip()),
+            operation=operation,
+        ) from exc
+    if proc.returncode != 0 or not payload.get("ok"):
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = payload.get("error") or "ReminderKit section operation failed"
+        if detail:
+            message = f"{message}: {detail}"
+        mutation_attempted = bool(payload.get("mutation_attempted"))
+        raise AdapterError(
+            message,
+            code="sync_pending" if mutation_attempted else "unexpected_error",
+            partial_failure=mutation_attempted,
+            mutation_outcome_unknown=mutation_attempted,
+            operation=operation,
+        )
+    return payload
+
+
+def attach_image_reminderkit_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    image: Path,
+) -> dict[str, Any]:
+    if not image.exists():
+        raise AdapterError(f"Image not found: {image.name}")
+    before_rows = active_attachment_rows(
+        con,
+        reminder["Z_PK"],
+        attachment_ent=IMAGE_ATTACHMENT_ENT,
+    )
+    before_ids = {row["ZCKIDENTIFIER"] for row in before_rows}
+    helper = reminderkit_attach_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), reminder["ZCKIDENTIFIER"], str(image)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit image attachment timed out",
+            code="sync_pending",
+            image=image.name,
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit helper returned invalid JSON after a mutation attempt",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_output_present=bool(raw or proc.stderr.strip()),
+        ) from exc
+    if proc.returncode != 0 or not payload.get("ok"):
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = payload.get("error") or "ReminderKit image attachment failed"
+        if detail:
+            message = f"{message}: {detail}"
+        raise AdapterError(
+            message,
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+
+    db_row = con.execute("pragma database_list").fetchone()
+    db_path = Path(db_row["file"] if isinstance(db_row, sqlite3.Row) else db_row[2])
+    attachment_id = payload.get("attachment_id")
+    wanted = normalize_uuid(str(attachment_id)) if attachment_id else None
+    if wanted in before_ids:
+        raise AdapterError(
+            "ReminderKit helper returned an attachment id that existed before the operation",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            attachment_id=wanted,
+        )
+    selected: dict[str, Any] | None = None
+    deadline = time.time() + ATTACHMENT_VERIFY_TIMEOUT_SECONDS
+    while True:
+        fresh = connect(db_path)
+        try:
+            rows = active_attachment_rows(fresh, reminder["Z_PK"], attachment_ent=IMAGE_ATTACHMENT_ENT)
+        finally:
+            fresh.close()
+        if wanted:
+            selected = next((row for row in rows if row["ZCKIDENTIFIER"] == wanted), None)
+        else:
+            new_rows = [row for row in rows if row["ZCKIDENTIFIER"] not in before_ids]
+            if len(new_rows) == 1:
+                selected = new_rows[0]
+            elif len(new_rows) > 1:
+                raise AdapterError(
+                    "ReminderKit helper created multiple image attachments; verification is ambiguous",
+                    code="sync_pending",
+                    partial_failure=True,
+                    attachment_ids=[row["ZCKIDENTIFIER"] for row in new_rows],
+                )
+            else:
+                raise AdapterError(
+                    "ReminderKit helper reported success without an attachment id or a new database row",
+                    code="sync_pending",
+                    partial_failure=True,
+                    mutation_outcome_unknown=True,
+                )
+        if selected is not None:
+            sync = attachment_payload(selected).get("sync", {})
+            if sync.get("mobile_visible_likely") is True:
+                break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    if selected is None:
+        raise AdapterError(
+            "ReminderKit helper reported success but its image attachment id was not found",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            attachment_id=attachment_id,
+        )
+
+    attachment = attachment_payload(selected)
+    if attachment["sync"].get("mobile_visible_likely") is not True:
+        raise AttachmentVerificationError(
+            "Image attachment was created but mobile visibility could not be verified",
+            row=selected,
+            partial_failure=True,
+            attachment=attachment,
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
+    return {
+        "attached": True,
+        "backend": "reminderkit",
+        "attachment": attachment,
+        "helper": payload,
+        "sync": attachment.get("sync", {}),
+        "_row": selected,
+    }
 
 
 def membership_map(raw: str | bytes | None) -> dict[str, str]:
@@ -823,10 +2123,10 @@ def update_primary_key(con: sqlite3.Connection, ent: int, new_max: int) -> None:
     con.execute("update Z_PRIMARYKEY set Z_MAX=max(Z_MAX, ?) where Z_ENT=?", (new_max, ent))
 
 
-def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) -> None:
+def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) -> bool:
     if cloud_pk is None:
-        return
-    con.execute(
+        return False
+    result = con.execute(
         """
         update ZREMCKCLOUDSTATE
         set Z_OPT=coalesce(Z_OPT,0)+1,
@@ -836,6 +2136,76 @@ def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) 
         """,
         (now, cloud_pk),
     )
+    return result.rowcount == 1
+
+
+def cloud_sync_evidence(
+    con: sqlite3.Connection,
+    *,
+    table: str,
+    identifier: str,
+) -> dict[str, Any]:
+    if table not in {"ZREMCDBASELIST", "ZREMCDBASESECTION"}:
+        raise ValueError(f"Unsupported CloudKit owner table: {table}")
+    row = con.execute(
+        f"""
+        select cs.ZCURRENTLOCALVERSION as current_local_version,
+               cs.ZLATESTVERSIONSYNCEDTOCLOUD as latest_synced_version,
+               cs.ZINCLOUD as in_cloud
+        from {table} owner
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=owner.ZCKCLOUDSTATE
+        where upper(owner.ZCKIDENTIFIER)=?
+        """,
+        (normalize_uuid(identifier),),
+    ).fetchone()
+    if not row:
+        return {
+            "object_found": False,
+            "in_cloud": None,
+            "current_local_version": None,
+            "latest_synced_version": None,
+            "icloud_sync_verified": False,
+        }
+    current = row["current_local_version"]
+    synced = row["latest_synced_version"]
+    in_cloud = row["in_cloud"]
+    verified = (
+        in_cloud == 1
+        and current is not None
+        and synced is not None
+        and int(synced) >= int(current)
+    )
+    return {
+        "object_found": True,
+        "in_cloud": in_cloud,
+        "current_local_version": current,
+        "latest_synced_version": synced,
+        "icloud_sync_verified": verified,
+    }
+
+
+def wait_for_cloud_sync(
+    db: Path,
+    *,
+    table: str,
+    identifier: str,
+    timeout: float = SECTION_SYNC_VERIFY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    evidence: dict[str, Any] = {}
+    while True:
+        fresh = connect(db)
+        try:
+            evidence = cloud_sync_evidence(
+                fresh,
+                table=table,
+                identifier=identifier,
+            )
+        finally:
+            fresh.close()
+        if evidence.get("icloud_sync_verified") is True or time.time() >= deadline:
+            return evidence
+        time.sleep(0.25)
 
 
 def update_list_order(con: sqlite3.Connection, list_row: dict[str, Any], reminder_id: str, add: bool, now: float) -> None:
@@ -875,6 +2245,7 @@ def reminder_payload(
     payload: dict[str, Any] = {
         "pk": row["Z_PK"],
         "id": row["ZCKIDENTIFIER"],
+        "version": row["Z_OPT"],
         "url": f"x-apple-reminder://{row['ZCKIDENTIFIER']}",
         "title": row["ZTITLE"],
         "notes": row["ZNOTES"],
@@ -1136,26 +2507,40 @@ def build_cache_payload(con: sqlite3.Connection, db: Path) -> dict[str, Any]:
 
 
 def write_cache_file(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    ensure_private_dir(path.parent)
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    tmp = Path(temp_handle.name)
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
+        with temp_handle as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
             fh.write("\n")
-        tmp.replace(path)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+        path.chmod(0o600)
     except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+        tmp.unlink(missing_ok=True)
         raise
 
 
 def load_cache_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise AdapterError(f"Cache not found: {path}. Run cache_rebuild first.")
-    with path.open("r", encoding="utf-8") as fh:
-        payload = json.load(fh)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            f"Cache contains invalid JSON: {path}. Run cache_rebuild."
+        ) from exc
     if not isinstance(payload, dict):
         raise AdapterError(f"Cache is not a JSON object: {path}")
     if payload.get("version") != CACHE_VERSION:
@@ -1257,6 +2642,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
                 missing = sorted(REQUIRED_TABLES - table_names(con))
                 item = {"path": str(db), "usable": not missing, "missing_tables": missing}
                 if not missing:
+                    item["attachment_sync_capabilities"] = attachment_sync_capabilities(con)
                     item["counts"] = db_counts(db)
                 dbs.append(item)
             finally:
@@ -1276,20 +2662,54 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_backup_store(args: argparse.Namespace) -> int:
+def create_store_backup(output: str | None = None) -> dict[str, Any]:
+    if not GROUP.exists():
+        raise AdapterError("Reminders group container does not exist")
     default_dir = APP_SUPPORT / "backups"
-    default_dir.mkdir(parents=True, exist_ok=True)
-    out = Path(args.output).expanduser() if args.output else default_dir / f"reminders-container-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.tgz"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(out, "w:gz") as tar:
-        tar.add(GROUP, arcname="Container_v1")
-    log_action("backup_store", {"path": str(out)})
-    json_out({"ok": True, "backup": str(out), "bytes": out.stat().st_size})
+    ensure_private_dir(default_dir)
+    out = (
+        Path(output).expanduser()
+        if output
+        else default_dir / f"reminders-container-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.tgz"
+    )
+    out = out.resolve()
+    group = GROUP.resolve()
+    if out == group or group in out.parents:
+        raise AdapterError("Backup output must be outside the Reminders group container")
+    ensure_private_dir(out.parent)
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix=f".{out.name}.",
+        suffix=".tmp",
+        dir=out.parent,
+        delete=False,
+    )
+    temp_path = Path(temp_handle.name)
+    temp_handle.close()
+    try:
+        with tarfile.open(temp_path, "w:gz") as tar:
+            tar.add(group, arcname="Container_v1")
+        temp_path.chmod(0o600)
+        os.replace(temp_path, out)
+        out.chmod(0o600)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return {
+        "backup": str(out),
+        "bytes": out.stat().st_size,
+        "consistency": "best_effort_live_container",
+        "warning": "Reminders may write while this archive is created; verify the backup before relying on it for recovery.",
+    }
+
+
+def cmd_backup_store(args: argparse.Namespace) -> int:
+    result = create_store_backup(args.output)
+    log_action("backup_store", {"path": result["backup"]})
+    json_out({"ok": True, **result})
     return 0
 
 
 def cmd_list_lists(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         rows = con.execute(
@@ -1302,16 +2722,27 @@ def cmd_list_lists(args: argparse.Namespace) -> int:
             where coalesce(l.ZMARKEDFORDELETION,0)=0 and l.ZNAME is not null
             group by l.Z_PK
             order by lower(l.ZNAME)
+            limit ?
             """
+            ,
+            (args.limit + 1,),
         ).fetchall()
-        json_out({"ok": True, "db": str(db), "lists": [dict(row) for row in rows]})
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "lists": [dict(row) for row in rows[: args.limit]],
+                "limit": args.limit,
+                "truncated": len(rows) > args.limit,
+            }
+        )
         return 0
     finally:
         con.close()
 
 
 def cmd_list_sections(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         params: list[Any] = []
@@ -1326,36 +2757,49 @@ def cmd_list_sections(args: argparse.Namespace) -> int:
             left join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
             where {" and ".join(where)}
             order by lower(l.ZNAME), s.Z_FOK_LIST, lower(s.ZDISPLAYNAME)
+            limit ?
             """,
-            params,
+            [*params, args.limit + 1],
         ).fetchall()
-        json_out({"ok": True, "db": str(db), "sections": [dict(row) for row in rows]})
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "sections": [dict(row) for row in rows[: args.limit]],
+                "limit": args.limit,
+                "truncated": len(rows) > args.limit,
+            }
+        )
         return 0
     finally:
         con.close()
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
-        lists = [dict(row) for row in con.execute(
+        list_rows = con.execute(
             """
             select Z_PK,ZCKIDENTIFIER,ZNAME,ZISGROUP,ZPARENTLIST
             from ZREMCDBASELIST
             where coalesce(ZMARKEDFORDELETION,0)=0 and ZNAME is not null
             order by lower(ZNAME)
-            """
-        )]
-        sections = [dict(row) for row in con.execute(
+            limit ?
+            """,
+            (args.limit + 1,),
+        ).fetchall()
+        section_rows = con.execute(
             """
             select s.Z_PK,s.ZCKIDENTIFIER,s.ZDISPLAYNAME,s.ZLIST,l.ZNAME as list_name,s.Z_FOK_LIST
             from ZREMCDBASESECTION s
             left join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
             where coalesce(s.ZMARKEDFORDELETION,0)=0
             order by lower(l.ZNAME), s.Z_FOK_LIST
-            """
-        )]
+            limit ?
+            """,
+            (args.limit + 1,),
+        ).fetchall()
         params: list[Any] = []
         where = ["coalesce(r.ZMARKEDFORDELETION,0)=0"]
         if not args.include_completed:
@@ -1372,12 +2816,19 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
             order by coalesce(r.ZDUEDATE, 999999999), lower(l.ZNAME), r.Z_FOK_LIST, lower(r.ZTITLE)
             limit ?
             """,
-            [*params, args.limit],
+            [*params, args.limit + 1],
         ).fetchall()
         reminders = [
             {k: v for k, v in reminder_payload(con, dict(row), include_attachments=False).items() if k != "notes"}
-            for row in rows
+            for row in rows[: args.limit]
         ]
+        lists = [dict(row) for row in list_rows[: args.limit]]
+        sections = [dict(row) for row in section_rows[: args.limit]]
+        truncation = {
+            "lists": len(list_rows) > args.limit,
+            "sections": len(section_rows) > args.limit,
+            "reminders": len(rows) > args.limit,
+        }
         json_out(
             {
                 "ok": True,
@@ -1386,7 +2837,9 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                 "lists": lists,
                 "sections": sections,
                 "reminders": reminders,
-                "truncated": len(reminders) >= args.limit,
+                "limit": args.limit,
+                "truncated": any(truncation.values()),
+                "truncation": truncation,
             }
         )
         return 0
@@ -1395,7 +2848,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_search_reminders(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         pattern = f"%{args.query.lower()}%"
@@ -1415,7 +2868,7 @@ def cmd_search_reminders(args: argparse.Namespace) -> int:
             order by r.ZLASTMODIFIEDDATE desc, r.Z_PK desc
             limit ?
             """,
-            [*params, args.limit],
+            [*params, args.limit + 1],
         ).fetchall()
         json_out(
             {
@@ -1423,9 +2876,10 @@ def cmd_search_reminders(args: argparse.Namespace) -> int:
                 "db": str(db),
                 "matches": [
                     {k: v for k, v in reminder_payload(con, dict(row), include_attachments=False).items() if k != "notes"}
-                    for row in rows
+                    for row in rows[: args.limit]
                 ],
-                "truncated": len(rows) >= args.limit,
+                "limit": args.limit,
+                "truncated": len(rows) > args.limit,
             }
         )
         return 0
@@ -1434,7 +2888,12 @@ def cmd_search_reminders(args: argparse.Namespace) -> int:
 
 
 def cmd_read_reminder(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         row = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -1444,8 +2903,55 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cmd_show_reminder(args: argparse.Namespace) -> int:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    operation_id = new_operation_id()
+    db = resolve_database(args.db)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        target = reminder_mutation_snapshot(reminder)
+        rem_id = reminder_url(reminder["ZCKIDENTIFIER"])
+    finally:
+        con.close()
+    script = """
+on run argv
+  set reminderID to item 1 of argv
+  tell application "Reminders"
+    activate
+    set targetReminder to reminder id reminderID
+    show targetReminder
+    return id of targetReminder
+  end tell
+end run
+"""
+    out = run_osascript(script, [rem_id])
+    json_out(
+        operation_receipt(
+            status="verified",
+            operation="show_reminder",
+            operation_id=operation_id,
+            backend="applescript",
+            target={"id": rem_id, "list": target.get("list")},
+            before=target,
+            after={"native_returned_id": out, "ui_handoff_requested": True},
+            verification={
+                "state": "native_return",
+                "ui_handoff_accepted": True,
+                "visual_selection_observed": False,
+            },
+            recovery={"semantics": "not_applicable"},
+        )
+    )
+    return 0
+
+
 def cmd_list_tags(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         params: list[Any] = []
@@ -1469,14 +2975,18 @@ def cmd_list_tags(args: argparse.Namespace) -> int:
             order by lower(l.ZNAME)
             limit ?
             """,
-            [TAG_OBJECT_ENT, *params, args.limit],
+            [TAG_OBJECT_ENT, *params, args.limit + 1],
         ).fetchall()
         json_out(
             {
                 "ok": True,
                 "db": str(db),
-                "tags": [tag_label_payload(row, active_count=int(row["active_count"] or 0)) for row in rows],
-                "truncated": len(rows) >= args.limit,
+                "tags": [
+                    tag_label_payload(row, active_count=int(row["active_count"] or 0))
+                    for row in rows[: args.limit]
+                ],
+                "limit": args.limit,
+                "truncated": len(rows) > args.limit,
             }
         )
         return 0
@@ -1485,14 +2995,27 @@ def cmd_list_tags(args: argparse.Namespace) -> int:
 
 
 def cmd_add_tag(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=True)
     tag = normalized_tag_name(args.tag)
+    operation_id = new_operation_id()
     con = connect(db)
     try:
+        capability = require_command_capability(con, "tag_assignment_db")
+        con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before = reminder_mutation_snapshot(reminder)
         now = core_now()
         account_id = account_identifier(con, reminder.get("ZACCOUNT"))
-        con.execute("begin immediate")
         label, label_created = find_or_create_tag_label(con, tag, account_id, now)
         existing = con.execute(
             """
@@ -1506,17 +3029,25 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
         if existing:
             con.commit()
             json_out(
-                {
-                    "ok": True,
-                    "db": str(db),
-                    "attached": False,
-                    "reason": "already_attached",
-                    "tag": tag_label_payload(label),
-                    "object": {
-                        "object_pk": existing["Z_PK"],
-                        "object_id": existing["ZCKIDENTIFIER"],
+                operation_receipt(
+                    status="unchanged",
+                    operation="add_tag",
+                    operation_id=operation_id,
+                    backend="sqlite_private",
+                    target={
+                        "id": reminder_url(reminder["ZCKIDENTIFIER"]),
+                        "tag": tag,
                     },
-                }
+                    before=before,
+                    after={
+                        "reminder": before,
+                        "tag": tag_label_payload(label),
+                        "assignment_id": existing["ZCKIDENTIFIER"],
+                    },
+                    verification={"state": "read_back", "tag_attached": True},
+                    recovery={"semantics": "not_applicable"},
+                    capability=capability,
+                )
             )
             return 0
         object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
@@ -1553,18 +3084,49 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
         touch_reminder(con, reminder, now)
         update_primary_key(con, 13, object_pk)
         update_primary_key(con, 45, cloud_pk)
+        verified = con.execute(
+            """
+            select count(*) from ZREMCDOBJECT
+            where Z_PK=? and ZREMINDER3=? and ZHASHTAGLABEL=?
+              and Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (object_pk, reminder["Z_PK"], label["Z_PK"], TAG_OBJECT_ENT),
+        ).fetchone()[0] == 1
+        if not verified:
+            raise AdapterError("Tag assignment could not be read back", code="schema_mismatch")
+        after = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
         con.commit()
-        log_action("add_tag", {"reminder": reminder["ZCKIDENTIFIER"], "tag": tag, "object": object_id})
-        json_out(
+        warning = log_action(
+            "add_tag",
             {
-                "ok": True,
-                "db": str(db),
-                "attached": True,
-                "label_created": label_created,
-                "reminder_id": reminder["ZCKIDENTIFIER"],
-                "tag": tag_label_payload(label),
-                "object_id": object_id,
-            }
+                "operation_id": operation_id,
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "tag": tag,
+                "object": object_id,
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="verified",
+                operation="add_tag",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={"id": reminder_url(reminder["ZCKIDENTIFIER"]), "tag": tag},
+                before=before,
+                after={
+                    "reminder": after,
+                    "tag": tag_label_payload(label),
+                    "assignment_id": object_id,
+                    "label_created": label_created,
+                },
+                verification={"state": "read_back", "tag_attached": True},
+                recovery={
+                    "semantics": "remove_tag",
+                    "command": f"remove_tag --id {reminder['ZCKIDENTIFIER']} --tag {json.dumps(tag)}",
+                },
+                warnings=[warning] if warning else None,
+                capability=capability,
+            )
         )
         return 0
     except Exception:
@@ -1575,14 +3137,42 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
 
 
 def cmd_remove_tag(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=True)
     tag = normalized_tag_name(args.tag)
+    operation_id = new_operation_id()
     con = connect(db)
     try:
+        capability = require_command_capability(con, "tag_assignment_db")
+        con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before = reminder_mutation_snapshot(reminder)
         label = find_tag_label(con, tag, account_id=account_identifier(con, reminder.get("ZACCOUNT")))
         if not label:
-            json_out({"ok": True, "db": str(db), "removed": False, "reason": "tag_not_found", "tag": tag})
+            con.commit()
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="remove_tag",
+                    operation_id=operation_id,
+                    backend="sqlite_private",
+                    target={"id": reminder_url(reminder["ZCKIDENTIFIER"]), "tag": tag},
+                    before=before,
+                    after=before,
+                    verification={"state": "read_back", "tag_attached": False},
+                    recovery={"semantics": "not_applicable"},
+                    capability=capability,
+                )
+            )
             return 0
         rows = con.execute(
             """
@@ -1594,10 +3184,23 @@ def cmd_remove_tag(args: argparse.Namespace) -> int:
             (reminder["Z_PK"], label["Z_PK"], TAG_OBJECT_ENT),
         ).fetchall()
         if not rows:
-            json_out({"ok": True, "db": str(db), "removed": False, "reason": "tag_not_attached", "tag": tag_label_payload(label)})
+            con.commit()
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="remove_tag",
+                    operation_id=operation_id,
+                    backend="sqlite_private",
+                    target={"id": reminder_url(reminder["ZCKIDENTIFIER"]), "tag": tag},
+                    before=before,
+                    after={"reminder": before, "tag": tag_label_payload(label)},
+                    verification={"state": "read_back", "tag_attached": False},
+                    recovery={"semantics": "not_applicable"},
+                    capability=capability,
+                )
+            )
             return 0
         now = core_now()
-        con.execute("begin immediate")
         removed = []
         for row in rows:
             con.execute(
@@ -1607,60 +3210,302 @@ def cmd_remove_tag(args: argparse.Namespace) -> int:
             bump_cloud_state(con, row["ZCKCLOUDSTATE"], now)
             removed.append({"object_pk": row["Z_PK"], "object_id": row["ZCKIDENTIFIER"]})
         touch_reminder(con, reminder, now)
+        remaining = con.execute(
+            """
+            select count(*) from ZREMCDOBJECT
+            where ZREMINDER3=? and ZHASHTAGLABEL=? and Z_ENT=?
+              and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"], label["Z_PK"], TAG_OBJECT_ENT),
+        ).fetchone()[0]
+        if remaining:
+            raise AdapterError("Tag removal could not be read back", code="schema_mismatch")
+        after = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
         con.commit()
-        log_action("remove_tag", {"reminder": reminder["ZCKIDENTIFIER"], "tag": tag, "removed": removed})
-        json_out({"ok": True, "db": str(db), "removed": True, "tag": tag_label_payload(label), "objects": removed})
+        warning = log_action(
+            "remove_tag",
+            {
+                "operation_id": operation_id,
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "tag": tag,
+                "removed": removed,
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="verified",
+                operation="remove_tag",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={"id": reminder_url(reminder["ZCKIDENTIFIER"]), "tag": tag},
+                before=before,
+                after={
+                    "reminder": after,
+                    "tag": tag_label_payload(label),
+                    "removed_assignment_ids": [item["object_id"] for item in removed],
+                },
+                verification={"state": "read_back", "tag_attached": False},
+                recovery={
+                    "semantics": "add_tag",
+                    "command": f"add_tag --id {reminder['ZCKIDENTIFIER']} --tag {json.dumps(tag)}",
+                },
+                warnings=[warning] if warning else None,
+                capability=capability,
+            )
+        )
         return 0
     except Exception:
         con.rollback()
         raise
     finally:
         con.close()
+
+
+def escape_like_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def cleanup_tag_candidates(
+    con: sqlite3.Connection,
+    *,
+    tag: str | None,
+    prefix: str | None,
+    account_id: str | None,
+    limit: int,
+) -> tuple[list[sqlite3.Row], bool]:
+    params: list[Any] = [TAG_OBJECT_ENT]
+    filters = ["coalesce(reference_count,0)=0"]
+    if tag:
+        filters.append("lower(ZCANONICALNAME)=?")
+        params.append(canonical_tag_name(tag))
+    if prefix:
+        filters.append("lower(ZNAME) like ? escape '\\'")
+        literal_prefix = escape_like_literal(normalized_tag_name(prefix).casefold())
+        params.append(f"{literal_prefix}%")
+    if account_id:
+        filters.append("ZACCOUNTIDENTIFIER=?")
+        params.append(account_id)
+    rows = con.execute(
+        f"""
+        select *
+        from (
+          select l.*,
+                 coalesce(sum(case when o.Z_PK is not null and coalesce(o.ZMARKEDFORDELETION,0)=0 then 1 else 0 end),0) as active_count,
+                 coalesce(count(o.Z_PK),0) as reference_count
+          from ZREMCDHASHTAGLABEL l
+          left join ZREMCDOBJECT o
+            on o.ZHASHTAGLABEL=l.Z_PK
+           and o.Z_ENT=?
+          group by l.Z_PK
+        )
+        where {" and ".join(filters)}
+        order by lower(ZNAME), coalesce(ZACCOUNTIDENTIFIER,''), Z_PK
+        limit ?
+        """,
+        [*params, limit + 1],
+    ).fetchall()
+    return list(rows[:limit]), len(rows) > limit
+
+
+def cleanup_candidate_payload(row: sqlite3.Row) -> dict[str, Any]:
+    payload = tag_label_payload(row, active_count=int(row["active_count"] or 0))
+    payload["reference_count"] = int(row["reference_count"] or 0)
+    return payload
+
+
+def cleanup_candidate_digest(candidates: list[dict[str, Any]]) -> str:
+    stable = [
+        {
+            "pk": item.get("pk"),
+            "uuid": item.get("uuid"),
+            "canonical_name": item.get("canonical_name"),
+            "account_identifier": item.get("account_identifier"),
+            "active_count": item.get("active_count"),
+            "reference_count": item.get("reference_count"),
+        }
+        for item in candidates
+    ]
+    return hashlib.sha256(
+        json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def cmd_cleanup_tags(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db, write=args.apply)
     con = connect(db)
     try:
-        params: list[Any] = [TAG_OBJECT_ENT]
-        filters = ["coalesce(active_count,0)=0"]
-        if args.tag:
-            filters.append("lower(ZCANONICALNAME)=?")
-            params.append(canonical_tag_name(args.tag))
-        if args.prefix:
-            filters.append("lower(ZNAME) like ?")
-            params.append(f"{normalized_tag_name(args.prefix).casefold()}%")
-        rows = con.execute(
-            f"""
-            select *
-            from (
-              select l.*,
-                     coalesce(count(o.Z_PK),0) as active_count
-              from ZREMCDHASHTAGLABEL l
-              left join ZREMCDOBJECT o
-                on o.ZHASHTAGLABEL=l.Z_PK
-               and o.Z_ENT=?
-               and coalesce(o.ZMARKEDFORDELETION,0)=0
-              group by l.Z_PK
-            )
-            where {" and ".join(filters)}
-            order by lower(ZNAME)
-            limit ?
-            """,
-            [*params, args.limit],
-        ).fetchall()
-        candidates = [tag_label_payload(row, active_count=int(row["active_count"] or 0)) for row in rows]
+        capability = require_command_capability(con, "cleanup_tags")
+        rows, truncated = cleanup_tag_candidates(
+            con,
+            tag=args.tag,
+            prefix=args.prefix,
+            account_id=args.account_id,
+            limit=args.limit,
+        )
+        candidates = [cleanup_candidate_payload(row) for row in rows]
+        digest = cleanup_candidate_digest(candidates)
+        scope = {
+            "tag": normalized_tag_name(args.tag) if args.tag else None,
+            "prefix": normalized_tag_name(args.prefix) if args.prefix else None,
+            "account_id": args.account_id,
+            "limit": args.limit,
+        }
         if not args.apply:
-            json_out({"ok": True, "db": str(db), "applied": False, "candidates": candidates, "truncated": len(rows) >= args.limit})
+            json_out(
+                {
+                    "ok": True,
+                    "status": "unchanged",
+                    "operation": "cleanup_tags_preview",
+                    "operation_id": new_operation_id(),
+                    "backend": "sqlite_private_maintenance",
+                    "db": str(db),
+                    "scope": scope,
+                    "candidates": candidates,
+                    "candidate_digest": digest,
+                    "truncated": truncated,
+                    "capability": capability,
+                }
+            )
             return 0
         if not args.tag and not args.prefix:
-            raise AdapterError("cleanup_tags --apply requires --tag or --prefix")
+            raise AdapterError(
+                "cleanup_tags --apply requires --tag or --prefix",
+                code="ambiguous_scope",
+            )
+        if not args.preview_digest:
+            raise AdapterError(
+                "cleanup_tags --apply requires the candidate_digest from a dry run",
+                code="ambiguous_scope",
+            )
+        if truncated:
+            raise AdapterError(
+                "Cleanup candidates exceed the requested limit; narrow the scope",
+                code="ambiguous_scope",
+                candidate_count_at_least=args.limit + 1,
+            )
+        if args.preview_digest != digest:
+            raise AdapterError(
+                "Cleanup candidate set changed since preview",
+                code="concurrent_modification",
+                expected_digest=args.preview_digest,
+                current_digest=digest,
+            )
+
+        if not candidates:
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="cleanup_tags",
+                    backend="sqlite_private_maintenance",
+                    target={"candidate_digest": digest, "count": 0, "scope": scope},
+                    after={"deleted": [], "remaining": 0},
+                    verification={"state": "read_back", "remaining_labels": 0},
+                    recovery={"semantics": "not_applicable"},
+                    db=str(db),
+                    capability=capability,
+                )
+            )
+            return 0
+
+        backup = None
+        if len(candidates) > 1 and not args.no_backup:
+            backup = create_store_backup()
+
         con.execute("begin immediate")
-        for row in rows:
-            con.execute("delete from ZREMCDHASHTAGLABEL where Z_PK=?", (row["Z_PK"],))
+        locked_rows, locked_truncated = cleanup_tag_candidates(
+            con,
+            tag=args.tag,
+            prefix=args.prefix,
+            account_id=args.account_id,
+            limit=args.limit,
+        )
+        locked_candidates = [cleanup_candidate_payload(row) for row in locked_rows]
+        locked_digest = cleanup_candidate_digest(locked_candidates)
+        if locked_truncated or locked_digest != args.preview_digest:
+            raise AdapterError(
+                "Cleanup candidate set changed while acquiring the write lock",
+                code="concurrent_modification",
+                expected_digest=args.preview_digest,
+                current_digest=locked_digest,
+            )
+
+        deleted: list[dict[str, Any]] = []
+        for row, candidate in zip(locked_rows, locked_candidates, strict=True):
+            result = con.execute(
+                """
+                delete from ZREMCDHASHTAGLABEL
+                where Z_PK=?
+                  and not exists (
+                    select 1 from ZREMCDOBJECT
+                    where Z_ENT=? and ZHASHTAGLABEL=?
+                  )
+                """,
+                (row["Z_PK"], TAG_OBJECT_ENT, row["Z_PK"]),
+            )
+            if result.rowcount != 1:
+                raise AdapterError(
+                    "A tag label gained a reference during cleanup",
+                    code="concurrent_modification",
+                    label_id=candidate.get("uuid"),
+                )
+            deleted.append(candidate)
+
+        remaining = con.execute(
+            f"select count(*) from ZREMCDHASHTAGLABEL where Z_PK in ({','.join('?' for _ in deleted)})"
+            if deleted
+            else "select 0",
+            [item["pk"] for item in deleted],
+        ).fetchone()[0]
+        if remaining:
+            raise AdapterError(
+                "Deleted tag labels could not be verified",
+                code="schema_mismatch",
+                remaining=remaining,
+            )
         con.commit()
-        log_action("cleanup_tags", {"deleted": [item["name"] for item in candidates]})
-        json_out({"ok": True, "db": str(db), "applied": True, "deleted": candidates})
+        operation_id = new_operation_id()
+        warning = log_action(
+            "cleanup_tags",
+            {
+                "operation_id": operation_id,
+                "candidate_digest": locked_digest,
+                "deleted": deleted,
+                "scope": scope,
+            },
+        )
+        receipt = operation_receipt(
+            status="verified",
+            operation="cleanup_tags",
+            backend="sqlite_private_maintenance",
+            target={"candidate_digest": locked_digest, "count": len(deleted), "scope": scope},
+            after={"deleted": deleted, "remaining": 0},
+            verification={
+                "state": "read_back",
+                "scope": "local_private_store",
+                "remaining_labels": 0,
+                "orphan_references": 0,
+                "icloud_propagation": "not_verified",
+            },
+            recovery={
+                "semantics": "no_native_undo",
+                "labels_are_recreatable": True,
+                "backup": backup,
+            },
+            warnings=[
+                {
+                    "code": "private_label_sync_unverified",
+                    "message": (
+                        "Unused tag labels were removed from the local private store; "
+                        "iCloud propagation was not verified."
+                    ),
+                },
+                *([warning] if warning else []),
+            ],
+            operation_id=operation_id,
+            db=str(db),
+            capability=capability,
+        )
+        json_out(receipt)
         return 0
     except Exception:
         con.rollback()
@@ -1669,21 +3514,51 @@ def cmd_cleanup_tags(args: argparse.Namespace) -> int:
         con.close()
 
 
+def list_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": item.get("ZCKIDENTIFIER"),
+        "name": item.get("ZNAME"),
+        "is_group": bool(item.get("ZISGROUP")),
+        "color": item.get("ZCOLOR"),
+        "emblem": item.get("ZBADGEEMBLEM"),
+    }
+
+
 def cmd_create_list(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
-        existing = con.execute(
+        existing_rows = con.execute(
             """
             select Z_PK,ZCKIDENTIFIER,ZNAME,ZISGROUP,ZBADGEEMBLEM,ZCOLOR
             from ZREMCDBASELIST
             where ZNAME=? and coalesce(ZMARKEDFORDELETION,0)=0
             order by Z_PK
+            limit 2
             """,
             (args.name,),
-        ).fetchone()
-        if existing:
-            json_out({"ok": True, "created": False, "db": str(db), "list": dict(existing)})
+        ).fetchall()
+        if existing_rows:
+            existing = list_payload(existing_rows[0])
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="create_list",
+                    operation_id=operation_id,
+                    backend="native_preflight",
+                    target={"id": existing["id"], "name": existing["name"]},
+                    after={"list": existing, "created": False},
+                    verification={"state": "read_back", "database_row": True},
+                    recovery={"semantics": "not_applicable"},
+                    warnings=(
+                        ["More than one active list already has this name; use stable list IDs for later operations."]
+                        if len(existing_rows) > 1
+                        else None
+                    ),
+                )
+            )
             return 0
     finally:
         con.close()
@@ -1701,27 +3576,88 @@ on run argv
   end tell
 end run
 """
-    out = run_osascript(script, [args.name, args.color or "", args.emblem or ""])
-    lines = out.splitlines()
-    payload = {
-        "ok": True,
-        "created": True,
-        "backend": "applescript",
+    out = None
+    native_error: AdapterError | None = None
+    try:
+        out = run_osascript(
+            script,
+            [args.name, args.color or "", args.emblem or ""],
+            mutation=True,
+        )
+    except AdapterError as exc:
+        native_error = exc
+    lines = out.splitlines() if out else []
+    created = {
         "id": lines[0] if len(lines) > 0 else None,
         "name": lines[1] if len(lines) > 1 else args.name,
         "color": lines[2] if len(lines) > 2 else args.color,
         "emblem": lines[3] if len(lines) > 3 else args.emblem,
     }
-    log_action("create_list_applescript", payload)
-    json_out(payload)
+    if native_error:
+        con = connect(db)
+        try:
+            row = con.execute(
+                """
+                select Z_PK,ZCKIDENTIFIER,ZNAME,ZISGROUP,ZBADGEEMBLEM,ZCOLOR
+                from ZREMCDBASELIST
+                where ZNAME=? and coalesce(ZMARKEDFORDELETION,0)=0
+                order by Z_PK desc
+                limit 1
+                """,
+                (args.name,),
+            ).fetchone()
+            if row:
+                created = list_payload(row)
+        finally:
+            con.close()
+        if native_error.code == "permission_denied" and not created.get("id"):
+            raise native_error
+    warning = log_action(
+        "create_list_applescript",
+        {"operation_id": operation_id, "id": created["id"], "name": created["name"]},
+    )
+    json_out(
+        operation_receipt(
+            status="committed_verification_pending" if native_error else "verified",
+            operation="create_list",
+            operation_id=operation_id,
+            backend="applescript",
+            target={"id": created["id"], "name": created["name"]},
+            after={"list": created, "created": True},
+            verification={
+                "state": "read_back_after_native_error" if native_error and created.get("id") else "pending" if native_error else "native_return",
+                "native_object": bool(created.get("id")),
+                "native_error": native_error.code if native_error else None,
+            },
+            recovery={"semantics": "delete_list_in_reminders"},
+            warnings=[
+                item
+                for item in (
+                    (
+                        {
+                            "code": native_error.code,
+                            "message": str(native_error),
+                            "mutation_outcome_unknown": native_error.details.get("mutation_outcome_unknown", False),
+                        }
+                        if native_error
+                        else None
+                    ),
+                    warning,
+                )
+                if item
+            ] or None,
+        )
+    )
     return 0
 
 
-def cmd_create_reminder(args: argparse.Namespace) -> int:
+def create_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
+    operation_id = new_operation_id()
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
+            capability = require_command_capability(con, "create_reminder_db")
             list_row = find_list(con, name=args.list)
             now = core_now()
             reminder_id = str(uuid.uuid4()).upper()
@@ -1841,32 +3777,72 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
             update_list_order(con, list_row, reminder_id, add=True, now=now)
             update_primary_key(con, 39, reminder_pk)
             update_primary_key(con, 45, cloud_pk)
+            created_row = con.execute(
+                """
+                select r.*, l.ZNAME as LIST_NAME
+                from ZREMCDREMINDER r
+                left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+                where r.Z_PK=? and coalesce(r.ZMARKEDFORDELETION,0)=0
+                """,
+                (reminder_pk,),
+            ).fetchone()
+            if not created_row or created_row["ZCKIDENTIFIER"] != reminder_id:
+                raise AdapterError(
+                    "Created reminder could not be read back before commit",
+                    code="schema_mismatch",
+                )
             con.commit()
             rem_url = f"x-apple-reminder://{reminder_id}"
-            sync_reminder_text_applescript(rem_url, title=args.title, notes=args.notes)
-            log_action(
+            sync_warning = None
+            text_synced = False
+            try:
+                sync_reminder_text_applescript(rem_url, title=args.title, notes=args.notes)
+                text_synced = True
+            except AdapterError as exc:
+                sync_warning = {
+                    "code": "native_text_sync_failed",
+                    "message": str(exc),
+                    "repair": f"update_reminder --backend applescript --id {reminder_id}",
+                }
+            journal_warning = log_action(
                 "create_reminder_db",
                 {
+                    "operation_id": operation_id,
                     "id": rem_url,
                     "list": args.list,
                     "title": args.title,
                     "db": str(db),
-                    "text_synced_via_applescript": True,
+                    "text_synced_via_applescript": text_synced,
                 },
             )
-            json_out(
-                {
-                    "ok": True,
-                    "backend": "db",
+            warnings = [item for item in (sync_warning, journal_warning) if item]
+            return operation_receipt(
+                status="verified" if text_synced else "partial_success",
+                operation="create_reminder",
+                operation_id=operation_id,
+                backend="db",
+                target={
                     "id": rem_url,
-                    "title": args.title,
-                    "list": args.list,
                     "pk": reminder_pk,
-                    "scheduled": bool(sched),
-                    "text_synced_via_applescript": True,
-                }
+                    "list": args.list,
+                    "list_id": list_row.get("ZCKIDENTIFIER"),
+                },
+                after=reminder_mutation_snapshot(dict(created_row)),
+                verification={
+                    "state": "read_back",
+                    "database_row": True,
+                    "native_text_sync": text_synced,
+                },
+                recovery={
+                    "semantics": "delete_created_reminder",
+                    "command": f"delete_reminder --id {reminder_id}",
+                },
+                warnings=warnings or None,
+                scheduled=bool(sched),
+                text_synced_via_applescript=text_synced,
+                capability=capability,
+                db=str(db),
             )
-            return 0
         except Exception:
             con.rollback()
             raise
@@ -1875,6 +3851,29 @@ def cmd_create_reminder(args: argparse.Namespace) -> int:
 
     if args.due_at or args.remind_at or args.all_day_due_date or args.flagged is not None or args.priority is not None:
         raise AdapterError("date, flag, and priority options currently require --backend db")
+    db = None
+    before_ids: set[str] = set()
+    try:
+        db = resolve_database(args.db)
+        con = connect(db)
+        try:
+            before_ids = {
+                row["ZCKIDENTIFIER"]
+                for row in con.execute(
+                    """
+                    select r.ZCKIDENTIFIER
+                    from ZREMCDREMINDER r
+                    join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+                    where r.ZTITLE=? and l.ZNAME=?
+                      and coalesce(r.ZMARKEDFORDELETION,0)=0
+                    """,
+                    (args.title, args.list),
+                ).fetchall()
+            }
+        finally:
+            con.close()
+    except (AdapterError, sqlite3.Error):
+        db = None
     script = """
 on run argv
   set listName to item 1 of argv
@@ -1888,18 +3887,161 @@ on run argv
   end tell
 end run
 """
-    rem_id = run_osascript(script, [args.list, args.title, args.notes or ""])
-    log_action("create_reminder_applescript", {"id": rem_id, "list": args.list, "title": args.title})
-    json_out({"ok": True, "backend": "applescript", "id": rem_id, "title": args.title, "list": args.list})
+    rem_id = None
+    native_error: AdapterError | None = None
+    try:
+        rem_id = run_osascript(
+            script,
+            [args.list, args.title, args.notes or ""],
+            mutation=True,
+        )
+    except AdapterError as exc:
+        native_error = exc
+    normalized_id = reminder_url(rem_id) if rem_id else None
+    read_back = None
+    verification_state = "pending"
+    candidate_ids: list[str] = []
+    try:
+        db = db or resolve_database(args.db)
+        con = connect(db)
+        try:
+            if rem_id:
+                row = find_reminder(con, reminder_id=rem_id)
+                read_back = reminder_mutation_snapshot(row)
+                verification_state = "read_back"
+            else:
+                rows = con.execute(
+                    """
+                    select r.*, l.ZNAME as LIST_NAME
+                    from ZREMCDREMINDER r
+                    join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+                    where r.ZTITLE=? and l.ZNAME=?
+                      and coalesce(r.ZMARKEDFORDELETION,0)=0
+                    order by r.Z_PK desc
+                    """,
+                    (args.title, args.list),
+                ).fetchall()
+                new_rows = [row for row in rows if row["ZCKIDENTIFIER"] not in before_ids]
+                candidate_ids = [row["ZCKIDENTIFIER"] for row in new_rows[:10]]
+                if len(new_rows) == 1:
+                    rem_id = new_rows[0]["ZCKIDENTIFIER"]
+                    normalized_id = reminder_url(rem_id)
+                    read_back = reminder_mutation_snapshot(dict(new_rows[0]))
+                    verification_state = "read_back_after_native_error"
+        finally:
+            con.close()
+    except (AdapterError, sqlite3.Error):
+        pass
+    if read_back is None:
+        read_back = {
+            "id": normalize_uuid(rem_id) if rem_id else None,
+            "store_read_back_pending": True,
+            "candidate_ids": candidate_ids,
+        }
+    if native_error and native_error.code == "permission_denied" and not rem_id:
+        raise native_error
+    journal_warning = log_action(
+        "create_reminder_applescript",
+        {
+            "operation_id": operation_id,
+            "id": normalized_id,
+            "list": args.list,
+            "title": args.title,
+        },
+    )
+    return operation_receipt(
+        status=(
+            "verified"
+            if verification_state == "read_back" and not native_error
+            else "committed_verification_pending"
+        ),
+        operation="create_reminder",
+        operation_id=operation_id,
+        backend="applescript",
+        target={"id": normalized_id, "list": args.list},
+        after=read_back,
+        verification={
+            "state": verification_state,
+            "database_row": verification_state.startswith("read_back"),
+            "native_error": native_error.code if native_error else None,
+        },
+        recovery={
+            "semantics": "delete_created_reminder",
+            "command": f"delete_reminder --id {normalize_uuid(rem_id)}" if rem_id else None,
+        },
+        warnings=[
+            item
+            for item in (
+                (
+                    {
+                        "code": native_error.code,
+                        "message": str(native_error),
+                        "mutation_outcome_unknown": native_error.details.get("mutation_outcome_unknown", False),
+                    }
+                    if native_error
+                    else None
+                ),
+                journal_warning,
+            )
+            if item
+        ] or None,
+    )
+
+
+def cmd_create_reminder(args: argparse.Namespace) -> int:
+    input_payload = {
+        "backend": args.backend,
+        "list": args.list,
+        "title": args.title,
+        "notes": args.notes,
+        "due_at": args.due_at,
+        "remind_at": args.remind_at,
+        "all_day_due_date": args.all_day_due_date,
+        "flagged": args.flagged,
+        "priority": args.priority,
+    }
+    result = execute_idempotent(
+        operation="create_reminder",
+        key=args.idempotency_key,
+        input_payload=input_payload,
+        callback=lambda: create_reminder_once(args),
+    )
+    json_out(result)
     return 0
 
 
 def cmd_update_reminder(args: argparse.Namespace) -> int:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    if args.new_title is not None and not args.new_title.strip():
+        raise AdapterError("new title must not be blank")
+    if not any(
+        value is not None
+        for value in (
+            args.new_title,
+            args.notes,
+            args.flagged,
+            args.priority,
+            args.due_at,
+            args.remind_at,
+            args.all_day_due_date,
+        )
+    ) and not args.clear_due:
+        raise AdapterError("No update fields provided")
+    operation_id = new_operation_id()
+    expected_version = getattr(args, "if_version", None)
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
+            capability = require_command_capability(con, "update_reminder_db")
+            con.execute("begin immediate")
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+            require_reminder_version(reminder, expected_version, required=True)
+            before = reminder_mutation_snapshot(reminder)
             updates: list[str] = []
             params: list[Any] = []
             if args.new_title is not None:
@@ -1928,29 +4070,73 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
                 for key, value in sched.items():
                     updates.append(f"{key}=?")
                     params.append(value)
-            if not updates:
-                raise AdapterError("No update fields provided")
             now = core_now()
             updates.extend(["ZLASTMODIFIEDDATE=?", "Z_OPT=coalesce(Z_OPT,0)+1"])
-            params.extend([now, reminder["Z_PK"]])
-            con.execute("begin immediate")
-            con.execute(f"update ZREMCDREMINDER set {', '.join(updates)} where Z_PK=?", params)
+            params.extend([now, reminder["Z_PK"], reminder["Z_OPT"]])
+            result = con.execute(
+                f"update ZREMCDREMINDER set {', '.join(updates)} where Z_PK=? and Z_OPT=?",
+                params,
+            )
+            if result.rowcount != 1:
+                raise AdapterError(
+                    "Reminder changed while the update was being applied",
+                    code="concurrent_modification",
+                )
             bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            refreshed = reread_reminder(con, reminder["Z_PK"])
+            after = reminder_mutation_snapshot(refreshed)
             con.commit()
-            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
+            rem_url = reminder_url(reminder["ZCKIDENTIFIER"])
             text_sync_needed = args.new_title is not None or args.notes is not None
+            text_sync_error = None
             if text_sync_needed:
-                sync_reminder_text_applescript(rem_url, title=args.new_title, notes=args.notes)
-            log_action(
+                try:
+                    sync_reminder_text_applescript(rem_url, title=args.new_title, notes=args.notes)
+                except Exception as exc:
+                    text_sync_error = f"{type(exc).__name__}: {exc}"
+            warnings: list[dict[str, Any] | str] = []
+            if text_sync_error:
+                warnings.append(
+                    {
+                        "code": "native_text_sync_failed",
+                        "message": "The database update committed, but native title/notes synchronization failed.",
+                        "detail": text_sync_error,
+                    }
+                )
+            journal_warning = log_action(
                 "update_reminder_db",
                 {
+                    "operation_id": operation_id,
                     "id": rem_url,
                     "db": str(db),
                     "fields": [item.split('=')[0] for item in updates],
-                    "text_synced_via_applescript": text_sync_needed,
+                    "text_synced_via_applescript": text_sync_needed and not text_sync_error,
                 },
             )
-            json_out({"ok": True, "backend": "db", "id": rem_url, "text_synced_via_applescript": text_sync_needed})
+            if journal_warning:
+                warnings.append(journal_warning)
+            json_out(
+                operation_receipt(
+                    status="partial_success" if text_sync_error else "verified",
+                    operation="update_reminder",
+                    operation_id=operation_id,
+                    backend="db",
+                    target={"id": rem_url, "list": before.get("list")},
+                    before=before,
+                    after=after,
+                    verification={
+                        "state": "read_back",
+                        "database_row": True,
+                        "native_text_sync": not text_sync_error if text_sync_needed else "not_required",
+                    },
+                    recovery={
+                        "semantics": "reapply_previous_values",
+                        "automatic_restore_available": False,
+                    },
+                    warnings=warnings or None,
+                    capability=capability,
+                )
+            )
             return 0
         except Exception:
             con.rollback()
@@ -1959,15 +4145,20 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
             con.close()
 
     if args.due_at or args.remind_at or args.all_day_due_date or args.clear_due:
-        raise AdapterError("date options currently require --backend db")
-    rem_id = reminder_url(args.id) if args.id else None
-    if not rem_id:
-        db = main_db()
-        con = connect(db)
-        try:
-            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
-        finally:
-            con.close()
+        raise AdapterError(
+            "date options currently require --backend db",
+            code="unsupported_capability",
+        )
+    db = resolve_database(args.db)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(reminder, expected_version)
+        before = reminder_mutation_snapshot(reminder)
+        rem_id = reminder_url(reminder["ZCKIDENTIFIER"])
+        reminder_pk = reminder["Z_PK"]
+    finally:
+        con.close()
     script = """
 on run argv
   set reminderID to item 1 of argv
@@ -1985,45 +4176,165 @@ on run argv
   end tell
 end run
 """
-    out = run_osascript(
-        script,
-        [
-            rem_id,
-            args.new_title or "",
-            args.notes if args.notes is not None else "__NO_CHANGE__",
-            "true" if args.flagged is True else "false" if args.flagged is False else "__NO_CHANGE__",
-            str(args.priority) if args.priority is not None else "__NO_CHANGE__",
-        ],
+    out = None
+    native_error: AdapterError | None = None
+    try:
+        out = run_osascript(
+            script,
+            [
+                rem_id,
+                args.new_title or "",
+                args.notes if args.notes is not None else "__NO_CHANGE__",
+                "true" if args.flagged is True else "false" if args.flagged is False else "__NO_CHANGE__",
+                str(args.priority) if args.priority is not None else "__NO_CHANGE__",
+            ],
+            mutation=True,
+        )
+    except AdapterError as exc:
+        native_error = exc
+    verification_state = "pending"
+    after: dict[str, Any] = {"id": normalize_uuid(rem_id), "store_read_back_pending": True}
+    try:
+        con = connect(db)
+        try:
+            refreshed = reread_reminder(con, reminder_pk)
+            after = reminder_mutation_snapshot(refreshed)
+            matches = (
+                (args.new_title is None or refreshed.get("ZTITLE") == args.new_title)
+                and (args.notes is None or refreshed.get("ZNOTES") == args.notes)
+                and (args.flagged is None or bool(refreshed.get("ZFLAGGED")) is args.flagged)
+                and (args.priority is None or refreshed.get("ZPRIORITY") == args.priority)
+            )
+            verification_state = "read_back" if matches else "pending"
+        finally:
+            con.close()
+    except (AdapterError, sqlite3.Error):
+        pass
+    if native_error and native_error.code == "permission_denied" and verification_state != "read_back":
+        raise native_error
+    native_warning = (
+        {
+            "code": native_error.code,
+            "message": str(native_error),
+            "mutation_outcome_unknown": native_error.details.get("mutation_outcome_unknown", False),
+        }
+        if native_error
+        else None
     )
-    log_action("update_reminder_applescript", {"id": out, "new_title": args.new_title, "notes_changed": args.notes is not None})
-    json_out({"ok": True, "backend": "applescript", "id": out})
+    warning = log_action(
+        "update_reminder_applescript",
+        {
+            "operation_id": operation_id,
+            "id": out or rem_id,
+            "new_title": args.new_title,
+            "notes_changed": args.notes is not None,
+        },
+    )
+    json_out(
+        operation_receipt(
+            status="verified" if verification_state == "read_back" else "committed_verification_pending",
+            operation="update_reminder",
+            operation_id=operation_id,
+            backend="applescript",
+            target={"id": rem_id, "list": before.get("list")},
+            before=before,
+            after=after,
+            verification={
+                "state": verification_state,
+                "native_returned_id": out,
+                "native_error": native_error.code if native_error else None,
+            },
+            recovery={
+                "semantics": "reapply_previous_values",
+                "automatic_restore_available": False,
+            },
+            warnings=[item for item in (native_warning, warning) if item] or None,
+        )
+    )
     return 0
 
 
-def cmd_complete_reminder(args: argparse.Namespace) -> int:
+def set_completion(args: argparse.Namespace, *, completed: bool) -> int:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    operation = "complete_reminder" if completed else "reopen_reminder"
+    operation_id = new_operation_id()
+    expected_version = getattr(args, "if_version", None)
     if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
+        db = resolve_database(args.db, write=True)
         con = connect(db)
         try:
-            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-            now = core_now()
+            capability = require_command_capability(con, "set_completion_db")
             con.execute("begin immediate")
-            con.execute(
+            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+            require_reminder_version(reminder, expected_version, required=True)
+            before = reminder_mutation_snapshot(reminder)
+            if bool(reminder.get("ZCOMPLETED")) is completed:
+                con.commit()
+                json_out(
+                    operation_receipt(
+                        status="unchanged",
+                        operation=operation,
+                        operation_id=operation_id,
+                        backend="db",
+                        target={"id": reminder_url(reminder["ZCKIDENTIFIER"]), "list": before.get("list")},
+                        before=before,
+                        after=before,
+                        verification={"state": "read_back", "completed": completed},
+                        recovery={"semantics": "not_applicable"},
+                        capability=capability,
+                    )
+                )
+                return 0
+            now = core_now()
+            result = con.execute(
                 """
                 update ZREMCDREMINDER
-                set ZCOMPLETED=1,
+                set ZCOMPLETED=?,
                     ZCOMPLETIONDATE=?,
                     ZLASTMODIFIEDDATE=?,
                     Z_OPT=coalesce(Z_OPT,0)+1
-                where Z_PK=?
+                where Z_PK=? and Z_OPT=?
                 """,
-                (now, now, reminder["Z_PK"]),
+                (1 if completed else 0, now if completed else None, now, reminder["Z_PK"], reminder["Z_OPT"]),
             )
+            if result.rowcount != 1:
+                raise AdapterError(
+                    "Reminder changed while completion was being applied",
+                    code="concurrent_modification",
+                )
             bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            refreshed = reread_reminder(con, reminder["Z_PK"])
+            if bool(refreshed.get("ZCOMPLETED")) is not completed:
+                raise AdapterError("Completion state could not be read back", code="schema_mismatch")
+            after = reminder_mutation_snapshot(refreshed)
             con.commit()
-            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
-            log_action("complete_reminder_db", {"id": rem_url, "db": str(db)})
-            json_out({"ok": True, "backend": "db", "id": rem_url, "completed": True})
+            rem_url = reminder_url(reminder["ZCKIDENTIFIER"])
+            warning = log_action(
+                f"{operation}_db",
+                {"operation_id": operation_id, "id": rem_url, "db": str(db)},
+            )
+            json_out(
+                operation_receipt(
+                    status="verified",
+                    operation=operation,
+                    operation_id=operation_id,
+                    backend="db",
+                    target={"id": rem_url, "list": before.get("list")},
+                    before=before,
+                    after=after,
+                    verification={"state": "read_back", "completed": completed},
+                    recovery={
+                        "semantics": "reopen_reminder" if completed else "complete_reminder",
+                        "command": f"{'reopen_reminder' if completed else 'complete_reminder'} --id {normalize_uuid(rem_url)}",
+                    },
+                    warnings=[warning] if warning else None,
+                    capability=capability,
+                )
+            )
             return 0
         except Exception:
             con.rollback()
@@ -2031,41 +4342,168 @@ def cmd_complete_reminder(args: argparse.Namespace) -> int:
         finally:
             con.close()
 
-    rem_id = reminder_url(args.id) if args.id else None
-    if not rem_id:
-        db = main_db()
-        con = connect(db)
-        try:
-            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
-        finally:
-            con.close()
+    db = resolve_database(args.db)
+    con = connect(db)
+    try:
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(reminder, expected_version)
+        before = reminder_mutation_snapshot(reminder)
+        rem_id = reminder_url(reminder["ZCKIDENTIFIER"])
+        reminder_pk = reminder["Z_PK"]
+        if bool(reminder.get("ZCOMPLETED")) is completed:
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation=operation,
+                    operation_id=operation_id,
+                    backend="applescript",
+                    target={"id": rem_id, "list": before.get("list")},
+                    before=before,
+                    after=before,
+                    verification={"state": "read_back", "completed": completed},
+                    recovery={"semantics": "not_applicable"},
+                )
+            )
+            return 0
+    finally:
+        con.close()
     script = """
 on run argv
   set reminderID to item 1 of argv
+  set completedValue to item 2 of argv
   tell application "Reminders"
     set targetReminder to reminder id reminderID
-    set completed of targetReminder to true
+    set completed of targetReminder to (completedValue is "true")
     return id of targetReminder
   end tell
 end run
 """
-    out = run_osascript(script, [rem_id])
-    log_action("complete_reminder_applescript", {"id": out})
-    json_out({"ok": True, "backend": "applescript", "id": out, "completed": True})
+    out = None
+    native_error: AdapterError | None = None
+    try:
+        out = run_osascript(
+            script,
+            [rem_id, "true" if completed else "false"],
+            mutation=True,
+        )
+    except AdapterError as exc:
+        native_error = exc
+    verification_state = "pending"
+    after: dict[str, Any] = {"id": normalize_uuid(rem_id), "store_read_back_pending": True}
+    try:
+        con = connect(db)
+        try:
+            refreshed = reread_reminder(con, reminder_pk)
+            after = reminder_mutation_snapshot(refreshed)
+            if bool(refreshed.get("ZCOMPLETED")) is completed:
+                verification_state = "read_back"
+        finally:
+            con.close()
+    except (AdapterError, sqlite3.Error):
+        pass
+    if native_error and native_error.code == "permission_denied" and verification_state != "read_back":
+        raise native_error
+    native_warning = (
+        {
+            "code": native_error.code,
+            "message": str(native_error),
+            "mutation_outcome_unknown": native_error.details.get("mutation_outcome_unknown", False),
+        }
+        if native_error
+        else None
+    )
+    warning = log_action(
+        f"{operation}_applescript",
+        {"operation_id": operation_id, "id": out or rem_id},
+    )
+    json_out(
+        operation_receipt(
+            status="verified" if verification_state == "read_back" else "committed_verification_pending",
+            operation=operation,
+            operation_id=operation_id,
+            backend="applescript",
+            target={"id": rem_id, "list": before.get("list")},
+            before=before,
+            after=after,
+            verification={
+                "state": verification_state,
+                "completed": completed,
+                "native_returned_id": out,
+                "native_error": native_error.code if native_error else None,
+            },
+            recovery={
+                "semantics": "reopen_reminder" if completed else "complete_reminder",
+                "command": f"{'reopen_reminder' if completed else 'complete_reminder'} --id {normalize_uuid(rem_id)}",
+            },
+            warnings=[item for item in (native_warning, warning) if item] or None,
+        )
+    )
     return 0
 
 
+def cmd_complete_reminder(args: argparse.Namespace) -> int:
+    return set_completion(args, completed=True)
+
+
+def cmd_reopen_reminder(args: argparse.Namespace) -> int:
+    return set_completion(args, completed=False)
+
+
 def cmd_delete_reminder(args: argparse.Namespace) -> int:
-    if args.backend == "db":
-        db = Path(args.db).expanduser() if args.db else main_db()
-        con = connect(db)
-        try:
-            reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=args.backend == "db")
+    con = connect(db)
+    operation_id = new_operation_id()
+    requested_backend = args.backend
+    selected_backend = requested_backend
+    auto_evidence: dict[str, Any] | None = None
+    try:
+        if requested_backend == "auto":
+            verified, auto_evidence = db_soft_delete_verified(con)
+            version_precondition_provided = isinstance(args.if_version, int) and not isinstance(
+                args.if_version,
+                bool,
+            )
+            db_path_eligible = verified and version_precondition_provided
+            auto_evidence = {
+                **(auto_evidence or {}),
+                "version_precondition_provided": version_precondition_provided,
+                "db_path_eligible": db_path_eligible,
+            }
+            if verified and not version_precondition_provided:
+                auto_evidence["reason"] = "version_precondition_required"
+            selected_backend = "db" if db_path_eligible else "applescript"
+
+        if selected_backend == "db":
+            resolved_write_db = resolve_database(args.db, write=True)
+            if resolved_write_db != db:
+                raise AdapterError(
+                    "Resolved write database changed during backend selection",
+                    code="concurrent_modification",
+                )
+            capability = require_command_capability(con, "delete_reminder_db")
+            con.execute("begin immediate")
+            reminder = find_reminder(
+                con,
+                reminder_id=args.id,
+                title=args.title,
+                list_name=args.list,
+            )
+            require_reminder_version(reminder, args.if_version, required=True)
+            before = reminder_mutation_snapshot(reminder)
             list_row = None
             if reminder.get("ZLIST"):
-                list_row = row_dict(con.execute("select * from ZREMCDBASELIST where Z_PK=?", (reminder["ZLIST"],)).fetchone())
+                list_row = row_dict(
+                    con.execute(
+                        "select * from ZREMCDBASELIST where Z_PK=?",
+                        (reminder["ZLIST"],),
+                    ).fetchone()
+                )
             now = core_now()
-            con.execute("begin immediate")
             if list_row:
                 update_list_order(con, list_row, reminder["ZCKIDENTIFIER"], add=False, now=now)
                 mapping = membership_map(list_row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
@@ -2081,7 +4519,7 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
                         (membership_payload(mapping), list_row["Z_PK"]),
                     )
                     bump_cloud_state(con, list_row.get("ZCKCLOUDSTATE"), now)
-            con.execute(
+            result = con.execute(
                 """
                 update ZREMCDREMINDER
                 set ZMARKEDFORDELETION=1,
@@ -2089,30 +4527,103 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
                     Z_FOK_LIST=null,
                     ZLASTMODIFIEDDATE=?,
                     Z_OPT=coalesce(Z_OPT,0)+1
-                where Z_PK=?
+                where Z_PK=? and Z_OPT=?
                 """,
-                (now, reminder["Z_PK"]),
+                (now, reminder["Z_PK"], reminder["Z_OPT"]),
             )
+            if result.rowcount != 1:
+                raise AdapterError(
+                    "Reminder changed while deletion was being applied",
+                    code="concurrent_modification",
+                )
             bump_cloud_state(con, reminder.get("ZCKCLOUDSTATE"), now)
+            deleted_row = con.execute(
+                """
+                select r.*, l.ZNAME as LIST_NAME
+                from ZREMCDREMINDER r
+                left join ZREMCDBASELIST l on l.Z_PK=r.ZLIST
+                where r.Z_PK=?
+                """,
+                (reminder["Z_PK"],),
+            ).fetchone()
+            if not deleted_row or not deleted_row["ZMARKEDFORDELETION"] or deleted_row["ZLIST"] is not None:
+                raise AdapterError(
+                    "DB soft-delete state could not be read back",
+                    code="schema_mismatch",
+                )
+            if list_row:
+                refreshed_list = con.execute(
+                    "select ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA from ZREMCDBASELIST where Z_PK=?",
+                    (list_row["Z_PK"],),
+                ).fetchone()
+                refreshed_mapping = membership_map(
+                    refreshed_list["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"] if refreshed_list else None
+                )
+                if reminder["ZCKIDENTIFIER"].upper() in refreshed_mapping:
+                    raise AdapterError(
+                        "Reminder remained in section membership after soft-delete",
+                        code="schema_mismatch",
+                    )
             con.commit()
-            rem_url = f"x-apple-reminder://{reminder['ZCKIDENTIFIER']}"
-            log_action("delete_reminder_db_soft", {"id": rem_url, "db": str(db)})
-            json_out({"ok": True, "backend": "db", "id": rem_url, "deleted_via": "db_soft_delete"})
+            after = reminder_mutation_snapshot(dict(deleted_row))
+            parity_verified, parity_evidence = db_soft_delete_verified(con)
+            warning = log_action(
+                "delete_reminder_db_soft",
+                {
+                    "operation_id": operation_id,
+                    "id": reminder["ZCKIDENTIFIER"],
+                    "db": str(db),
+                    "backend_requested": requested_backend,
+                },
+            )
+            receipt = operation_receipt(
+                    status="verified" if parity_verified else "committed_verification_pending",
+                    operation="delete_reminder",
+                    operation_id=operation_id,
+                    backend="db",
+                    target={
+                        "id": reminder["ZCKIDENTIFIER"],
+                        "list": before.get("list"),
+                    },
+                    before=before,
+                    after=after,
+                    verification={
+                        "state": "read_back",
+                        "db_soft_delete_state": True,
+                        "recently_deleted_parity": parity_verified,
+                        "evidence": parity_evidence,
+                    },
+                    recovery={
+                        "semantics": (
+                            "recently_deleted_verified"
+                            if parity_verified
+                            else "soft_deleted_unverified"
+                        ),
+                        "automatic_restore_available": False,
+                    },
+                    warnings=[warning] if warning else None,
+                    backend_requested=requested_backend,
+                    auto_evidence=auto_evidence,
+                    capability=capability,
+                )
+            con.close()
+            json_out(receipt)
             return 0
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
 
-    rem_id = reminder_url(args.id) if args.id else None
-    if not rem_id:
-        db = main_db()
-        con = connect(db)
-        try:
-            rem_id = reminder_url(find_reminder(con, title=args.title, list_name=args.list)["ZCKIDENTIFIER"])
-        finally:
-            con.close()
+        reminder = find_reminder(
+            con,
+            reminder_id=args.id,
+            title=args.title,
+            list_name=args.list,
+        )
+        require_reminder_version(reminder, args.if_version)
+        before = reminder_mutation_snapshot(reminder)
+        rem_id = reminder_url(reminder["ZCKIDENTIFIER"])
+    except Exception:
+        con.rollback()
+        con.close()
+        raise
+
     script = """
 on run argv
   set reminderID to item 1 of argv
@@ -2121,31 +4632,292 @@ on run argv
   end tell
   return reminderID
 end run
-"""
-    out = run_osascript(script, [rem_id])
-    log_action("delete_reminder_applescript_native", {"id": out})
-    json_out({"ok": True, "backend": "applescript", "id": out, "deleted_via": "native_reminders"})
+    """
+    try:
+        out = None
+        native_error: AdapterError | None = None
+        try:
+            out = run_osascript(script, [rem_id], mutation=True)
+        except AdapterError as exc:
+            native_error = exc
+        row = con.execute(
+            "select ZMARKEDFORDELETION,ZLIST,Z_OPT,ZLASTMODIFIEDDATE from ZREMCDREMINDER where ZCKIDENTIFIER=?",
+            (normalize_uuid(rem_id),),
+        ).fetchone()
+        read_back_deleted = row is None or bool(row["ZMARKEDFORDELETION"])
+        if native_error and native_error.code == "permission_denied" and not read_back_deleted:
+            raise native_error
+        after = (
+            {
+                "id": normalize_uuid(rem_id),
+                "marked_for_deletion": bool(row["ZMARKEDFORDELETION"]),
+                "list_pk": row["ZLIST"],
+                "version": row["Z_OPT"],
+                "last_modified_at": core_to_iso(row["ZLASTMODIFIEDDATE"]),
+            }
+            if row
+            else {"id": normalize_uuid(rem_id), "not_found_in_store": True}
+        )
+        warning = log_action(
+            "delete_reminder_applescript_native",
+            {
+                "operation_id": operation_id,
+                "id": out or rem_id,
+                "backend_requested": requested_backend,
+            },
+        )
+        native_warning = (
+            {
+                "code": native_error.code,
+                "message": str(native_error),
+                "mutation_outcome_unknown": native_error.details.get("mutation_outcome_unknown", False),
+            }
+            if native_error
+            else None
+        )
+        json_out(
+            operation_receipt(
+                status="verified" if read_back_deleted else "committed_verification_pending",
+                operation="delete_reminder",
+                operation_id=operation_id,
+                backend="applescript",
+                target={"id": rem_id, "list": before.get("list")},
+                before=before,
+                after=after,
+                verification={
+                    "state": "read_back" if read_back_deleted else "pending",
+                    "store_no_longer_active": read_back_deleted,
+                    "recently_deleted_ui": "not_checked",
+                    "native_returned_id": out,
+                    "native_error": native_error.code if native_error else None,
+                },
+                recovery={
+                    "semantics": "native_recently_deleted_expected",
+                    "automatic_restore_available": False,
+                },
+                warnings=[item for item in (native_warning, warning) if item] or None,
+                backend_requested=requested_backend,
+                auto_evidence=auto_evidence,
+            )
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def section_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": item.get("ZCKIDENTIFIER"),
+        "name": item.get("ZDISPLAYNAME"),
+        "list_id": item.get("LIST_ID") or item.get("list_id"),
+        "list": item.get("LIST_NAME") or item.get("list_name"),
+        "order": item.get("Z_FOK_LIST"),
+    }
+
+
+def use_native_section_backend(args: argparse.Namespace) -> bool:
+    return getattr(args, "db", None) is None
+
+
+def cmd_create_section_reminderkit(args: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    db = resolve_database(None)
+    con = connect(db)
+    try:
+        capability = require_command_capability(con, "create_section_db")
+        list_row = find_list(con, name=args.list, list_id=args.list_id)
+        existing_row = con.execute(
+            """
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where s.ZLIST=? and s.ZDISPLAYNAME=? and coalesce(s.ZMARKEDFORDELETION,0)=0
+            """,
+            (list_row["Z_PK"], args.name),
+        ).fetchone()
+        existing = dict(existing_row) if existing_row else None
+        existing_sync = (
+            cloud_sync_evidence(
+                con,
+                table="ZREMCDBASESECTION",
+                identifier=existing["ZCKIDENTIFIER"],
+            )
+            if existing
+            else None
+        )
+    finally:
+        con.close()
+
+    if existing and existing_sync and existing_sync.get("icloud_sync_verified") is True:
+        payload = section_payload(existing)
+        json_out(
+            operation_receipt(
+                status="unchanged",
+                operation="create_section",
+                operation_id=operation_id,
+                backend="reminderkit_private",
+                target={"id": payload["id"], "list_id": list_row["ZCKIDENTIFIER"]},
+                after={"section": payload, "created": False},
+                verification={
+                    "state": "cloud_read_back",
+                    "database_row": True,
+                    "icloud_sync": "verified",
+                    "cloud": existing_sync,
+                },
+                recovery={"semantics": "not_applicable"},
+                capability=capability,
+            )
+        )
+        return 0
+
+    repaired_existing = existing is not None
+    if existing:
+        section_id = existing["ZCKIDENTIFIER"]
+        temporary_name = f"{args.name[:511]}\u2060"
+        invoke_reminderkit_section("repair", section_id, temporary_name)
+        try:
+            helper_payload = invoke_reminderkit_section("repair", section_id, args.name)
+        except AdapterError as exc:
+            exc.details.setdefault("section_id", section_id)
+            exc.details.setdefault("recovery", "repair_section_display_name")
+            raise
+    else:
+        helper_payload = invoke_reminderkit_section(
+            "create",
+            list_row["ZCKIDENTIFIER"],
+            args.name,
+        )
+        section_id = normalize_uuid(str(helper_payload.get("section_id") or ""))
+        if not section_id:
+            raise AdapterError(
+                "ReminderKit created a section without returning its identifier",
+                code="sync_pending",
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+            )
+
+    sync = wait_for_cloud_sync(
+        db,
+        table="ZREMCDBASESECTION",
+        identifier=section_id,
+    )
+    fresh = connect(db)
+    try:
+        created_row = fresh.execute(
+            """
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where upper(s.ZCKIDENTIFIER)=? and s.ZLIST=?
+              and s.ZDISPLAYNAME=? and coalesce(s.ZMARKEDFORDELETION,0)=0
+            """,
+            (section_id, list_row["Z_PK"], args.name),
+        ).fetchone()
+    finally:
+        fresh.close()
+    if not created_row:
+        raise AdapterError(
+            "ReminderKit section save could not be read back",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            section_id=section_id,
+        )
+
+    status = "verified" if sync.get("icloud_sync_verified") is True else "committed_verification_pending"
+    created = section_payload(created_row)
+    warning = log_action(
+        "create_section",
+        {
+            "operation_id": operation_id,
+            "db": str(db),
+            "list": list_row["ZNAME"],
+            "section": args.name,
+            "id": section_id,
+            "backend": "reminderkit",
+            "repaired_existing": repaired_existing,
+        },
+    )
+    warnings: list[dict[str, Any] | str] = []
+    if warning:
+        warnings.append(warning)
+    if status != "verified":
+        warnings.append("The section exists locally, but iCloud upload is still pending.")
+    json_out(
+        operation_receipt(
+            status=status,
+            operation="create_section",
+            operation_id=operation_id,
+            backend="reminderkit_private",
+            target={"id": section_id, "list_id": list_row["ZCKIDENTIFIER"]},
+            after={
+                "section": created,
+                "created": not repaired_existing,
+                "repaired_existing": repaired_existing,
+            },
+            verification={
+                "state": "cloud_read_back" if status == "verified" else "local_read_back",
+                "database_row": True,
+                "icloud_sync": "verified" if status == "verified" else "pending",
+                "cloud": sync,
+                "helper_saved": helper_payload.get("saved") is True,
+            },
+            recovery={
+                "semantics": "remove_section_in_reminders" if not repaired_existing else "not_applicable",
+                "automatic_restore_available": False,
+            },
+            warnings=warnings or None,
+            capability=capability,
+        )
+    )
     return 0
 
 
 def cmd_create_section(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    if not args.list_id and not args.list:
+        raise AdapterError(
+            "Use an exact list id or list name",
+            code="ambiguous_target",
+            required_selector="list_id | list",
+        )
+    if use_native_section_backend(args):
+        return cmd_create_section_reminderkit(args)
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
+        capability = require_command_capability(con, "create_section_db")
+        con.execute("begin immediate")
         list_row = find_list(con, name=args.list, list_id=args.list_id)
         existing = con.execute(
             """
-            select * from ZREMCDBASESECTION
-            where ZLIST=? and ZDISPLAYNAME=? and coalesce(ZMARKEDFORDELETION,0)=0
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where s.ZLIST=? and s.ZDISPLAYNAME=? and coalesce(s.ZMARKEDFORDELETION,0)=0
             """,
             (list_row["Z_PK"], args.name),
         ).fetchone()
         if existing:
-            json_out({"ok": True, "db": str(db), "section": dict(existing), "created": False})
+            con.commit()
+            existing_payload = section_payload(existing)
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="create_section",
+                    operation_id=operation_id,
+                    backend="sqlite_private",
+                    target={"id": existing_payload["id"], "list_id": list_row["ZCKIDENTIFIER"]},
+                    after={"section": existing_payload, "created": False},
+                    verification={"state": "read_back", "database_row": True},
+                    recovery={"semantics": "not_applicable"},
+                    capability=capability,
+                )
+            )
             return 0
         now = core_now()
         section_id = str(uuid.uuid4()).upper()
-        con.execute("begin immediate")
         section_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=5").fetchone()[0]
         cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_ENT=45").fetchone()[0]
         fok = con.execute(
@@ -2194,9 +4966,53 @@ def cmd_create_section(args: argparse.Namespace) -> int:
         )
         update_primary_key(con, 5, section_pk)
         update_primary_key(con, 45, cloud_pk)
+        created_row = con.execute(
+            """
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where s.Z_PK=? and coalesce(s.ZMARKEDFORDELETION,0)=0
+            """,
+            (section_pk,),
+        ).fetchone()
+        if not created_row:
+            raise AdapterError("Section could not be read back", code="schema_mismatch")
         con.commit()
-        log_action("create_section", {"db": str(db), "list": list_row["ZNAME"], "section": args.name, "id": section_id})
-        json_out({"ok": True, "db": str(db), "created": True, "section": {"pk": section_pk, "id": section_id, "name": args.name}})
+        created = section_payload(created_row)
+        warning = log_action(
+            "create_section",
+            {
+                "operation_id": operation_id,
+                "db": str(db),
+                "list": list_row["ZNAME"],
+                "section": args.name,
+                "id": section_id,
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="committed_verification_pending",
+                operation="create_section",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={"id": section_id, "list_id": list_row["ZCKIDENTIFIER"]},
+                after={"section": created, "created": True},
+                verification={
+                    "state": "local_read_back",
+                    "database_row": True,
+                    "icloud_sync": "not_verified",
+                },
+                recovery={
+                    "semantics": "remove_section_in_reminders",
+                    "automatic_restore_available": False,
+                },
+                warnings=[
+                    *([warning] if warning else []),
+                    "Direct SQLite section creation is local-only until a native Reminders save repairs it.",
+                ],
+                capability=capability,
+            )
+        )
         return 0
     except Exception:
         con.rollback()
@@ -2205,37 +5021,296 @@ def cmd_create_section(args: argparse.Namespace) -> int:
         con.close()
 
 
-def cmd_move_to_section(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+def cmd_move_to_section_reminderkit(args: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    db = resolve_database(None)
     con = connect(db)
     try:
+        capability = require_command_capability(con, "move_to_section_db")
+        reminder = find_reminder(
+            con,
+            reminder_id=args.id,
+            title=args.title,
+            list_name=args.list,
+        )
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before_reminder = reminder_mutation_snapshot(reminder)
+        if not reminder.get("ZLIST"):
+            raise AdapterError(
+                "Reminder is not assigned to an active list",
+                code="ambiguous_target",
+            )
+        list_row_raw = con.execute(
+            "select * from ZREMCDBASELIST where Z_PK=?",
+            (reminder["ZLIST"],),
+        ).fetchone()
+        if not list_row_raw:
+            raise AdapterError("Reminder list was not found", code="ambiguous_target")
+        list_row = dict(list_row_raw)
+        section = find_section(
+            con,
+            list_pk=list_row["Z_PK"],
+            name=args.section,
+            section_id=args.section_id,
+        )
+        mapping = membership_map(list_row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
+        reminder_key = reminder["ZCKIDENTIFIER"].upper()
+        previous_section_id = mapping.get(reminder_key)
+        target_section_id = section["ZCKIDENTIFIER"].upper()
+        list_sync = cloud_sync_evidence(
+            con,
+            table="ZREMCDBASELIST",
+            identifier=list_row["ZCKIDENTIFIER"],
+        )
+    finally:
+        con.close()
+
+    if (
+        previous_section_id == target_section_id
+        and list_sync.get("icloud_sync_verified") is True
+    ):
+        json_out(
+            operation_receipt(
+                status="unchanged",
+                operation="move_to_section",
+                operation_id=operation_id,
+                backend="reminderkit_private",
+                target={"id": reminder_key, "section_id": target_section_id},
+                before={"reminder": before_reminder, "section_id": previous_section_id},
+                after={"reminder": before_reminder, "section_id": previous_section_id},
+                verification={
+                    "state": "cloud_read_back",
+                    "section_membership": True,
+                    "icloud_sync": "verified",
+                    "cloud": list_sync,
+                },
+                recovery={"semantics": "not_applicable"},
+                capability=capability,
+            )
+        )
+        return 0
+
+    helper_payload = invoke_reminderkit_section(
+        "move",
+        reminder_key,
+        target_section_id,
+    )
+    sync = wait_for_cloud_sync(
+        db,
+        table="ZREMCDBASELIST",
+        identifier=list_row["ZCKIDENTIFIER"],
+    )
+    fresh = connect(db)
+    try:
+        refreshed_reminder = find_reminder(fresh, reminder_id=reminder_key)
+        refreshed_list = fresh.execute(
+            "select * from ZREMCDBASELIST where Z_PK=?",
+            (list_row["Z_PK"],),
+        ).fetchone()
+        refreshed_mapping = membership_map(
+            refreshed_list["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"]
+            if refreshed_list
+            else None
+        )
+    finally:
+        fresh.close()
+    if refreshed_mapping.get(reminder_key) != target_section_id:
+        raise AdapterError(
+            "ReminderKit section move could not be read back",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reminder_id=reminder_key,
+            section_id=target_section_id,
+        )
+
+    status = "verified" if sync.get("icloud_sync_verified") is True else "committed_verification_pending"
+    warning = log_action(
+        "move_to_section",
+        {
+            "operation_id": operation_id,
+            "reminder": reminder_key,
+            "section": target_section_id,
+            "backend": "reminderkit",
+            "repaired_existing": previous_section_id == target_section_id,
+        },
+    )
+    warnings: list[dict[str, Any] | str] = []
+    if warning:
+        warnings.append(warning)
+    if status != "verified":
+        warnings.append("The section membership exists locally, but iCloud upload is still pending.")
+    recovery = (
+        {"semantics": "not_applicable"}
+        if previous_section_id == target_section_id
+        else {
+            "semantics": "move_to_previous_section"
+            if previous_section_id
+            else "remove_section_membership",
+            "previous_section_id": previous_section_id,
+            "automatic_restore_available": False,
+        }
+    )
+    json_out(
+        operation_receipt(
+            status=status,
+            operation="move_to_section",
+            operation_id=operation_id,
+            backend="reminderkit_private",
+            target={"id": reminder_key, "section_id": target_section_id},
+            before={"reminder": before_reminder, "section_id": previous_section_id},
+            after={
+                "reminder": reminder_mutation_snapshot(refreshed_reminder),
+                "section_id": target_section_id,
+                "section": section["ZDISPLAYNAME"],
+                "repaired_existing": previous_section_id == target_section_id,
+            },
+            verification={
+                "state": "cloud_read_back" if status == "verified" else "local_read_back",
+                "section_membership": True,
+                "icloud_sync": "verified" if status == "verified" else "pending",
+                "cloud": sync,
+                "helper_saved": helper_payload.get("saved") is True,
+            },
+            recovery=recovery,
+            warnings=warnings or None,
+            capability=capability,
+        )
+    )
+    return 0
+
+
+def cmd_move_to_section(args: argparse.Namespace) -> int:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=True)
+    if not args.section_id and not args.section:
+        raise AdapterError(
+            "Use an exact section id or section name",
+            code="ambiguous_target",
+            required_selector="section_id | section",
+        )
+    if use_native_section_backend(args):
+        return cmd_move_to_section_reminderkit(args)
+    operation_id = new_operation_id()
+    con = connect(db)
+    try:
+        capability = require_command_capability(con, "move_to_section_db")
+        con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        list_row = find_list(con, list_id=reminder["ZLIST"] and con.execute("select ZCKIDENTIFIER from ZREMCDBASELIST where Z_PK=?", (reminder["ZLIST"],)).fetchone()[0])
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before_reminder = reminder_mutation_snapshot(reminder)
+        if not reminder.get("ZLIST"):
+            raise AdapterError("Reminder is not assigned to an active list", code="ambiguous_target")
+        list_row_raw = con.execute(
+            "select * from ZREMCDBASELIST where Z_PK=?",
+            (reminder["ZLIST"],),
+        ).fetchone()
+        if not list_row_raw:
+            raise AdapterError("Reminder list was not found", code="ambiguous_target")
+        list_row = dict(list_row_raw)
         section = find_section(con, list_pk=list_row["Z_PK"], name=args.section, section_id=args.section_id)
         mapping = membership_map(list_row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
+        reminder_key = reminder["ZCKIDENTIFIER"].upper()
+        previous_section_id = mapping.get(reminder_key)
+        if previous_section_id == section["ZCKIDENTIFIER"].upper():
+            con.commit()
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="move_to_section",
+                    operation_id=operation_id,
+                    backend="sqlite_private",
+                    target={
+                        "id": reminder_url(reminder["ZCKIDENTIFIER"]),
+                        "section_id": section["ZCKIDENTIFIER"],
+                    },
+                    before={"reminder": before_reminder, "section_id": previous_section_id},
+                    after={"reminder": before_reminder, "section_id": previous_section_id},
+                    verification={"state": "read_back", "section_membership": True},
+                    recovery={"semantics": "not_applicable"},
+                    capability=capability,
+                )
+            )
+            return 0
         mapping[reminder["ZCKIDENTIFIER"].upper()] = section["ZCKIDENTIFIER"].upper()
         now = core_now()
-        con.execute("begin immediate")
-        con.execute(
+        result = con.execute(
             """
             update ZREMCDBASELIST
             set ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA=?, Z_OPT=coalesce(Z_OPT,0)+1
-            where Z_PK=?
+            where Z_PK=? and Z_OPT=?
             """,
-            (membership_payload(mapping), list_row["Z_PK"]),
+            (membership_payload(mapping), list_row["Z_PK"], list_row["Z_OPT"]),
         )
-        con.execute(
-            """
-            update ZREMCKCLOUDSTATE
-            set ZCURRENTLOCALVERSION=coalesce(ZCURRENTLOCALVERSION,0)+1,
-                ZLOCALVERSIONDATE=?
-            where Z_PK=?
-            """,
-            (now, list_row["ZCKCLOUDSTATE"]),
+        if result.rowcount != 1:
+            raise AdapterError(
+                "List membership changed while the move was being applied",
+                code="concurrent_modification",
+            )
+        bump_cloud_state(con, list_row.get("ZCKCLOUDSTATE"), now)
+        refreshed_list = con.execute(
+            "select ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA from ZREMCDBASELIST where Z_PK=?",
+            (list_row["Z_PK"],),
+        ).fetchone()
+        refreshed_mapping = membership_map(
+            refreshed_list["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"] if refreshed_list else None
         )
+        if refreshed_mapping.get(reminder_key) != section["ZCKIDENTIFIER"].upper():
+            raise AdapterError("Section move could not be read back", code="schema_mismatch")
         con.commit()
-        log_action("move_to_section", {"reminder": reminder["ZCKIDENTIFIER"], "section": section["ZCKIDENTIFIER"]})
-        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], "section_id": section["ZCKIDENTIFIER"], "section": section["ZDISPLAYNAME"]})
+        warning = log_action(
+            "move_to_section",
+            {
+                "operation_id": operation_id,
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "section": section["ZCKIDENTIFIER"],
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="committed_verification_pending",
+                operation="move_to_section",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={
+                    "id": reminder["ZCKIDENTIFIER"],
+                    "section_id": section["ZCKIDENTIFIER"],
+                },
+                before={"reminder": before_reminder, "section_id": previous_section_id},
+                after={
+                    "reminder": reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"])),
+                    "section_id": section["ZCKIDENTIFIER"],
+                    "section": section["ZDISPLAYNAME"],
+                },
+                verification={
+                    "state": "local_read_back",
+                    "section_membership": True,
+                    "icloud_sync": "not_verified",
+                },
+                recovery={
+                    "semantics": "move_to_previous_section" if previous_section_id else "remove_section_membership",
+                    "previous_section_id": previous_section_id,
+                    "automatic_restore_available": False,
+                },
+                warnings=[
+                    *([warning] if warning else []),
+                    "Direct SQLite section membership is local-only until a native Reminders save repairs it.",
+                ],
+                capability=capability,
+            )
+        )
         return 0
     except Exception:
         con.rollback()
@@ -2246,7 +5321,7 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
 
 def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image: Path) -> dict[str, Any]:
     if not image.exists():
-        raise AdapterError(f"Image not found: {image}")
+        raise AdapterError(f"Image not found: {image.name}")
     data = image.read_bytes()
     sha512 = hashlib.sha512(data).hexdigest()
     ext = image.suffix.lower().lstrip(".") or "png"
@@ -2268,79 +5343,99 @@ def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image
         return {"attached": False, "reason": "already_attached", "attachment": attachment_payload(existing)}
     attach_dir = attachment_dir_for_account()
     stored = attach_dir / f"{sha512}.{ext}"
+    stored_created = False
     if not stored.exists():
         shutil.copy2(image, stored)
-    now = core_now()
-    object_id = str(uuid.uuid4()).upper()
-    display_filename = f"{object_id}-codex.{ext}"
-    object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
-    cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-    sort_order = con.execute(
-        """
-        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-        from ZREMCDOBJECT
-        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-        """,
-        (reminder["Z_PK"],),
-    ).fetchone()[0]
-    con.execute(
-        """
-        insert into ZREMCDOBJECT (
-          Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
-          ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
-          ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
-          ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
-        ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            object_pk,
-            IMAGE_ATTACHMENT_ENT,
-            reminder["ZACCOUNT"],
-            cloud_pk,
-            reminder["Z_PK"],
-            sort_order,
-            len(data),
-            height,
-            width,
-            uti,
-            display_filename,
-            sha512,
-            sqlite3.Binary(uuid_blob(object_id)),
-            object_id,
-        ),
-    )
-    con.execute(
-        """
-        insert into ZREMCKCLOUDSTATE (
-          Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
-          ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
-        ) values (?,45,1,1,0,?,?,?)
-        """,
-        (cloud_pk, object_pk, IMAGE_ATTACHMENT_ENT, now),
-    )
-    touch_reminder(con, reminder, now)
-    update_primary_key(con, 13, object_pk)
-    update_primary_key(con, 45, cloud_pk)
-    row = con.execute(
-        """
-        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
-               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
-               ZMARKEDFORDELETION
-        from ZREMCDOBJECT
-        where Z_PK=?
-        """,
-        (object_pk,),
-    ).fetchone()
-    return {
-        "attached": True,
-        "attachment": attachment_payload(row),
-        "stored_path": str(stored),
-        "width": width,
-        "height": height,
-    }
+        stored_created = True
+    try:
+        now = core_now()
+        object_id = str(uuid.uuid4()).upper()
+        display_filename = f"{object_id}-codex.{ext}"
+        object_pk = con.execute(
+            "select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'"
+        ).fetchone()[0]
+        cloud_pk = con.execute(
+            "select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'"
+        ).fetchone()[0]
+        sort_order = con.execute(
+            """
+            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"],),
+        ).fetchone()[0]
+        con.execute(
+            """
+            insert into ZREMCDOBJECT (
+              Z_PK,Z_ENT,Z_OPT,ZCKDIRTYFLAGS,ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION,
+              ZMARKEDFORDELETION,ZMINIMUMSUPPORTEDAPPVERSION,ZACCOUNT,ZCKCLOUDSTATE,
+              ZREMINDER2,Z_FOK_REMINDER1,ZFILESIZE,ZHEIGHT,ZWIDTH,ZUTI,ZFILENAME,
+              ZSHA512SUM,ZIDENTIFIER,ZCKIDENTIFIER
+            ) values (?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                object_pk,
+                IMAGE_ATTACHMENT_ENT,
+                reminder["ZACCOUNT"],
+                cloud_pk,
+                reminder["Z_PK"],
+                sort_order,
+                len(data),
+                height,
+                width,
+                uti,
+                display_filename,
+                sha512,
+                sqlite3.Binary(uuid_blob(object_id)),
+                object_id,
+            ),
+        )
+        con.execute(
+            """
+            insert into ZREMCKCLOUDSTATE (
+              Z_PK,Z_ENT,Z_OPT,ZCURRENTLOCALVERSION,ZLATESTVERSIONSYNCEDTOCLOUD,
+              ZOBJECT,Z13_OBJECT,ZLOCALVERSIONDATE
+            ) values (?,45,1,1,0,?,?,?)
+            """,
+            (cloud_pk, object_pk, IMAGE_ATTACHMENT_ENT, now),
+        )
+        touch_reminder(con, reminder, now)
+        update_primary_key(con, 13, object_pk)
+        update_primary_key(con, 45, cloud_pk)
+        row = con.execute(
+            """
+            select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2,Z_FOK_REMINDER1,
+                   ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,ZURL,ZHOSTURL,
+                   ZMARKEDFORDELETION
+            from ZREMCDOBJECT
+            where Z_PK=?
+            """,
+            (object_pk,),
+        ).fetchone()
+        return {
+            "attached": True,
+            "attachment": attachment_payload(row),
+            "stored_file": stored.name,
+            "_stored_path": str(stored),
+            "_stored_file_created": stored_created,
+            "width": width,
+            "height": height,
+        }
+    except Exception:
+        if stored_created:
+            stored.unlink(missing_ok=True)
+        raise
 
 
-def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: str) -> dict[str, Any]:
+def attach_url_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    url: str,
+    *,
+    preferred_order: int | None = None,
+    preserve_preferred_order: bool = False,
+) -> dict[str, Any]:
     normalized = normalized_url(url)
     existing = con.execute(
         """
@@ -2358,14 +5453,16 @@ def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: st
     object_id = str(uuid.uuid4()).upper()
     object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
     cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-    sort_order = con.execute(
-        """
-        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-        from ZREMCDOBJECT
-        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-        """,
-        (reminder["Z_PK"],),
-    ).fetchone()[0]
+    sort_order = preferred_order
+    if not preserve_preferred_order:
+        sort_order = con.execute(
+            """
+            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"],),
+        ).fetchone()[0]
     columns = [
         "Z_PK",
         "Z_ENT",
@@ -2444,19 +5541,283 @@ def soft_delete_attachment_record(
     return attachment_payload({**attachment, "ZMARKEDFORDELETION": 1})
 
 
-def cmd_attach_image(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+def delete_url_attachment_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> dict[str, Any]:
+    if int(attachment["Z_ENT"]) != URL_ATTACHMENT_ENT:
+        raise AdapterError("Only URL attachment rows use native row-deletion semantics")
+    now = core_now()
+    cloud_pk = attachment.get("ZCKCLOUDSTATE")
+    cloud_before = con.execute(
+        """
+        select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+        from ZREMCKCLOUDSTATE where Z_PK=?
+        """,
+        (cloud_pk,),
+    ).fetchone()
+    if (
+        cloud_before is None
+        or cloud_before["ZOBJECT"] != attachment["Z_PK"]
+        or cloud_before["Z13_OBJECT"] != URL_ATTACHMENT_ENT
+    ):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone is missing or owns another object",
+            code="schema_mismatch",
+        )
+    result = con.execute(
+        "delete from ZREMCDOBJECT where Z_PK=? and Z_ENT=?",
+        (attachment["Z_PK"], URL_ATTACHMENT_ENT),
+    )
+    if result.rowcount != 1:
+        raise AdapterError("URL attachment row could not be deleted", code="schema_mismatch")
+    if not bump_cloud_state(con, cloud_pk, now):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone could not be updated",
+            code="schema_mismatch",
+        )
+    cloud_after = con.execute(
+        """
+        select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+        from ZREMCKCLOUDSTATE where Z_PK=?
+        """,
+        (cloud_pk,),
+    ).fetchone()
+    expected_cloud_version = int(cloud_before["ZCURRENTLOCALVERSION"] or 0) + 1
+    if (
+        cloud_after is None
+        or cloud_after["ZCURRENTLOCALVERSION"] != expected_cloud_version
+        or cloud_after["ZOBJECT"] != attachment["Z_PK"]
+        or cloud_after["Z13_OBJECT"] != URL_ATTACHMENT_ENT
+    ):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone update could not be verified",
+            code="schema_mismatch",
+        )
+    touch_reminder(con, reminder, now)
+    return {
+        **attachment_payload(attachment),
+        "row_deleted": True,
+        "cloud_state_tombstone_retained": True,
+    }
+
+
+def delete_attachment_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if int(attachment["Z_ENT"]) == URL_ATTACHMENT_ENT:
+        return delete_url_attachment_record(con, reminder, attachment), "row_deleted"
+    return soft_delete_attachment_record(con, reminder, attachment), "soft_deleted"
+
+
+def compensate_new_attachment(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not result:
+        return None
+    row = result.get("_row")
+    if not isinstance(row, dict):
+        return None
+    con.rollback()
+    con.execute("begin immediate")
+    try:
+        deleted = soft_delete_attachment_record(con, reminder, row)
+        con.commit()
+        return deleted
+    except Exception:
+        con.rollback()
+        raise
+
+
+def attachment_replacement_readback(
+    con: sqlite3.Connection,
+    *,
+    old_attachment_pk: int,
+    old_attachment_ent: int,
+    new_attachment_pk: int,
+    expected_new_order: int | None = None,
+    verify_new_order: bool = False,
+) -> dict[str, bool | str]:
+    old_state = con.execute(
+        "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
+        (old_attachment_pk,),
+    ).fetchone()
+    new_state = con.execute(
+        """
+        select Z_FOK_REMINDER1 from ZREMCDOBJECT
+        where Z_PK=? and coalesce(ZMARKEDFORDELETION,0)=0
+        """,
+        (new_attachment_pk,),
+    ).fetchone()
+    old_row_deleted = old_state is None
+    old_soft_deleted = bool(old_state and old_state["ZMARKEDFORDELETION"])
+    old_removed = old_row_deleted if old_attachment_ent == URL_ATTACHMENT_ENT else old_soft_deleted
+    order_preserved = not verify_new_order or (
+        new_state is not None and new_state["Z_FOK_REMINDER1"] == expected_new_order
+    )
+    return {
+        "old_attachment_removed": old_removed,
+        "old_attachment_removal": "row_deleted" if old_row_deleted else "soft_deleted",
+        "old_attachment_row_deleted": old_row_deleted,
+        "old_attachment_soft_deleted": old_soft_deleted,
+        "new_attachment_active": new_state is not None,
+        "replacement_order_preserved": order_preserved,
+    }
+
+
+def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=True)
     image = Path(args.image).expanduser().resolve()
     con = connect(db)
     try:
+        capability = require_command_capability(con, "attachment_mutation_db")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        con.execute("begin immediate")
-        result = attach_image_record(con, reminder, image)
-        con.commit()
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before = reminder_mutation_snapshot(reminder)
+        if args.backend == "reminderkit":
+            try:
+                result = attach_image_reminderkit_record(con, reminder, image)
+                status = "verified"
+                verification = {
+                    "state": "read_back",
+                    "mobile_visible_likely": True,
+                    "sync_status": "verified_mobile_visible",
+                }
+                recovery = {"semantics": "soft_delete_attachment"}
+                pending_warning = None
+            except AttachmentVerificationError as exc:
+                result = exc.compensation_result()
+                status = "committed_verification_pending"
+                verification = {
+                    "state": "pending",
+                    "mobile_visible_likely": False,
+                    "sync_status": "persisted_sync_pending",
+                }
+                recovery = {
+                    "semantics": "manual_cleanup_available",
+                    "command": exc.details.get("cleanup_command"),
+                }
+                pending_warning = {
+                    "code": "mobile_visibility_pending",
+                    "message": str(exc),
+                }
+            except AdapterError as exc:
+                if not exc.details.get("partial_failure"):
+                    raise
+                result = {
+                    "attached": None,
+                    "backend": "reminderkit",
+                    "attachment": {},
+                    "sync": {"mobile_visible_likely": False},
+                }
+                status = "committed_verification_pending"
+                verification = {
+                    "state": "pending",
+                    "mobile_visible_likely": False,
+                    "sync_status": "mutation_outcome_unknown",
+                    "mutation_outcome_unknown": exc.details.get(
+                        "mutation_outcome_unknown", True
+                    ),
+                }
+                recovery = {
+                    "semantics": "inspect_reminder_attachments_before_retry",
+                    "automatic_cleanup_available": False,
+                }
+                pending_warning = {
+                    "code": exc.code,
+                    "message": str(exc),
+                }
+        else:
+            con.execute("begin immediate")
+            result = attach_image_record(con, reminder, image)
+            try:
+                con.commit()
+            except Exception:
+                con.rollback()
+                if result.get("_stored_file_created") and result.get("_stored_path"):
+                    Path(result["_stored_path"]).unlink(missing_ok=True)
+                raise
+            result["backend"] = "db"
+            result["sync"] = {
+                "mobile_visible_likely": False,
+                "reason": "sqlite_local_attachment_without_cloudkit_server_record",
+            }
+            result["warning"] = (
+                "This image was attached through the SQLite fallback path. It can render on this Mac, "
+                "but it is not expected to appear on iPhone until a native Reminders/CloudKit attachment path creates a server record."
+            )
+            status = "unchanged" if result.get("attached") is False else "verified"
+            verification = {
+                "state": "read_back",
+                "mobile_visible_likely": False,
+                "sync_status": "local_only",
+            }
+            recovery = {"semantics": "soft_delete_attachment"}
+            pending_warning = {
+                "code": "local_only_attachment",
+                "message": result["warning"],
+            }
         attachment = result["attachment"]
-        log_action("attach_image", {"reminder": reminder["ZCKIDENTIFIER"], "image": str(image), "object": attachment["id"], "stored": result.get("stored_path")})
-        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], **result})
-        return 0
+        journal_warning = log_action(
+            "attach_image",
+            {
+                "operation_id": operation_id,
+                "backend": result.get("backend", args.backend),
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "image": image.name,
+                "object": attachment.get("id"),
+                "stored": result.get("stored_file"),
+                "mobile_visible_likely": result.get("sync", {}).get("mobile_visible_likely"),
+            },
+        )
+        result.pop("_row", None)
+        result.pop("_stored_path", None)
+        result.pop("_stored_file_created", None)
+        try:
+            after_reminder = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
+        except (AdapterError, sqlite3.Error):
+            after_reminder = {
+                "id": reminder.get("ZCKIDENTIFIER"),
+                "store_read_back_pending": True,
+            }
+        warnings = [item for item in (pending_warning, journal_warning) if item]
+        return operation_receipt(
+            status=status,
+            operation="attach_image",
+            operation_id=operation_id,
+            backend=result.get("backend", args.backend),
+            target={
+                "reminder_id": reminder["ZCKIDENTIFIER"],
+                "attachment_id": attachment.get("id"),
+            },
+            before=before,
+            after={
+                "reminder": after_reminder,
+                "attachment": attachment,
+                "sync": result.get("sync", {}),
+            },
+            verification=verification,
+            recovery=recovery,
+            warnings=warnings or None,
+            db=str(db),
+            attached=result.get("attached", True),
+            capability=capability,
+        )
     except Exception:
         con.rollback()
         raise
@@ -2464,18 +5825,97 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
         con.close()
 
 
+def cmd_attach_image(args: argparse.Namespace) -> int:
+    image = Path(args.image).expanduser().resolve()
+    image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
+    result = execute_idempotent(
+        operation="attach_image",
+        key=args.idempotency_key,
+        input_payload={
+            "id": args.id,
+            "title": args.title,
+            "list": args.list,
+            "backend": args.backend,
+            "image_sha256": image_hash,
+            "if_version": getattr(args, "if_version", None),
+        },
+        callback=lambda: attach_image_once(args),
+    )
+    json_out(result)
+    return 0
+
+
 def cmd_attach_url(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=True)
     url = normalized_url(args.url)
+    operation_id = new_operation_id()
     con = connect(db)
     try:
-        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        capability = require_command_capability(con, "attachment_mutation_db")
         con.execute("begin immediate")
+        reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before = reminder_mutation_snapshot(reminder)
         result = attach_url_record(con, reminder, url)
-        con.commit()
         attachment = result["attachment"]
-        log_action("attach_url", {"reminder": reminder["ZCKIDENTIFIER"], "url": url, "object": attachment["id"]})
-        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], **result})
+        verified = con.execute(
+            """
+            select count(*) from ZREMCDOBJECT
+            where Z_PK=? and ZREMINDER2=? and Z_ENT=? and ZURL=?
+              and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (attachment["pk"], reminder["Z_PK"], URL_ATTACHMENT_ENT, url),
+        ).fetchone()[0] == 1
+        if not verified:
+            raise AdapterError("URL attachment could not be read back", code="schema_mismatch")
+        after = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
+        con.commit()
+        warning = log_action(
+            "attach_url",
+            {
+                "operation_id": operation_id,
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "url": url,
+                "object": attachment["id"],
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="verified" if result.get("attached") else "unchanged",
+                operation="attach_url",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={
+                    "id": reminder["ZCKIDENTIFIER"],
+                    "attachment_id": attachment["id"],
+                },
+                before=before,
+                after={"reminder": after, "attachment": attachment},
+                verification={"state": "read_back", "attachment_active": True},
+                recovery=(
+                    {
+                        "semantics": "delete_attachment",
+                        "command": (
+                            f"delete_attachment --id {reminder['ZCKIDENTIFIER']} "
+                            f"--attachment-id {attachment['id']}"
+                        ),
+                    }
+                    if result.get("attached")
+                    else {"semantics": "not_applicable"}
+                ),
+                warnings=[warning] if warning else None,
+                capability=capability,
+            )
+        )
         return 0
     except Exception:
         con.rollback()
@@ -2485,23 +5925,404 @@ def cmd_attach_url(args: argparse.Namespace) -> int:
 
 
 def cmd_list_attachments(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db)
     con = connect(db)
     try:
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         ent = attachment_ent_for_type(args.type)
-        items = [attachment_payload(row) for row in active_attachment_rows(con, reminder["Z_PK"], attachment_ent=ent)]
-        json_out({"ok": True, "db": str(db), "reminder_id": reminder["ZCKIDENTIFIER"], "attachments": items})
+        rows = active_attachment_rows(
+            con,
+            reminder["Z_PK"],
+            attachment_ent=ent,
+            limit=args.limit + 1,
+        )
+        items = [attachment_payload(row) for row in rows[: args.limit]]
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "reminder_id": reminder["ZCKIDENTIFIER"],
+                "reminder_version": reminder.get("Z_OPT"),
+                "attachments": items,
+                "limit": args.limit,
+                "truncated": len(rows) > args.limit,
+            }
+        )
         return 0
     finally:
         con.close()
 
 
-def cmd_delete_attachment(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+def cmd_audit_attachments(args: argparse.Namespace) -> int:
+    db = resolve_database(args.db)
     con = connect(db)
     try:
+        counts = image_attachment_audit_counts(
+            con,
+            search=args.search,
+            list_name=args.list,
+        )
+        items, _ = image_attachment_audit_items(
+            con,
+            search=args.search,
+            list_name=args.list,
+            problems_only=args.problems_only,
+            limit=args.limit,
+        )
+        total_matching = counts["problems"] if args.problems_only else counts["total"]
+        for item in items:
+            item.pop("_row", None)
+        json_out(
+            {
+                "ok": True,
+                "db": str(db),
+                "scope": {"search": args.search, "list": args.list},
+                "counts": {
+                    "image_attachments": counts["total"],
+                    "local_only_or_not_mobile_visible": counts["problems"],
+                    "returned": len(items),
+                },
+                "limit": args.limit,
+                "truncated": total_matching > len(items),
+                "items": items,
+            }
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def repair_candidate_digest(candidates: list[dict[str, Any]]) -> str:
+    stable = [
+        {
+            "reminder_id": item.get("reminder", {}).get("id"),
+            "reminder_version": item.get("reminder", {}).get("version"),
+            "attachment_id": item.get("attachment", {}).get("id"),
+            "problem": item.get("problem"),
+            "source_files": sorted(item.get("source_files", [])),
+            "repairable": bool(item.get("repairable")),
+        }
+        for item in candidates
+    ]
+    return stable_hash(stable)
+
+
+def cmd_repair_attachments(args: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=args.apply)
+    con = connect(db)
+    try:
+        capabilities = attachment_sync_capabilities(con)
+        if args.apply and not capabilities["available"]:
+            raise AdapterError(
+                "Attachment repair apply is unavailable because sync verification columns are missing",
+                missing_columns=capabilities["missing_columns"],
+            )
+        counts = image_attachment_audit_counts(
+            con,
+            search=args.search,
+            list_name=args.list,
+        )
+        problem_items, _ = image_attachment_audit_items(
+            con,
+            search=args.search,
+            list_name=args.list,
+            problems_only=True,
+            limit=args.limit,
+        )
+        problem_count = counts["problems"]
+        selected = problem_items
+        candidates: list[dict[str, Any]] = []
+        for item in selected:
+            attachment = item["attachment"]
+            sources = source_paths_for_attachment(attachment)
+            public_item = {
+                "reminder": item["reminder"],
+                "attachment": attachment,
+                "problem": item["problem"],
+                "source_files": [path.name for path in sources],
+                "repairable": bool(sources),
+            }
+            candidates.append(public_item)
+        scope = {"search": args.search, "list": args.list, "limit": args.limit}
+        truncated = problem_count > len(selected)
+        candidate_digest = repair_candidate_digest(candidates)
+
+        if not args.apply:
+            json_out(
+                operation_receipt(
+                    status="unchanged",
+                    operation="repair_attachments_preview",
+                    operation_id=operation_id,
+                    backend="reminderkit_private_maintenance",
+                    target={"scope": scope, "candidate_digest": candidate_digest},
+                    after={
+                        "counts": {
+                            "local_only_or_not_mobile_visible": problem_count,
+                            "selected": len(selected),
+                            "repairable": sum(1 for item in candidates if item["repairable"]),
+                        },
+                        "truncated": truncated,
+                        "candidates": candidates,
+                        "next_step": (
+                            "Run again with --apply and --preview-digest using this candidate digest."
+                        ),
+                    },
+                    verification={"state": "candidate_snapshot", "candidate_digest": candidate_digest},
+                    recovery={"semantics": "not_applicable"},
+                )
+            )
+            return 0
+
+        preview_digest = getattr(args, "preview_digest", None)
+        if not isinstance(preview_digest, str) or not preview_digest:
+            raise AdapterError(
+                "repair_attachments --apply requires the candidate digest from a dry run",
+                code="ambiguous_scope",
+            )
+        if truncated:
+            raise AdapterError(
+                "Repair candidates exceed the requested limit; narrow the scope",
+                code="ambiguous_scope",
+                candidate_count_at_least=args.limit + 1,
+            )
+        if preview_digest != candidate_digest:
+            raise AdapterError(
+                "Attachment repair candidate set changed since preview",
+                code="concurrent_modification",
+                expected_digest=preview_digest,
+                current_digest=candidate_digest,
+            )
+
+        backup = None
+        if selected and not args.no_backup:
+            backup = create_store_backup()
+            log_action("backup_store", {"path": backup["backup"], "reason": "repair_attachments"})
+
+        repaired: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        blocked_reminder_ids: set[str] = set()
+        expected_reminder_versions: dict[str, int] = {}
+        for item in selected:
+            reminder_id = item["reminder"]["id"]
+            preview_version = item["reminder"].get("version")
+            if not isinstance(preview_version, int) or isinstance(preview_version, bool):
+                raise AdapterError(
+                    "Attachment repair candidate is missing a valid reminder version",
+                    code="schema_mismatch",
+                    reminder_id=reminder_id,
+                )
+            previous = expected_reminder_versions.setdefault(reminder_id, preview_version)
+            if previous != preview_version:
+                raise AdapterError(
+                    "Attachment repair candidates disagree on the reminder version",
+                    code="concurrent_modification",
+                    reminder_id=reminder_id,
+                    expected_version=previous,
+                    candidate_version=preview_version,
+                )
+        for item in selected:
+            reminder_id = item["reminder"]["id"]
+            attachment = item["attachment"]
+            sources = source_paths_for_attachment(attachment)
+            if not sources:
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "error": "source_image_file_not_found",
+                    }
+                )
+                continue
+            source = sources[0]
+            if reminder_id in blocked_reminder_ids:
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "source_file": source.name,
+                        "error": "skipped_after_unknown_mutation",
+                        "partial_failure": False,
+                        "mutation_outcome_unknown": False,
+                        "skipped_after_unknown_mutation": True,
+                        "replacement_committed": False,
+                        "compensated": False,
+                        "compensation_error": None,
+                    }
+                )
+                continue
+            reminder = None
+            new_result = None
+            item_committed = False
+            try:
+                reminder = find_reminder(con, reminder_id=item["reminder"]["id"], title=None, list_name=None)
+                require_reminder_version(
+                    reminder,
+                    expected_reminder_versions[item["reminder"]["id"]],
+                    required=True,
+                )
+                try:
+                    new_result = attach_image_reminderkit_record(con, reminder, source)
+                except AttachmentVerificationError as attach_exc:
+                    new_result = attach_exc.compensation_result()
+                    raise
+                con.execute("begin immediate")
+                deleted = soft_delete_attachment_record(con, reminder, item["_row"])
+                con.commit()
+                item_committed = True
+                refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
+                expected_reminder_versions[item["reminder"]["id"]] = refreshed_reminder[
+                    "Z_OPT"
+                ]
+                result = {
+                    "reminder": item["reminder"],
+                    "old_attachment": attachment,
+                    "new_attachment": new_result["attachment"],
+                    "source_file": source.name,
+                    "deleted_state": deleted,
+                    "sync": new_result.get("sync", {}),
+                }
+                log_action(
+                    "repair_image_attachment",
+                    {
+                        "reminder": item["reminder"]["id"],
+                        "old_attachment": attachment["id"],
+                        "new_attachment": new_result["attachment"]["id"],
+                        "source": source.name,
+                        "mobile_visible_likely": new_result.get("sync", {}).get("mobile_visible_likely"),
+                    },
+                )
+                repaired.append(result)
+            except Exception as exc:
+                con.rollback()
+                compensation = None
+                compensation_error = None
+                error_details = exc.details if isinstance(exc, AdapterError) else {}
+                reported_partial_failure = error_details.get("partial_failure") is True
+                mutation_outcome_unknown = (
+                    error_details.get("mutation_outcome_unknown") is True
+                )
+                if not item_committed and reminder is not None and new_result is not None:
+                    try:
+                        compensation = compensate_new_attachment(con, reminder, new_result)
+                        if compensation is not None:
+                            refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
+                            expected_reminder_versions[item["reminder"]["id"]] = (
+                                refreshed_reminder["Z_OPT"]
+                            )
+                    except Exception as cleanup_exc:
+                        compensation_error = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                partial_failure = (
+                    reported_partial_failure or new_result is not None or item_committed
+                )
+                if partial_failure and (
+                    compensation is None or compensation_error is not None
+                ):
+                    blocked_reminder_ids.add(reminder_id)
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "source_file": source.name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "partial_failure": partial_failure,
+                        "mutation_outcome_unknown": mutation_outcome_unknown,
+                        "skipped_after_unknown_mutation": False,
+                        "new_attachment_id": (
+                            new_result.get("attachment", {}).get("id")
+                            if new_result is not None
+                            else None
+                        ),
+                        "replacement_committed": item_committed,
+                        "compensated": compensation is not None,
+                        "compensation_error": compensation_error,
+                    }
+                )
+
+        uncompensated_partial = any(
+            item.get("partial_failure")
+            and (not item.get("compensated") or item.get("compensation_error"))
+            for item in failed
+        )
+        if not selected:
+            status = "unchanged"
+        elif not failed:
+            status = "verified"
+        elif uncompensated_partial:
+            status = "failed_manual_repair_required"
+        elif repaired:
+            status = "partial_success"
+        else:
+            status = "failed_no_mutation"
+        json_out(
+            operation_receipt(
+                status=status,
+                operation="repair_attachments",
+                operation_id=operation_id,
+                backend="reminderkit_private_maintenance",
+                target={"scope": scope, "candidate_digest": candidate_digest},
+                before={"candidates": candidates},
+                after={
+                    "counts": {
+                        "local_only_or_not_mobile_visible": problem_count,
+                        "selected": len(selected),
+                        "repaired": len(repaired),
+                        "failed": len(failed),
+                    },
+                    "repaired": repaired,
+                    "failed": failed,
+                },
+        verification={
+                    "state": "per_item_read_back",
+                    "verified_repairs": len(repaired),
+                    "failed_repairs": len(failed),
+                    "manual_repair_required": uncompensated_partial,
+                },
+                recovery={
+                    "semantics": (
+                        "read_before_retry_and_inspect_attachments"
+                        if uncompensated_partial
+                        else "best_effort_live_container_backup"
+                    ),
+                    "backup": backup,
+                    "automatic_restore_available": False,
+                },
+                warnings=(
+                    [backup["warning"]]
+                    if backup and backup.get("warning")
+                    else None
+                ),
+            )
+        )
+        return 0 if not failed else 1
+    finally:
+        con.close()
+
+
+def cmd_delete_attachment(args: argparse.Namespace) -> int:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    db = resolve_database(args.db, write=True)
+    operation_id = new_operation_id()
+    con = connect(db)
+    try:
+        capability = require_command_capability(con, "attachment_mutation_db")
+        con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before_reminder = reminder_mutation_snapshot(reminder)
         selected, candidates, reason = resolve_attachment_selection(
             con,
             reminder,
@@ -2512,22 +6333,66 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
             url=args.url,
         )
         if not selected:
-            json_out({"ok": False, "db": str(db), "error": reason, "candidates": candidates})
-            return 1
-        before = attachment_payload(selected)
-        con.execute("begin immediate")
-        deleted = soft_delete_attachment_record(con, reminder, selected)
+            raise AdapterError(
+                reason or "Attachment selection is ambiguous",
+                code="ambiguous_target",
+                candidates=candidates,
+            )
+        before_attachment = attachment_payload(selected)
+        deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
+        refreshed_attachment = con.execute(
+            "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
+            (selected["Z_PK"],),
+        ).fetchone()
+        attachment_removed = (
+            refreshed_attachment is None
+            if deletion_mode == "row_deleted"
+            else bool(refreshed_attachment and refreshed_attachment["ZMARKEDFORDELETION"])
+        )
+        if not attachment_removed:
+            raise AdapterError("Attachment deletion could not be read back", code="schema_mismatch")
+        after_reminder = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
         con.commit()
-        log_action("delete_attachment_soft", {"reminder": reminder["ZCKIDENTIFIER"], "attachment": before})
-        json_out(
+        warning = log_action(
+            "delete_attachment",
             {
-                "ok": True,
-                "db": str(db),
-                "deleted": True,
-                "reminder_id": reminder["ZCKIDENTIFIER"],
-                "attachment": before,
-                "deleted_state": deleted,
-            }
+                "operation_id": operation_id,
+                "reminder": reminder["ZCKIDENTIFIER"],
+                "attachment": before_attachment,
+            },
+        )
+        json_out(
+            operation_receipt(
+                status="verified",
+                operation="delete_attachment",
+                operation_id=operation_id,
+                backend="sqlite_private",
+                target={
+                    "id": reminder_url(reminder["ZCKIDENTIFIER"]),
+                    "attachment_id": before_attachment["id"],
+                },
+                before={"reminder": before_reminder, "attachment": before_attachment},
+                after={"reminder": after_reminder, "attachment": deleted},
+                verification={
+                    "state": "read_back",
+                    "attachment_removed": True,
+                    "attachment_row_deleted": deletion_mode == "row_deleted",
+                    "attachment_soft_deleted": deletion_mode == "soft_deleted",
+                    "cloud_state_tombstone_retained": deleted.get(
+                        "cloud_state_tombstone_retained"
+                    ),
+                },
+                recovery={
+                    "semantics": (
+                        "reattach_url"
+                        if before_attachment.get("type") == "url"
+                        else "reattach_from_source_if_available"
+                    ),
+                    "automatic_restore_available": False,
+                },
+                warnings=[warning] if warning else None,
+                capability=capability,
+            )
         )
         return 0
     except Exception:
@@ -2537,15 +6402,36 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
         con.close()
 
 
-def cmd_replace_attachment(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=args.title,
+        list_name=args.list,
+    )
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=True)
     if bool(args.image) == bool(args.url):
         raise AdapterError("replace_attachment requires exactly one of --image or --url")
     replacement_type = "image" if args.image else "url"
     selector_type = args.type or replacement_type
     con = connect(db)
+    reminder = None
+    new_result = None
+    capability: dict[str, Any] = {}
+    before_reminder: dict[str, Any] = {}
+    old_attachment: dict[str, Any] = {}
+    new_attachment: dict[str, Any] = {}
+    committed = False
     try:
+        capability = require_command_capability(con, "attachment_mutation_db")
+        if args.url:
+            con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
+        expected_version = getattr(args, "if_version", None)
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool):
+            expected_version = None
+        require_reminder_version(reminder, expected_version, required=True)
+        before_reminder = reminder_mutation_snapshot(reminder)
         selected, candidates, reason = resolve_attachment_selection(
             con,
             reminder,
@@ -2556,44 +6442,251 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
             url=args.old_url,
         )
         if not selected:
-            json_out({"ok": False, "db": str(db), "error": reason, "candidates": candidates})
-            return 1
+            raise AdapterError(
+                reason or "Attachment selection is ambiguous",
+                code="ambiguous_target",
+                candidates=candidates,
+            )
         old_attachment = attachment_payload(selected)
-        con.execute("begin immediate")
+        if args.url:
+            replacement_url = normalized_url(args.url)
+            existing_url = con.execute(
+                """
+                select Z_PK,ZCKIDENTIFIER
+                from ZREMCDOBJECT
+                where ZREMINDER2=? and Z_ENT=? and ZURL=?
+                  and coalesce(ZMARKEDFORDELETION,0)=0
+                """,
+                (reminder["Z_PK"], URL_ATTACHMENT_ENT, replacement_url),
+            ).fetchone()
+            if existing_url is not None:
+                raise AdapterError(
+                    "Replacement URL is already attached to this reminder",
+                    code="invalid_input",
+                    existing_attachment_id=existing_url["ZCKIDENTIFIER"],
+                )
         if args.image:
-            new_result = attach_image_record(con, reminder, Path(args.image).expanduser().resolve())
+            try:
+                new_result = attach_image_reminderkit_record(
+                    con,
+                    reminder,
+                    Path(args.image).expanduser().resolve(),
+                )
+            except AttachmentVerificationError as attach_exc:
+                new_result = attach_exc.compensation_result()
+                raise
+            new_attachment = new_result.get("attachment") or {}
+            if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
+                raise AdapterError("Replacement source is the same as the selected existing attachment")
+            con.execute("begin immediate")
+            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         else:
-            new_result = attach_url_record(con, reminder, args.url)
-        new_attachment = new_result.get("attachment") or {}
-        if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
-            raise AdapterError("Replacement source is the same as the selected existing attachment")
-        deleted = soft_delete_attachment_record(con, reminder, selected)
+            new_result = attach_url_record(
+                con,
+                reminder,
+                args.url,
+                preferred_order=selected.get("Z_FOK_REMINDER1"),
+                preserve_preferred_order=True,
+            )
+            new_attachment = new_result.get("attachment") or {}
+            if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
+                raise AdapterError("Replacement source is the same as the selected existing attachment")
+            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         con.commit()
-        log_action(
+        committed = True
+        readback = attachment_replacement_readback(
+            con,
+            old_attachment_pk=selected["Z_PK"],
+            old_attachment_ent=int(selected["Z_ENT"]),
+            new_attachment_pk=int(new_attachment.get("pk")),
+            expected_new_order=(selected.get("Z_FOK_REMINDER1") if args.url else None),
+            verify_new_order=bool(args.url),
+        )
+        replacement_verified = (
+            bool(
+                readback.get(
+                    "old_attachment_removed",
+                    readback.get("old_attachment_soft_deleted"),
+                )
+            )
+            and bool(readback.get("new_attachment_active"))
+            and readback.get("replacement_order_preserved") is not False
+        )
+        if not replacement_verified:
+            public_new_result = dict(new_result)
+            public_new_result.pop("_row", None)
+            return operation_receipt(
+                status="failed_manual_repair_required",
+                operation="replace_attachment",
+                operation_id=operation_id,
+                backend="reminderkit" if args.image else "sqlite_private",
+                target={
+                    "id": reminder["ZCKIDENTIFIER"],
+                    "old_attachment_id": old_attachment.get("id"),
+                    "new_attachment_id": new_attachment.get("id"),
+                },
+                before={"reminder": before_reminder, "attachment": old_attachment},
+                after={"new_attachment": public_new_result, "old_attachment": deleted},
+                verification={
+                    "state": "manual_repair_required",
+                    **readback,
+                    "replacement_committed": True,
+                },
+                recovery={
+                    "semantics": "inspect_both_attachments_and_restore_manually",
+                    "automatic_restore_available": False,
+                },
+                error={
+                    "code": "sync_pending",
+                    "message": "Attachment replacement committed but read-back was inconclusive.",
+                },
+                capability=capability,
+            )
+        warning = log_action(
             "replace_attachment",
             {
+                "operation_id": operation_id,
                 "reminder": reminder["ZCKIDENTIFIER"],
                 "old": old_attachment,
                 "new": new_result.get("attachment"),
             },
         )
-        json_out(
-            {
-                "ok": True,
-                "db": str(db),
-                "replaced": True,
-                "reminder_id": reminder["ZCKIDENTIFIER"],
-                "old_attachment": old_attachment,
-                "new_attachment": new_result,
-                "deleted_state": deleted,
-            }
+        new_result.pop("_row", None)
+        return operation_receipt(
+            status="verified",
+            operation="replace_attachment",
+            operation_id=operation_id,
+            backend="reminderkit" if args.image else "sqlite_private",
+            target={
+                "id": reminder["ZCKIDENTIFIER"],
+                "old_attachment_id": old_attachment.get("id"),
+                "new_attachment_id": new_attachment.get("id"),
+            },
+            before={"reminder": before_reminder, "attachment": old_attachment},
+            after={"new_attachment": new_result, "old_attachment": deleted},
+            verification={
+                "state": "read_back",
+                **readback,
+                "old_attachment_cloud_state_retained": deleted.get(
+                    "cloud_state_tombstone_retained"
+                ),
+                "mobile_visible_likely": (
+                    new_result.get("sync", {}).get("mobile_visible_likely")
+                    if args.image
+                    else None
+                ),
+            },
+            recovery={
+                "semantics": "restore_previous_attachment_manually",
+                "automatic_restore_available": False,
+            },
+            warnings=[warning] if warning else None,
+            capability=capability,
         )
-        return 0
-    except Exception:
+    except Exception as exc:
         con.rollback()
+        if args.image and not committed and reminder is not None and new_result is not None:
+            public_new_result = dict(new_result)
+            public_new_result.pop("_row", None)
+            new_attachment_id = new_result.get("attachment", {}).get("id")
+            try:
+                compensated = compensate_new_attachment(con, reminder, new_result)
+            except Exception as cleanup_exc:
+                return operation_receipt(
+                    status="failed_manual_repair_required",
+                    operation="replace_attachment",
+                    operation_id=operation_id,
+                    backend="reminderkit",
+                    target={
+                        "id": reminder["ZCKIDENTIFIER"],
+                        "old_attachment_id": old_attachment.get("id"),
+                        "new_attachment_id": new_attachment_id,
+                    },
+                    before={"reminder": before_reminder, "attachment": old_attachment},
+                    after={
+                        "new_attachment": public_new_result,
+                        "old_attachment_unchanged": True,
+                    },
+                    verification={
+                        "state": "manual_repair_required",
+                        "replacement_committed": False,
+                        "compensation_succeeded": False,
+                    },
+                    recovery={
+                        "semantics": "delete_new_attachment_manually",
+                        "automatic_restore_available": False,
+                        "cleanup_command": (
+                            f"delete_attachment --id {reminder['ZCKIDENTIFIER']} "
+                            f"--attachment-id {new_attachment_id}"
+                            if new_attachment_id
+                            else None
+                        ),
+                    },
+                    error={
+                        "code": "sync_pending",
+                        "message": "Image replacement failed and compensating cleanup also failed.",
+                        "original_error": f"{type(exc).__name__}: {exc}",
+                        "compensation_error": f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                    },
+                    capability=capability,
+                )
+            return operation_receipt(
+                status="failed_no_mutation",
+                operation="replace_attachment",
+                operation_id=operation_id,
+                backend="reminderkit",
+                target={
+                    "id": reminder["ZCKIDENTIFIER"],
+                    "old_attachment_id": old_attachment.get("id"),
+                    "new_attachment_id": new_attachment_id,
+                },
+                before={"reminder": before_reminder, "attachment": old_attachment},
+                after={
+                    "new_attachment": public_new_result,
+                    "old_attachment_unchanged": True,
+                    "compensated_attachment": compensated,
+                },
+                verification={
+                    "state": "compensated",
+                    "replacement_committed": False,
+                    "compensation_succeeded": compensated is not None,
+                },
+                recovery={"semantics": "not_applicable_after_compensation"},
+                error={
+                    "code": exc.code if isinstance(exc, AdapterError) else "sync_pending",
+                    "message": "Image replacement failed; the new attachment was compensated.",
+                    "original_error": f"{type(exc).__name__}: {exc}",
+                },
+                capability=capability,
+            )
         raise
     finally:
         con.close()
+
+
+def cmd_replace_attachment(args: argparse.Namespace) -> int:
+    image_hash = None
+    if args.image:
+        image = Path(args.image).expanduser().resolve()
+        image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
+    key = getattr(args, "idempotency_key", None)
+    if not isinstance(key, str):
+        key = None
+    result = execute_idempotent(
+        operation="replace_attachment",
+        key=key,
+        input_payload={
+            "id": args.id,
+            "attachment_id": args.attachment_id,
+            "attachment_pk": args.attachment_pk,
+            "image_sha256": image_hash,
+            "url": args.url,
+            "if_version": getattr(args, "if_version", None),
+        },
+        callback=lambda: replace_attachment_once(args),
+    )
+    json_out(result)
+    return 0 if result.get("ok") is True else 1
 
 
 def cache_path_from_args(args: argparse.Namespace) -> Path:
@@ -2601,7 +6694,7 @@ def cache_path_from_args(args: argparse.Namespace) -> Path:
 
 
 def cmd_cache_rebuild(args: argparse.Namespace) -> int:
-    db = Path(args.db).expanduser() if args.db else main_db()
+    db = resolve_database(args.db)
     cache_path = cache_path_from_args(args)
     con = connect(db)
     try:
@@ -2681,8 +6774,8 @@ def add_cache_query_args(parser: argparse.ArgumentParser, include_positional_que
     parser.add_argument("--section")
     parser.add_argument("--include-completed", action="store_true")
     parser.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    parser.add_argument("--priority", type=int)
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--priority", type=reminder_priority)
+    parser.add_argument("--limit", type=positive_int, default=20)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2695,6 +6788,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup_store")
     p.add_argument("--output")
     p.set_defaults(func=cmd_backup_store)
+
+    p = sub.add_parser("purge_logs")
+    p.set_defaults(func=cmd_purge_logs)
 
     p = sub.add_parser("cache_rebuild")
     add_common_db(p)
@@ -2715,18 +6811,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list_lists")
     add_common_db(p)
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_lists)
 
     p = sub.add_parser("list_sections")
     add_common_db(p)
     p.add_argument("--list")
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_sections)
 
     p = sub.add_parser("snapshot")
     add_common_db(p)
     p.add_argument("--list")
     p.add_argument("--include-completed", action="store_true")
-    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--limit", type=positive_int, default=1000)
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("search_reminders")
@@ -2734,7 +6832,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query")
     p.add_argument("--list")
     p.add_argument("--include-completed", action="store_true")
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--limit", type=positive_int, default=20)
     p.set_defaults(func=cmd_search_reminders)
 
     p = sub.add_parser("read_reminder")
@@ -2744,10 +6842,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.set_defaults(func=cmd_read_reminder)
 
+    p = sub.add_parser("show_reminder")
+    add_common_db(p)
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.set_defaults(func=cmd_show_reminder)
+
     p = sub.add_parser("list_tags")
     add_common_db(p)
     p.add_argument("--query")
-    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_tags)
 
     p = sub.add_parser("add_tag")
@@ -2756,6 +6861,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--tag", required=True)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_add_tag)
 
     p = sub.add_parser("remove_tag")
@@ -2764,14 +6870,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--tag", required=True)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_remove_tag)
 
     p = sub.add_parser("cleanup_tags")
     add_common_db(p)
     p.add_argument("--tag")
     p.add_argument("--prefix")
+    p.add_argument("--account-id")
+    p.add_argument("--preview-digest")
     p.add_argument("--apply", action="store_true")
-    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--no-backup", action="store_true")
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_cleanup_tags)
 
     p = sub.add_parser("create_list")
@@ -2791,7 +6901,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remind-at")
     p.add_argument("--all-day-due-date")
     p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    p.add_argument("--priority", type=int)
+    p.add_argument("--priority", type=reminder_priority)
+    p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_create_reminder)
 
     p = sub.add_parser("update_reminder")
@@ -2803,11 +6914,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--new-title")
     p.add_argument("--notes")
     p.add_argument("--flagged", action=argparse.BooleanOptionalAction)
-    p.add_argument("--priority", type=int)
+    p.add_argument("--priority", type=reminder_priority)
     p.add_argument("--due-at")
     p.add_argument("--remind-at")
     p.add_argument("--all-day-due-date")
     p.add_argument("--clear-due", action="store_true")
+    p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_update_reminder)
 
     p = sub.add_parser("complete_reminder")
@@ -2816,14 +6928,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")
+    p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_complete_reminder)
 
-    p = sub.add_parser("delete_reminder")
+    p = sub.add_parser("reopen_reminder")
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
     p.add_argument("--title")
     p.add_argument("--list")
+    p.add_argument("--if-version", type=int)
+    p.set_defaults(func=cmd_reopen_reminder)
+
+    p = sub.add_parser("delete_reminder")
+    add_common_db(p)
+    p.add_argument("--backend", choices=["auto", "db", "applescript"], default="auto")
+    p.add_argument("--id")
+    p.add_argument("--title")
+    p.add_argument("--list")
+    p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_delete_reminder)
 
     p = sub.add_parser("create_section")
@@ -2840,6 +6963,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--section")
     p.add_argument("--section-id")
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_move_to_section)
 
     p = sub.add_parser("attach_image")
@@ -2848,6 +6972,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--image", required=True)
+    p.add_argument("--backend", choices=["reminderkit", "db"], default="reminderkit")
+    p.add_argument("--if-version", type=int, required=True)
+    p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_attach_image)
 
     p = sub.add_parser("attach_url")
@@ -2856,6 +6983,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--url", required=True)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_attach_url)
 
     p = sub.add_parser("list_attachments")
@@ -2864,7 +6992,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--type", choices=["image", "url"])
+    p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_attachments)
+
+    p = sub.add_parser("audit_attachments")
+    add_common_db(p)
+    p.add_argument("--search")
+    p.add_argument("--list")
+    p.add_argument("--problems-only", action="store_true")
+    p.add_argument("--limit", type=positive_int, default=100)
+    p.set_defaults(func=cmd_audit_attachments)
+
+    p = sub.add_parser("repair_attachments")
+    add_common_db(p)
+    p.add_argument("--search")
+    p.add_argument("--list")
+    p.add_argument("--limit", type=positive_int, default=50)
+    p.add_argument("--preview-digest")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--no-backup", action="store_true")
+    p.set_defaults(func=cmd_repair_attachments)
 
     p = sub.add_parser("delete_attachment")
     add_common_db(p)
@@ -2876,6 +7023,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", choices=["image", "url"])
     p.add_argument("--filename")
     p.add_argument("--url")
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_delete_attachment)
 
     p = sub.add_parser("replace_attachment")
@@ -2890,6 +7038,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--old-url")
     p.add_argument("--image")
     p.add_argument("--url")
+    p.add_argument("--if-version", type=int, required=True)
+    p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_replace_attachment)
 
     return parser
@@ -2901,9 +7051,44 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except AdapterError as exc:
-        return fail(str(exc))
+        details = dict(exc.details)
+        explicit_status = details.pop("result_status", None)
+        if explicit_status is None and details.get("partial_failure"):
+            explicit_status = (
+                "failed_no_mutation"
+                if details.get("compensated") and not details.get("compensation_error")
+                else "failed_manual_repair_required"
+            )
+        status = explicit_status or "failed_no_mutation"
+        if getattr(args, "command", None) in MUTATION_COMMANDS:
+            json_out(
+                command_failure_receipt(
+                    args,
+                    str(exc),
+                    code=exc.code,
+                    status=status,
+                    **details,
+                )
+            )
+            return 1
+        return fail(
+            str(exc),
+            code=exc.code,
+            status=status,
+            **details,
+        )
     except Exception as exc:
-        return fail(f"{type(exc).__name__}: {exc}")
+        if getattr(args, "command", None) in MUTATION_COMMANDS:
+            json_out(
+                command_failure_receipt(
+                    args,
+                    f"{type(exc).__name__}: {exc}",
+                    code="unexpected_error",
+                    status="failed_manual_repair_required",
+                )
+            )
+            return 1
+        return fail(f"{type(exc).__name__}: {exc}", code="unexpected_error")
 
 
 if __name__ == "__main__":

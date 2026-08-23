@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reminders Daily Brief"
+  short_description: "Render a focused Apple Reminders daily brief"
+  default_prompt: "Use $apple-reminders-daily-brief to summarize today's reminders by overdue, due today, upcoming, and unscheduled."

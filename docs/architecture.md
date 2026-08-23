@@ -15,18 +15,27 @@ That connector is why Google Calendar does not need a plugin-owned MCP server.
 
 Apple Reminders is a local macOS app. There is no equivalent hosted Codex connector available for the native local Reminders store.
 
-The dependency-light shape should therefore be:
+The dependency-light shape is therefore:
 
 1. Skill layer
    - Encodes behavior, safety policy, output conventions, and when to read before writing.
-2. Local adapter core
-   - A small local CLI/library that performs JSON-in/JSON-out operations against Reminders.
-   - Uses public APIs first: AppleScript and EventKit.
-   - Uses private store writes only for native Reminders surfaces not exposed publicly, such as image attachments and sections.
-3. Optional MCP shim
-   - A thin wrapper over the local adapter only if Codex needs first-class tool calls in the plugin UI.
-   - It should not own business logic.
-   - It can be deferred until the adapter contract is stable.
+2. Typed local MCP boundary
+   - A bundled stdio server exposes discoverable JSON Schema tools, bounded reads, opaque pagination, exact identifiers, and normalized mutation receipts.
+   - Packaged runtime resolves only bundled backend executables; path overrides are confined to source tests and cannot be enabled from a release archive.
+   - It owns transport validation and routing, not Reminders business logic.
+   - First-run tools separate content-free diagnostics, capability discovery, and the explicit EventKit permission prompt.
+3. Public EventKit bridge
+   - Uses EventKit for accounts, lists, bounded reminder reads, create/update, complete/reopen, list-to-list moves, and deletion.
+   - Represents due dates, alarms, and recurrence as separate typed fields and preserves untouched fields on patches.
+   - Requires `expected_last_modified` for existing-reminder writes, including deletion, and performs read-back verification.
+4. Private adapter core
+   - A local CLI/library performs JSON-in/JSON-out operations for Reminders-only surfaces that EventKit cannot express.
+   - Uses private ReminderKit for image attachments and list-section saves because mobile visibility requires native Reminders/CloudKit transactions.
+   - Uses private store writes only for remaining native Reminders surfaces not exposed publicly, such as tags, URL attachments, and bounded repair/audit flows. Direct SQLite section writes are diagnostic-only and never count as iCloud verification.
+   - Requires a fresh matching reminder version before mutating an existing reminder; its DB delete command is diagnostic-only and is not an MCP fallback.
+5. Native UI handoff
+   - AppleScript remains a narrow compatibility path and an explicit `show_reminder` handoff, not the normal delete backend.
+   - Foreground interaction is not the primary data path.
 
 ## Why Not UI Automation First
 
@@ -34,14 +43,26 @@ Foreground UI gestures conflict with the user's active desktop, dual-monitor sta
 
 Normal operation should be background-first:
 
-- read through AppleScript/EventKit/SQLite
-- write through AppleScript/EventKit/SQLite adapter
+- read public reminder fields through EventKit and private surfaces through bounded adapter reads
+- write public reminder fields through EventKit and private surfaces through ReminderKit/SQLite adapter operations
 - verify by read-back
 - optionally open Reminders only when the user asks to inspect the result
 
-## Core Adapter Contract
+For image attachments and sections, the verification target is mobile-sync evidence, not local Mac rendering. A SQLite-only image or section row can show in Reminders on the Mac while failing to appear on iOS because the Reminders daemon never accepted it as a native CloudKit save. The adapter therefore uses ReminderKit for both image attachments and section writes, verifies CloudKit versions, and can repair older local-only sections in place.
 
-The adapter should expose stable JSON commands before any MCP packaging:
+## MCP Contract
+
+The bundled MCP schema in `schemas/mcp-tools.json` is the user-facing contract. It provides:
+
+- content-free doctor, capability, and explicit permission-request tools
+- account/list enumeration and semantically bounded reminder fetches
+- opaque cursors bound to an immutable filter fingerprint
+- exact reminder reads and exact-ID mutations
+- typed all-day/timed due values, absolute/location alarms, and recurrence rules
+- purpose-specific private tools for sections, tags, URLs, and attachment maintenance
+- four successful mutation outcomes: `unchanged`, `verified`, `committed_verification_pending`, and `partial_success`
+
+The lower-level adapter continues to expose stable JSON commands for private operations and diagnostics, including:
 
 - `doctor`
 - `snapshot`
@@ -58,7 +79,9 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `create_reminder`
 - `update_reminder`
 - `complete_reminder`
+- `reopen_reminder`
 - `delete_reminder`
+- `show_reminder`
 - `create_section`
 - `move_to_section`
 - `add_tag`
@@ -67,13 +90,16 @@ The adapter should expose stable JSON commands before any MCP packaging:
 - `attach_image`
 - `attach_url`
 - `list_attachments`
+- `audit_attachments`
+- `repair_attachments`
 - `delete_attachment`
 - `replace_attachment`
 - `backup_store`
+- `purge_logs`
 
 ## Implementation Rule
 
-Keep the MCP layer boring. If it exists, it should only translate Codex tool calls into the local adapter's JSON commands.
+Keep the MCP layer boring. It validates tool inputs, invokes either EventKit or the private adapter, sanitizes results, and enforces the shared receipt contract. Business rules remain in the bridge and adapter.
 
 The real product quality comes from:
 
@@ -81,4 +107,5 @@ The real product quality comes from:
 - the adapter's schema checks and transactions
 - the disposable cache's narrow, rebuildable full-grasp index
 - careful post-write verification
+- capability-gated private operations and explicit recovery semantics
 - summaries and diffs that are useful to a personal assistant workflow

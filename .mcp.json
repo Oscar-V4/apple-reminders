@@ -1,3 +1,22 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "apple-reminders-local": {
+      "title": "Apple Reminders",
+      "description": "Typed local Apple Reminders tools backed by public EventKit plus guarded private-only features.",
+      "icons": [
+        {
+          "src": "./assets/icon.png",
+          "mimeType": "image/png",
+          "sizes": [
+            "1024x1024"
+          ]
+        }
+      ],
+      "cwd": ".",
+      "command": "python3",
+      "args": [
+        "./mcp/server.py"
+      ]
+    }
+  }
 }

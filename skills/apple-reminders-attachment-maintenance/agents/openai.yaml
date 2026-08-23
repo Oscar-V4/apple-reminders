@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reminders Attachment Maintenance"
+  short_description: "Audit and repair reminder attachments safely"
+  default_prompt: "Use $apple-reminders-attachment-maintenance to audit image attachments and preview any safe repairs before applying them."

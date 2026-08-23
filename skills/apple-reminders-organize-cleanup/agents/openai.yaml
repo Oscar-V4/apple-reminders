@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reminders Organize Cleanup"
+  short_description: "Plan bounded list, section, and cleanup changes"
+  default_prompt: "Use $apple-reminders-organize-cleanup to propose a bounded cleanup plan for my reminders before changing anything."
