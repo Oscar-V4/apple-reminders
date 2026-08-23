@@ -213,6 +213,7 @@ class AttachmentSyncTests(unittest.TestCase):
                 create table ZREMCDBASELIST (Z_PK integer primary key, ZNAME text);
                 create table ZREMCDREMINDER (
                     Z_PK integer primary key,
+                    Z_OPT integer,
                     ZCKIDENTIFIER text,
                     ZTITLE text,
                     ZNOTES text,
@@ -245,8 +246,8 @@ class AttachmentSyncTests(unittest.TestCase):
                     ZCKSERVERRECORDDATA blob
                 );
                 insert into ZREMCDBASELIST values (1,'Inbox');
-                insert into ZREMCDREMINDER values (1,'REM-GOOD','A Good','',null,1,0);
-                insert into ZREMCDREMINDER values (2,'REM-BAD','B Bad','',null,1,0);
+                insert into ZREMCDREMINDER values (1,1,'REM-GOOD','A Good','',null,1,0);
+                insert into ZREMCDREMINDER values (2,1,'REM-BAD','B Bad','',null,1,0);
                 insert into ZREMCKCLOUDSTATE values (1,1,1,1);
                 insert into ZREMCKCLOUDSTATE values (2,0,1,0);
                 insert into ZREMCDOBJECT values (
@@ -277,9 +278,20 @@ class AttachmentSyncTests(unittest.TestCase):
     def test_attach_image_defaults_to_reminderkit_backend(self) -> None:
         parser = reminders_adapter.build_parser()
 
-        args = parser.parse_args(["attach_image", "--id", "AAA", "--image", "/tmp/example.png"])
+        args = parser.parse_args(
+            [
+                "attach_image",
+                "--id",
+                "AAA",
+                "--image",
+                "/tmp/example.png",
+                "--if-version",
+                "7",
+            ]
+        )
 
         self.assertEqual(args.backend, "reminderkit")
+        self.assertEqual(args.if_version, 7)
 
     def test_repair_attachments_defaults_to_dry_run(self) -> None:
         parser = reminders_adapter.build_parser()
@@ -331,6 +343,7 @@ class AttachmentSyncTests(unittest.TestCase):
             attachment_pk=None,
             filename=None,
             old_url=None,
+            if_version=1,
         )
         con = mock.Mock()
         selected = {"Z_PK": 10, "ZCKIDENTIFIER": "ATTACH-OLD", "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT}
@@ -351,7 +364,7 @@ class AttachmentSyncTests(unittest.TestCase):
             mock.patch.object(
                 reminders_adapter,
                 "find_reminder",
-                return_value={"Z_PK": 1, "ZCKIDENTIFIER": reminder_id},
+                return_value={"Z_PK": 1, "ZCKIDENTIFIER": reminder_id, "Z_OPT": 1},
             ),
             mock.patch.object(reminders_adapter, "resolve_attachment_selection", return_value=(selected, [], None)),
             mock.patch.object(reminders_adapter, "attachment_payload", return_value={"pk": 10, "id": "ATTACH-OLD"}),
@@ -721,9 +734,10 @@ class AttachmentSyncTests(unittest.TestCase):
             attachment_pk=None,
             filename=None,
             old_url=None,
+            if_version=1,
         )
         con = mock.Mock()
-        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1", "Z_OPT": 1}
         selected = {"Z_PK": 10, "ZCKIDENTIFIER": "ATTACH-OLD", "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT}
         new_result = {
             "attachment": {"pk": 11, "id": "ATTACH-NEW"},
@@ -772,9 +786,10 @@ class AttachmentSyncTests(unittest.TestCase):
             attachment_pk=None,
             filename=None,
             old_url=None,
+            if_version=1,
         )
         con = mock.Mock()
-        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1", "Z_OPT": 1}
         selected = {
             "Z_PK": 10,
             "ZCKIDENTIFIER": "ATTACH-OLD",
@@ -847,9 +862,10 @@ class AttachmentSyncTests(unittest.TestCase):
             attachment_pk=None,
             filename=None,
             old_url=None,
+            if_version=1,
         )
         con = mock.Mock()
-        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1", "Z_OPT": 1}
         selected = {
             "Z_PK": 10,
             "ZCKIDENTIFIER": "ATTACH-OLD",
@@ -897,9 +913,10 @@ class AttachmentSyncTests(unittest.TestCase):
             attachment_pk=None,
             filename=None,
             old_url=None,
+            if_version=1,
         )
         con = mock.Mock()
-        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1", "Z_OPT": 1}
         selected = {
             "Z_PK": 10,
             "ZCKIDENTIFIER": "ATTACH-OLD",
@@ -947,10 +964,10 @@ class AttachmentSyncTests(unittest.TestCase):
             no_backup=True,
         )
         con = mock.Mock()
-        reminder = {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"}
+        reminder = {"Z_PK": 1, "Z_OPT": 1, "ZCKIDENTIFIER": "REM-1"}
         old_row = {"Z_PK": 10, "ZCKIDENTIFIER": "ATTACH-OLD"}
         item = {
-            "reminder": {"id": "REM-1", "title": "Task"},
+            "reminder": {"id": "REM-1", "title": "Task", "version": 1},
             "attachment": {"pk": 10, "id": "ATTACH-OLD"},
             "problem": "image_attachment_local_only",
             "_row": old_row,
@@ -1021,6 +1038,118 @@ class AttachmentSyncTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         compensate.assert_called_once_with(con, reminder, expected_result)
+
+    def test_repair_unknown_helper_outcome_requires_manual_read_and_blocks_same_reminder(self) -> None:
+        args = argparse.Namespace(
+            db="/tmp/reminders.sqlite",
+            search=None,
+            list=None,
+            limit=3,
+            apply=True,
+            no_backup=True,
+        )
+        con = mock.Mock()
+        reminder = {"Z_PK": 1, "Z_OPT": 1, "ZCKIDENTIFIER": "REM-1"}
+        source = Path("/tmp/source.png")
+        items = [
+            {
+                "reminder": {"id": "REM-1", "title": "Task", "version": 1},
+                "attachment": {"pk": pk, "id": attachment_id},
+                "problem": "image_attachment_local_only",
+                "_row": {"Z_PK": pk, "ZCKIDENTIFIER": attachment_id},
+            }
+            for pk, attachment_id in (
+                (10, "ATTACH-OLD-1"),
+                (11, "ATTACH-OLD-2"),
+                (12, "ATTACH-OLD-3"),
+            )
+        ]
+        candidates = [
+            {
+                "reminder": item["reminder"],
+                "attachment": item["attachment"],
+                "problem": item["problem"],
+                "source_files": [source.name],
+                "repairable": True,
+            }
+            for item in items
+        ]
+        args.preview_digest = reminders_adapter.repair_candidate_digest(candidates)
+        uncertain = reminders_adapter.AdapterError(
+            "helper timed out",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+        successful = {
+            "attachment": {"pk": 20, "id": "ATTACH-NEW-1"},
+            "sync": {"mobile_visible_likely": True},
+        }
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/reminders.sqlite"),
+            ),
+            mock.patch.object(reminders_adapter, "connect", return_value=con),
+            mock.patch.object(
+                reminders_adapter,
+                "attachment_sync_capabilities",
+                return_value={"available": True, "missing_columns": []},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "image_attachment_audit_counts",
+                return_value={"total": 3, "problems": 3},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "image_attachment_audit_items",
+                return_value=(items, 3),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "source_paths_for_attachment",
+                return_value=[source],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_reminder",
+                side_effect=(reminder, {**reminder, "Z_OPT": 2}),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "attach_image_reminderkit_record",
+                side_effect=(successful, uncertain),
+            ) as attach,
+            mock.patch.object(
+                reminders_adapter,
+                "soft_delete_attachment_record",
+                return_value={"id": "ATTACH-OLD-1", "marked_for_deletion": True},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "reread_reminder",
+                return_value={**reminder, "Z_OPT": 2},
+            ),
+            mock.patch.object(reminders_adapter, "log_action", return_value=None),
+            mock.patch.object(reminders_adapter, "json_out") as output,
+        ):
+            exit_code = reminders_adapter.cmd_repair_attachments(args)
+
+        receipt = output.call_args.args[0]
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(receipt["status"], "failed_manual_repair_required")
+        self.assertTrue(receipt["verification"]["manual_repair_required"])
+        self.assertEqual(
+            receipt["recovery"]["semantics"],
+            "read_before_retry_and_inspect_attachments",
+        )
+        self.assertEqual(receipt["after"]["counts"]["repaired"], 1)
+        self.assertTrue(receipt["after"]["failed"][0]["mutation_outcome_unknown"])
+        self.assertTrue(receipt["after"]["failed"][1]["skipped_after_unknown_mutation"])
+        self.assertEqual(attach.call_count, 2)
 
 
 class CacheHelperTests(unittest.TestCase):
@@ -1268,6 +1397,31 @@ class CacheHelperTests(unittest.TestCase):
         args = parser.parse_args(["delete_reminder", "--id", "7718459E-2672-4E99-9E6A-B9AA430E570F"])
 
         self.assertEqual(args.backend, "auto")
+
+    def test_private_existing_item_mutation_cli_requires_if_version(self) -> None:
+        parser = reminders_adapter.build_parser()
+        commands = (
+            ["add_tag", "--id", "AAA", "--tag", "health"],
+            ["remove_tag", "--id", "AAA", "--tag", "health"],
+            ["move_to_section", "--id", "AAA", "--section-id", "SECTION"],
+            ["attach_image", "--id", "AAA", "--image", "/tmp/example.png"],
+            ["attach_url", "--id", "AAA", "--url", "https://example.com"],
+            ["delete_attachment", "--id", "AAA", "--attachment-id", "ATTACHMENT"],
+            [
+                "replace_attachment",
+                "--id",
+                "AAA",
+                "--attachment-id",
+                "ATTACHMENT",
+                "--url",
+                "https://example.com/new",
+            ],
+        )
+
+        for command in commands:
+            with self.subTest(command=command[0]), mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(command)
 
     def test_notes_metadata_never_returns_full_notes(self) -> None:
         notes = "Private notes that should not be cached verbatim"

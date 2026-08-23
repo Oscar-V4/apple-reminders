@@ -21,7 +21,8 @@
         "update_reminder",
         "complete_reminder",
         "reopen_reminder",
-        "move_reminder"
+        "move_reminder",
+        "delete_reminder"
       ]
     },
     "source_id": {"type": "string", "minLength": 1},
@@ -46,9 +47,8 @@
     "offset": {"type": "integer", "minimum": 0, "maximum": 10000},
     "sort": {"enum": ["due", "modified", "title"]},
     "title": {"type": "string", "minLength": 1, "maxLength": 10000},
-    "notes": {"type": ["string", "null"]},
+    "notes": {"type": ["string", "null"], "maxLength": 100000},
     "url": {"type": ["string", "null"], "format": "uri"},
-    "location": {"type": ["string", "null"]},
     "priority": {"type": "integer", "minimum": 0, "maximum": 9},
     "due": {"oneOf": [{"$ref": "#/$defs/due"}, {"type": "null"}]},
     "alarms": {
@@ -77,9 +77,8 @@
       "additionalProperties": false,
       "properties": {
         "title": {"type": "string", "minLength": 1, "maxLength": 10000},
-        "notes": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"], "maxLength": 100000},
         "url": {"type": ["string", "null"], "format": "uri"},
-        "location": {"type": ["string", "null"]},
         "priority": {"type": "integer", "minimum": 0, "maximum": 9},
         "due": {"oneOf": [{"$ref": "#/$defs/due"}, {"type": "null"}]},
         "alarms": {
@@ -96,7 +95,7 @@
         }
       }
     },
-    "expected_last_modified": {"type": ["string", "null"], "format": "date-time"}
+    "expected_last_modified": {"type": "string", "format": "date-time"}
   },
   "$defs": {
     "rfc3339": {
@@ -255,7 +254,8 @@
     "update_reminder": ["reminder_id", "expected_last_modified", "patch"],
     "complete_reminder": ["reminder_id", "expected_last_modified"],
     "reopen_reminder": ["reminder_id", "expected_last_modified"],
-    "move_reminder": ["reminder_id", "expected_last_modified", "calendar_id"]
+    "move_reminder": ["reminder_id", "expected_last_modified", "calendar_id"],
+    "delete_reminder": ["reminder_id", "expected_last_modified"]
   },
   "x-response-statuses": [
     "unchanged",

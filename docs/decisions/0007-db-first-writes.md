@@ -8,7 +8,7 @@ Superseded by 0009. Historical rationale retained; 0008 still governs image atta
 
 The original decision used direct Reminders database writes as the primary backend for local write operations except image attachments and reminder deletion.
 
-The current policy instead prefers EventKit for public reminder fields and uses capability-gated private writes only for Reminders-specific surfaces. Reminder deletion uses `backend=auto`: a DB soft-delete is eligible only when the exact macOS/Reminders/schema fingerprint has a sacrificial recovery-and-sync parity record; otherwise native AppleScript is selected. Native failure never silently falls through to DB mutation.
+The current policy instead prefers EventKit for public reminder fields and deletion, and uses capability-gated, fresh-version-checked private writes only for Reminders-specific surfaces. MCP deletion requires a fresh last-modified precondition and never falls through to a private backend. The adapter's DB soft-delete remains diagnostic-only and requires exact environment recovery/sync evidence.
 
 Image attachments are no longer DB-first because DB-only image rows can render on macOS while failing to appear on iPhone. See 0008.
 

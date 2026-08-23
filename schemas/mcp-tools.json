@@ -235,7 +235,7 @@
     {
       "name": "read_reminder",
       "title": "Read Reminder",
-      "description": "Read one reminder by its exact stable EventKit ID through Apple's public API. This makes no changes and may require macOS Reminders permission. Exceptionally long strings or arrays are bounded and reported through _mcp truncation metadata.",
+      "description": "Read one reminder by the exact opaque EventKit ID returned by fetch_reminders. EventKit IDs are valid for the current store but can change after a full sync. This makes no changes and may require macOS Reminders permission. Exceptionally long strings or arrays are bounded and reported through _mcp truncation metadata.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -433,7 +433,7 @@
     {
       "name": "create_reminder",
       "title": "Create Reminder",
-      "description": "Create one reminder in an exact EventKit list ID using Apple's public API. Supports typed due dates, absolute or location alarms, URL, location text, priority, and one recurrence rule. A required idempotency key makes retries replay the original receipt instead of creating a duplicate.",
+      "description": "Create one reminder in an exact EventKit list ID using Apple's public API. Supports typed due dates, absolute or coordinate-backed location alarms, URL, priority, and one recurrence rule. Plain location text is intentionally unsupported because current Reminders stores discard it on read-back. A required idempotency key makes retries replay the original receipt instead of creating a duplicate.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -451,7 +451,7 @@
           },
           "notes": {
             "type": "string",
-            "maxLength": 1000000,
+            "maxLength": 100000,
             "description": "Optional reminder notes."
           },
           "url": {
@@ -459,11 +459,6 @@
             "format": "uri",
             "maxLength": 100000,
             "description": "Optional reminder URL with an explicit scheme."
-          },
-          "location": {
-            "type": "string",
-            "maxLength": 1000000,
-            "description": "Optional location text stored on the reminder."
           },
           "priority": {
             "type": "integer",
@@ -659,9 +654,8 @@
             "additionalProperties": false,
             "properties": {
               "title": {"type": "string", "minLength": 1, "maxLength": 10000},
-              "notes": {"type": ["string", "null"], "maxLength": 1000000},
+              "notes": {"type": ["string", "null"], "maxLength": 100000},
               "url": {"type": ["string", "null"], "format": "uri", "maxLength": 100000},
-              "location": {"type": ["string", "null"], "maxLength": 1000000},
               "priority": {"type": "integer", "minimum": 0, "maximum": 9},
               "due": {
                 "oneOf": [
@@ -926,23 +920,25 @@
     {
       "name": "delete_reminder",
       "title": "Delete Reminder",
-      "description": "Delete exactly one reminder selected by its stable reminder ID. This is destructive. The adapter's auto mode uses its fast DB soft-delete only for a verified matching capability record and otherwise falls back to native Reminders deletion; the selected backend and recovery semantics are returned.",
+      "description": "Delete exactly one reminder through Apple's public EventKit API using the exact opaque ID and a fresh last_modified precondition from read_reminder or fetch_reminders. This is destructive but follows the native Reminders deletion path; the receipt reports local absence separately from unverified Recently Deleted UI state. If the ID is no longer resolvable, the tool returns a no-write not-found result and requires a fresh read.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "reminder_id": {
             "type": "string",
-            "pattern": "^(?:x-apple-reminder://)?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
-            "description": "Exact reminder UUID, optionally prefixed with x-apple-reminder://."
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact opaque reminder ID returned by read_reminder or fetch_reminders."
           },
-          "if_version": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "Optional private-store version from a preceding adapter receipt. Deletion fails if it no longer matches."
+          "expected_last_modified": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact last_modified timestamp from the most recent public EventKit read."
           }
         },
         "required": [
-          "reminder_id"
+          "reminder_id",
+          "expected_last_modified"
         ],
         "additionalProperties": false
       },
@@ -994,7 +990,7 @@
     {
       "name": "add_reminder_tag",
       "title": "Add Reminder Tag",
-      "description": "Add one exact tag to one reminder selected by its stable reminder ID. Repeating an already-attached tag is a no-op.",
+      "description": "Add one exact tag to one reminder selected by its stable reminder ID. Call list_reminder_attachments with limit=1 and pass its reminder_version so a concurrent reminder change blocks the write without loading a broad attachment set. Repeating an already-attached tag is a no-op.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1012,12 +1008,13 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional private-store version from a preceding adapter receipt. The tag is not added if it no longer matches."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read. The tag is not added if it no longer matches."
           }
         },
         "required": [
           "reminder_id",
-          "tag"
+          "tag",
+          "if_version"
         ],
         "additionalProperties": false
       },
@@ -1031,7 +1028,7 @@
     {
       "name": "remove_reminder_tag",
       "title": "Remove Reminder Tag",
-      "description": "Remove one exact tag assignment from one reminder selected by its stable reminder ID. It does not delete the global tag label.",
+      "description": "Remove one exact tag assignment from one reminder selected by its stable reminder ID. Call list_reminder_attachments with limit=1 and pass its reminder_version so a concurrent reminder change blocks the write without loading a broad attachment set. It does not delete the global tag label.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1049,12 +1046,13 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional private-store version from a preceding adapter receipt. The tag is not removed if it no longer matches."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read. The tag is not removed if it no longer matches."
           }
         },
         "required": [
           "reminder_id",
-          "tag"
+          "tag",
+          "if_version"
         ],
         "additionalProperties": false
       },
@@ -1068,7 +1066,7 @@
     {
       "name": "create_reminder_section",
       "title": "Create Reminder Section",
-      "description": "Create one section inside one list selected by its exact stable list ID. If the same section name already exists in that list, the adapter returns it without creating another.",
+      "description": "Create one section inside one list selected by its exact stable list ID through native ReminderKit, then verify the section's CloudKit version reached iCloud. If a same-name local-only section from an older plugin exists, the adapter repairs it in place instead of creating a duplicate.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1100,7 +1098,7 @@
     {
       "name": "move_reminder_to_section",
       "title": "Move Reminder to Section",
-      "description": "Move exactly one reminder to exactly one section using stable IDs. The section must belong to the reminder's current list; no title or fuzzy matching is used.",
+      "description": "Move exactly one reminder to exactly one section through native ReminderKit and verify the list membership's CloudKit version reached iCloud. Call list_reminder_attachments with limit=1 and pass its reminder_version so a concurrent reminder change blocks the move. Repeating the same target repairs older local-only membership writes. The section must belong to the reminder's current list; no title or fuzzy matching is used.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1117,12 +1115,13 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional private-store version from a preceding adapter receipt. The section move fails if it no longer matches."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read. The section move fails if it no longer matches."
           }
         },
         "required": [
           "reminder_id",
-          "section_id"
+          "section_id",
+          "if_version"
         ],
         "additionalProperties": false
       },
@@ -1155,7 +1154,7 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Required reminder_version returned by list_reminder_attachments."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read."
           },
           "idempotency_key": {
             "type": "string",
@@ -1178,7 +1177,7 @@
     {
       "name": "attach_url_to_reminder",
       "title": "Attach URL to Reminder",
-      "description": "Attach one URL to exactly one reminder selected by its stable ID. Repeating the same URL on the same reminder is a no-op. The change may sync to the user's other Apple devices through iCloud.",
+      "description": "Attach one URL to exactly one reminder selected by its stable ID. Call list_reminder_attachments first and pass its reminder_version so a concurrent reminder change blocks the write. Repeating the same URL on the same reminder is a no-op. The change may sync to the user's other Apple devices through iCloud.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1197,12 +1196,13 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional reminder_version from list_reminder_attachments. Attachment fails if the reminder changed after that read."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read. Attachment fails if the reminder changed after that read."
           }
         },
         "required": [
           "reminder_id",
-          "url"
+          "url",
+          "if_version"
         ],
         "additionalProperties": false
       },
@@ -1216,7 +1216,7 @@
     {
       "name": "list_reminder_attachments",
       "title": "List Reminder Attachments",
-      "description": "List a bounded set of active attachments for one reminder selected by its exact stable ID and return reminder_version for version-guarded attachment mutations. This tool makes no changes.",
+      "description": "List a bounded set of active attachments for one reminder selected by its exact stable ID and return reminder_version for version-guarded private existing-item mutations. This tool makes no changes.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1380,7 +1380,7 @@
     {
       "name": "delete_reminder_attachment",
       "title": "Delete Reminder Attachment",
-      "description": "Soft-delete exactly one attachment selected by its stable attachment ID from exactly one reminder selected by its stable reminder ID. No filename, URL, type, or fuzzy selector is accepted.",
+      "description": "Delete exactly one attachment selected by its stable attachment ID from exactly one reminder selected by its stable reminder ID. URL metadata rows follow native Reminders behavior and are removed while their cloud-state tombstone is retained; image objects use the recoverable soft-delete path and copied image files are not hard-deleted. Call list_reminder_attachments first and pass its reminder_version so a concurrent reminder change blocks the deletion. No filename, URL, type, or fuzzy selector is accepted.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1397,12 +1397,13 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Optional reminder_version from list_reminder_attachments. Deletion fails if the reminder changed after that read."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read. Deletion fails if the reminder changed after that read."
           }
         },
         "required": [
           "reminder_id",
-          "attachment_id"
+          "attachment_id",
+          "if_version"
         ],
         "additionalProperties": false
       },
@@ -1416,7 +1417,7 @@
     {
       "name": "replace_reminder_attachment",
       "title": "Replace Reminder Attachment",
-      "description": "Replace exactly one attachment selected by stable reminder and attachment IDs with either one absolute local image path or one HTTP(S) URL. First call list_reminder_attachments to obtain reminder_version, then pass it with an idempotency key. Image replacement uses ReminderKit; URL replacement uses the private store. The old attachment is soft-deleted only after the replacement is created, with compensation on failed image replacement.",
+      "description": "Replace exactly one attachment selected by stable reminder and attachment IDs with either one absolute local image path or one HTTP(S) URL. First call list_reminder_attachments to obtain reminder_version, then pass it with an idempotency key. Image replacement uses ReminderKit and soft-deletes the old image object. URL replacement uses the private store, preserves the selected attachment's display order, and removes the old URL metadata row while retaining its cloud-state tombstone, matching native Reminders behavior. Failed image replacement is compensated when possible.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1447,7 +1448,7 @@
           "if_version": {
             "type": "integer",
             "minimum": 0,
-            "description": "Required reminder_version returned by list_reminder_attachments."
+            "description": "Required reminder_version from a fresh list_reminder_attachments read."
           },
           "idempotency_key": {
             "type": "string",

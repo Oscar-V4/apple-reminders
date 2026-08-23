@@ -646,6 +646,227 @@ def capture_json_output(func, args: argparse.Namespace, *, patches: list[tuple[s
 
 
 class MutationReceiptTests(unittest.TestCase):
+    def test_unexpected_mutation_error_does_not_claim_no_write(self) -> None:
+        parser = mock.Mock()
+        parser.parse_args.return_value = argparse.Namespace(
+            command="replace_attachment",
+            func=mock.Mock(side_effect=RuntimeError("unexpected")),
+        )
+        with (
+            mock.patch.object(adapter, "build_parser", return_value=parser),
+            mock.patch.object(adapter, "json_out") as output,
+        ):
+            exit_code = adapter.main(["replace_attachment"])
+        payload = output.call_args.args[0]
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "failed_manual_repair_required")
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(
+            payload["recovery"]["semantics"],
+            "manual_inspection_required",
+        )
+
+    def test_cli_stale_private_mutation_emits_a_full_failure_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reminders.sqlite"
+            seed_catalog_fixture(database)
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=database),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                exit_code = adapter.main(
+                    [
+                        "remove_tag",
+                        "--db",
+                        str(database),
+                        "--id",
+                        REMINDER_ID,
+                        "--tag",
+                        "health",
+                        "--if-version",
+                        "2",
+                    ]
+                )
+            payload = output.call_args.args[0]
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertEqual(payload["operation"], "remove_tag")
+        self.assertEqual(payload["error"]["code"], "concurrent_modification")
+        self.assertIsInstance(payload["operation_id"], str)
+        self.assertIsInstance(payload["backend"], str)
+        for field in ("target", "after", "verification", "recovery"):
+            self.assertIsInstance(payload[field], dict)
+
+    def test_private_existing_item_mutations_reject_missing_version(self) -> None:
+        cases = [
+            (
+                "update_reminder_db",
+                adapter.cmd_update_reminder,
+                argparse.Namespace(
+                    db=None,
+                    backend="db",
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    new_title="Guarded title",
+                    notes=None,
+                    flagged=None,
+                    priority=None,
+                    due_at=None,
+                    remind_at=None,
+                    all_day_due_date=None,
+                    clear_due=False,
+                    if_version=None,
+                ),
+            ),
+            (
+                "complete_reminder_db",
+                adapter.cmd_complete_reminder,
+                argparse.Namespace(
+                    db=None,
+                    backend="db",
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    if_version=None,
+                ),
+            ),
+            (
+                "reopen_reminder_db",
+                adapter.cmd_reopen_reminder,
+                argparse.Namespace(
+                    db=None,
+                    backend="db",
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    if_version=None,
+                ),
+            ),
+            (
+                "add_tag",
+                adapter.cmd_add_tag,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    tag="health",
+                    if_version=None,
+                ),
+            ),
+            (
+                "remove_tag",
+                adapter.cmd_remove_tag,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    tag="health",
+                    if_version=None,
+                ),
+            ),
+            (
+                "move_to_section",
+                adapter.cmd_move_to_section,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    section=None,
+                    section_id=SECTION_B_ID,
+                    if_version=None,
+                ),
+            ),
+            (
+                "attach_url",
+                adapter.cmd_attach_url,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    url="https://docs.example/item",
+                    if_version=None,
+                ),
+            ),
+            (
+                "attach_image",
+                adapter.cmd_attach_image,
+                argparse.Namespace(
+                    db=None,
+                    backend="reminderkit",
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    image="/nonexistent/synthetic.png",
+                    if_version=None,
+                    idempotency_key=None,
+                ),
+            ),
+            (
+                "delete_attachment",
+                adapter.cmd_delete_attachment,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    attachment_id=ATTACHMENT_1_ID,
+                    attachment_pk=None,
+                    type=None,
+                    filename=None,
+                    url=None,
+                    if_version=None,
+                ),
+            ),
+            (
+                "replace_attachment",
+                adapter.cmd_replace_attachment,
+                argparse.Namespace(
+                    db=None,
+                    id=REMINDER_ID,
+                    title=None,
+                    list=None,
+                    attachment_id=ATTACHMENT_1_ID,
+                    attachment_pk=None,
+                    type=None,
+                    filename=None,
+                    old_url=None,
+                    image=None,
+                    url="https://docs.example/replacement",
+                    if_version=None,
+                    idempotency_key=None,
+                ),
+            ),
+        ]
+
+        for name, command, args in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                db = Path(temp_dir) / "reminders.sqlite"
+                seed_catalog_fixture(db)
+                with (
+                    mock.patch.object(adapter, "resolve_database", return_value=db),
+                    self.assertRaises(adapter.AdapterError) as raised,
+                ):
+                    command(args)
+
+                con = sqlite3.connect(db)
+                try:
+                    version = con.execute(
+                        "select Z_OPT from ZREMCDREMINDER where Z_PK=1"
+                    ).fetchone()[0]
+                finally:
+                    con.close()
+
+                self.assertEqual(raised.exception.code, "invalid_input")
+                self.assertEqual(version, 1)
+
     def test_update_reminder_roundtrip_and_stale_version_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Path(temp_dir) / "reminders.sqlite"
@@ -872,11 +1093,176 @@ class MutationReceiptTests(unittest.TestCase):
             finally:
                 con.close()
 
-        self.assertEqual(create_receipt["status"], "verified")
+        self.assertEqual(create_receipt["status"], "committed_verification_pending")
         self.assertTrue(create_receipt["after"]["created"])
-        self.assertEqual(move_receipt["status"], "verified")
+        self.assertEqual(move_receipt["status"], "committed_verification_pending")
         self.assertEqual(move_receipt["after"]["section_id"], section_id)
         self.assertEqual(adapter.membership_map(row["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"])[REMINDER_ID], section_id)
+
+    def test_section_sqlite_write_does_not_claim_icloud_verified(self) -> None:
+        """A local Core Data read-back is not evidence that a section reached iCloud."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+
+            create_args = argparse.Namespace(
+                db=str(db),
+                list=None,
+                list_id=LIST_BETA_ID,
+                name="Section C",
+            )
+            _, create_receipt = capture_json_output(
+                adapter.cmd_create_section,
+                create_args,
+                patches=[("resolve_database", db), ("log_action", None)],
+            )
+            section_id = create_receipt["after"]["section"]["id"]
+
+            move_args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                section=None,
+                section_id=section_id,
+                if_version=1,
+            )
+            _, move_receipt = capture_json_output(
+                adapter.cmd_move_to_section,
+                move_args,
+                patches=[("resolve_database", db), ("log_action", None)],
+            )
+
+        self.assertEqual(create_receipt["status"], "committed_verification_pending")
+        self.assertEqual(create_receipt["verification"]["icloud_sync"], "not_verified")
+        self.assertEqual(move_receipt["status"], "committed_verification_pending")
+        self.assertEqual(move_receipt["verification"]["icloud_sync"], "not_verified")
+
+    def test_native_section_create_requires_cloud_readback_for_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            section_id = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+
+            def native_create(operation: str, list_id: str, name: str) -> dict[str, object]:
+                self.assertEqual((operation, list_id, name), ("create", LIST_BETA_ID, "Section C"))
+                con = sqlite3.connect(db)
+                try:
+                    insert_row(
+                        con,
+                        "ZREMCDBASESECTION",
+                        Z_PK=41,
+                        Z_ENT=6,
+                        Z_OPT=2,
+                        ZCKDIRTYFLAGS=0,
+                        ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION=0,
+                        ZMINIMUMSUPPORTEDAPPVERSION=0,
+                        ZSPOTLIGHTINDEXCOUNT=0,
+                        ZACCOUNT=100,
+                        ZCKCLOUDSTATE=501,
+                        ZLIST=11,
+                        Z_FOK_LIST=3072,
+                        ZCREATIONDATE=2.0,
+                        ZCKIDENTIFIER=section_id,
+                        ZDISPLAYNAME=name,
+                        ZIDENTIFIER=sqlite3.Binary(adapter.uuid_blob(section_id)),
+                        ZRESOLUTIONTOKENMAP_V3_JSONDATA=sqlite3.Binary(b"native-token"),
+                        ZMARKEDFORDELETION=0,
+                    )
+                    insert_row(
+                        con,
+                        "ZREMCKCLOUDSTATE",
+                        Z_PK=501,
+                        Z_ENT=45,
+                        Z_OPT=2,
+                        ZCURRENTLOCALVERSION=1,
+                        ZLATESTVERSIONSYNCEDTOCLOUD=1,
+                        ZREMINDER=None,
+                        ZLOCALVERSIONDATE=2.0,
+                        ZSECTION=41,
+                        Z5_SECTION=6,
+                        ZOBJECT=None,
+                        Z13_OBJECT=None,
+                        ZINCLOUD=1,
+                        ZCKSERVERRECORDDATA=None,
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+                return {"ok": True, "saved": True, "section_id": section_id}
+
+            args = argparse.Namespace(
+                db=None,
+                list=None,
+                list_id=LIST_BETA_ID,
+                name="Section C",
+            )
+            _, receipt = capture_json_output(
+                adapter.cmd_create_section,
+                args,
+                patches=[
+                    ("resolve_database", db),
+                    ("invoke_reminderkit_section", native_create),
+                    ("log_action", None),
+                ],
+            )
+
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["backend"], "reminderkit_private")
+        self.assertEqual(receipt["after"]["section"]["id"], section_id)
+        self.assertEqual(receipt["verification"]["icloud_sync"], "verified")
+        self.assertTrue(receipt["verification"]["cloud"]["icloud_sync_verified"])
+
+    def test_native_section_move_writes_membership_through_reminderkit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+
+            def native_move(operation: str, reminder_id: str, section_id: str) -> dict[str, object]:
+                self.assertEqual((operation, reminder_id, section_id), ("move", REMINDER_ID, SECTION_B_ID))
+                con = sqlite3.connect(db)
+                con.row_factory = sqlite3.Row
+                try:
+                    row = con.execute(
+                        "select ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA from ZREMCDBASELIST where Z_PK=11"
+                    ).fetchone()
+                    mapping = adapter.membership_map(row["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"])
+                    mapping[REMINDER_ID] = SECTION_B_ID
+                    con.execute(
+                        "update ZREMCDBASELIST set ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA=?,Z_OPT=Z_OPT+1 where Z_PK=11",
+                        (adapter.membership_payload(mapping),),
+                    )
+                    con.execute(
+                        "update ZREMCKCLOUDSTATE set ZCURRENTLOCALVERSION=2,ZLATESTVERSIONSYNCEDTOCLOUD=2,ZINCLOUD=1 where Z_PK=211"
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+                return {"ok": True, "saved": True}
+
+            args = argparse.Namespace(
+                db=None,
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                section=None,
+                section_id=SECTION_B_ID,
+                if_version=1,
+            )
+            _, receipt = capture_json_output(
+                adapter.cmd_move_to_section,
+                args,
+                patches=[
+                    ("resolve_database", db),
+                    ("invoke_reminderkit_section", native_move),
+                    ("log_action", None),
+                ],
+            )
+
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["backend"], "reminderkit_private")
+        self.assertEqual(receipt["after"]["section_id"], SECTION_B_ID)
+        self.assertEqual(receipt["verification"]["icloud_sync"], "verified")
 
     def test_attach_url_and_delete_attachment_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -897,6 +1283,19 @@ class MutationReceiptTests(unittest.TestCase):
                 patches=[("resolve_database", db), ("log_action", None)],
             )
             attachment_id = attach_receipt["after"]["attachment"]["id"]
+
+            con = sqlite3.connect(db)
+            con.row_factory = sqlite3.Row
+            try:
+                attached_row = con.execute(
+                    "select Z_PK,ZCKCLOUDSTATE from ZREMCDOBJECT where ZCKIDENTIFIER=?",
+                    (attachment_id,),
+                ).fetchone()
+            finally:
+                con.close()
+            self.assertIsNotNone(attached_row)
+            attachment_pk = attached_row["Z_PK"]
+            cloud_pk = attached_row["ZCKCLOUDSTATE"]
 
             delete_args = argparse.Namespace(
                 db=str(db),
@@ -923,6 +1322,16 @@ class MutationReceiptTests(unittest.TestCase):
                     "select ZMARKEDFORDELETION,ZURL from ZREMCDOBJECT where ZCKIDENTIFIER=?",
                     (attachment_id,),
                 ).fetchone()
+                cloud_row = con.execute(
+                    """
+                    select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+                    from ZREMCKCLOUDSTATE where Z_PK=?
+                    """,
+                    (cloud_pk,),
+                ).fetchone()
+                reminder_version = con.execute(
+                    "select Z_OPT from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()[0]
             finally:
                 con.close()
 
@@ -930,8 +1339,280 @@ class MutationReceiptTests(unittest.TestCase):
         self.assertEqual(attach_receipt["after"]["attachment"]["type"], "url")
         self.assertEqual(delete_receipt["status"], "verified")
         self.assertEqual(delete_receipt["recovery"]["semantics"], "reattach_url")
-        self.assertEqual(row["ZMARKEDFORDELETION"], 1)
-        self.assertEqual(row["ZURL"], "https://docs.example/item")
+        self.assertIsNone(row)
+        self.assertEqual(delete_receipt["verification"]["attachment_row_deleted"], True)
+        self.assertEqual(
+            delete_receipt["verification"]["cloud_state_tombstone_retained"],
+            True,
+        )
+        self.assertEqual(cloud_row["ZCURRENTLOCALVERSION"], 2)
+        self.assertEqual(cloud_row["ZOBJECT"], attachment_pk)
+        self.assertEqual(cloud_row["Z13_OBJECT"], adapter.URL_ATTACHMENT_ENT)
+        self.assertEqual(reminder_version, 3)
+
+    def test_replace_url_deletes_old_row_and_preserves_display_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                attachment_id=ATTACHMENT_1_ID,
+                attachment_pk=None,
+                type=None,
+                filename=None,
+                old_url=None,
+                image=None,
+                url="https://replacement.example/path",
+                if_version=1,
+            )
+
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "log_action", return_value=None),
+            ):
+                receipt = adapter.replace_attachment_once(args)
+
+            new_attachment = receipt["after"]["new_attachment"]["attachment"]
+            con = sqlite3.connect(db)
+            con.row_factory = sqlite3.Row
+            try:
+                old_row = con.execute(
+                    "select Z_PK from ZREMCDOBJECT where ZCKIDENTIFIER=?",
+                    (ATTACHMENT_1_ID,),
+                ).fetchone()
+                new_row = con.execute(
+                    """
+                    select Z_FOK_REMINDER1,ZURL,ZMARKEDFORDELETION
+                    from ZREMCDOBJECT where ZCKIDENTIFIER=?
+                    """,
+                    (new_attachment["id"],),
+                ).fetchone()
+                old_cloud = con.execute(
+                    """
+                    select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+                    from ZREMCKCLOUDSTATE where Z_PK=330
+                    """
+                ).fetchone()
+                reminder_version = con.execute(
+                    "select Z_OPT from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()[0]
+            finally:
+                con.close()
+
+        self.assertEqual(receipt["status"], "verified")
+        self.assertIsNone(old_row)
+        self.assertEqual(new_row["Z_FOK_REMINDER1"], 1024)
+        self.assertEqual(new_row["ZURL"], "https://replacement.example/path")
+        self.assertEqual(new_row["ZMARKEDFORDELETION"], 0)
+        self.assertEqual(old_cloud["ZCURRENTLOCALVERSION"], 2)
+        self.assertEqual(old_cloud["ZOBJECT"], 30)
+        self.assertEqual(old_cloud["Z13_OBJECT"], adapter.URL_ATTACHMENT_ENT)
+        self.assertEqual(reminder_version, 3)
+        self.assertTrue(receipt["verification"]["old_attachment_row_deleted"])
+        self.assertTrue(receipt["verification"]["replacement_order_preserved"])
+        self.assertTrue(receipt["verification"]["old_attachment_cloud_state_retained"])
+
+    def test_replace_url_preserves_nullable_display_order_without_skipping_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            con = sqlite3.connect(db)
+            try:
+                con.execute(
+                    "update ZREMCDOBJECT set Z_FOK_REMINDER1=NULL where ZCKIDENTIFIER=?",
+                    (ATTACHMENT_1_ID,),
+                )
+                con.commit()
+            finally:
+                con.close()
+            args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                attachment_id=ATTACHMENT_1_ID,
+                attachment_pk=None,
+                type=None,
+                filename=None,
+                old_url=None,
+                image=None,
+                url="https://nullable-order.example/path",
+                if_version=1,
+            )
+
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "log_action", return_value=None),
+            ):
+                receipt = adapter.replace_attachment_once(args)
+
+            new_attachment = receipt["after"]["new_attachment"]["attachment"]
+            con = sqlite3.connect(db)
+            try:
+                new_order = con.execute(
+                    "select Z_FOK_REMINDER1 from ZREMCDOBJECT where ZCKIDENTIFIER=?",
+                    (new_attachment["id"],),
+                ).fetchone()[0]
+            finally:
+                con.close()
+
+        self.assertEqual(receipt["status"], "verified")
+        self.assertIsNone(new_order)
+        self.assertTrue(receipt["verification"]["replacement_order_preserved"])
+
+    def test_replace_url_rejects_an_already_attached_target_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                attachment_id=ATTACHMENT_1_ID,
+                attachment_pk=None,
+                type=None,
+                filename=None,
+                old_url=None,
+                image=None,
+                url="https://two.example/path",
+                if_version=1,
+            )
+            replacement_connection = adapter.connect(db)
+            real_normalized_url = adapter.normalized_url
+            transaction_states: list[bool] = []
+
+            def observe_transaction(value: str) -> str:
+                transaction_states.append(replacement_connection.in_transaction)
+                return real_normalized_url(value)
+
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "connect", return_value=replacement_connection),
+                mock.patch.object(adapter, "normalized_url", side_effect=observe_transaction),
+                mock.patch.object(adapter, "log_action", return_value=None),
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.replace_attachment_once(args)
+
+            con = sqlite3.connect(db)
+            try:
+                active_rows = con.execute(
+                    """
+                    select ZCKIDENTIFIER,Z_FOK_REMINDER1
+                    from ZREMCDOBJECT
+                    where ZREMINDER2=1 and Z_ENT=? and coalesce(ZMARKEDFORDELETION,0)=0
+                    order by Z_FOK_REMINDER1
+                    """,
+                    (adapter.URL_ATTACHMENT_ENT,),
+                ).fetchall()
+                reminder_version = con.execute(
+                    "select Z_OPT from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()[0]
+            finally:
+                con.close()
+
+        self.assertEqual(raised.exception.code, "invalid_input")
+        self.assertEqual(active_rows, [(ATTACHMENT_1_ID, 1024), (ATTACHMENT_2_ID, 2048)])
+        self.assertEqual(reminder_version, 1)
+        self.assertEqual(transaction_states, [True])
+
+    def test_url_delete_rolls_back_when_cloud_state_tombstone_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            con = sqlite3.connect(db)
+            try:
+                con.execute("delete from ZREMCKCLOUDSTATE where Z_PK=330")
+                con.commit()
+            finally:
+                con.close()
+
+            args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                attachment_id=ATTACHMENT_1_ID,
+                attachment_pk=None,
+                type=None,
+                filename=None,
+                url=None,
+                if_version=1,
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "log_action", return_value=None),
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.cmd_delete_attachment(args)
+
+            con = sqlite3.connect(db)
+            try:
+                object_count = con.execute(
+                    "select count(*) from ZREMCDOBJECT where ZCKIDENTIFIER=?",
+                    (ATTACHMENT_1_ID,),
+                ).fetchone()[0]
+                reminder_version = con.execute(
+                    "select Z_OPT from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()[0]
+            finally:
+                con.close()
+
+        self.assertEqual(raised.exception.code, "schema_mismatch")
+        self.assertEqual(object_count, 1)
+        self.assertEqual(reminder_version, 1)
+
+    def test_url_delete_rolls_back_when_cloud_state_owns_another_object(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            con = sqlite3.connect(db)
+            try:
+                con.execute(
+                    "update ZREMCKCLOUDSTATE set ZOBJECT=31 where Z_PK=330"
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            args = argparse.Namespace(
+                db=str(db),
+                id=REMINDER_ID,
+                title=None,
+                list=None,
+                attachment_id=ATTACHMENT_1_ID,
+                attachment_pk=None,
+                type=None,
+                filename=None,
+                url=None,
+                if_version=1,
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "log_action", return_value=None),
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.cmd_delete_attachment(args)
+
+            con = sqlite3.connect(db)
+            try:
+                object_count = con.execute(
+                    "select count(*) from ZREMCDOBJECT where ZCKIDENTIFIER=?",
+                    (ATTACHMENT_1_ID,),
+                ).fetchone()[0]
+                cloud = con.execute(
+                    "select ZOBJECT,Z13_OBJECT,ZCURRENTLOCALVERSION from ZREMCKCLOUDSTATE where Z_PK=330"
+                ).fetchone()
+            finally:
+                con.close()
+
+        self.assertEqual(raised.exception.code, "schema_mismatch")
+        self.assertEqual(object_count, 1)
+        self.assertEqual(cloud, (31, adapter.URL_ATTACHMENT_ENT, 1))
 
     def test_bounded_reads_report_truncated_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1044,6 +1725,159 @@ class MutationReceiptTests(unittest.TestCase):
         self.assertEqual(preview["verification"]["state"], "candidate_snapshot")
         self.assertEqual(missing_digest.exception.code, "ambiguous_scope")
         self.assertEqual(changed_digest.exception.code, "concurrent_modification")
+
+    def test_repair_digest_rejects_reminder_version_drift_before_private_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "repair.sqlite"
+            support, files_root, _ = seed_repair_fixture(db)
+            args = argparse.Namespace(
+                db=str(db),
+                search=None,
+                list="Beta",
+                limit=10,
+                preview_digest=None,
+                apply=False,
+                no_backup=True,
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(adapter, "FILES", files_root),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_repair_attachments(args)
+            preview = output.call_args.args[0]
+
+            con = sqlite3.connect(db)
+            try:
+                con.execute("update ZREMCDREMINDER set Z_OPT=2 where Z_PK=1")
+                con.commit()
+            finally:
+                con.close()
+
+            apply_args = argparse.Namespace(
+                **{
+                    **vars(args),
+                    "apply": True,
+                    "preview_digest": preview["target"]["candidate_digest"],
+                }
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(adapter, "FILES", files_root),
+                mock.patch.object(adapter, "attach_image_reminderkit_record") as attach,
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.cmd_repair_attachments(apply_args)
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        attach.assert_not_called()
+
+    def test_repair_batch_tracks_its_own_version_changes_for_same_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "repair.sqlite"
+            support, files_root, _ = seed_repair_fixture(db)
+            con = sqlite3.connect(db)
+            con.row_factory = sqlite3.Row
+            try:
+                first = con.execute(
+                    "select * from ZREMCDOBJECT where ZCKIDENTIFIER='REPAIR-ATTACH'"
+                ).fetchone()
+                second = dict(first)
+                second.update(
+                    {
+                        "Z_PK": 31,
+                        "ZCKIDENTIFIER": "REPAIR-ATTACH-2",
+                        "ZCKCLOUDSTATE": 331,
+                        "Z_FOK_REMINDER1": 2048,
+                    }
+                )
+                insert_row(con, "ZREMCDOBJECT", **second)
+                insert_row(
+                    con,
+                    "ZREMCKCLOUDSTATE",
+                    Z_PK=331,
+                    Z_ENT=45,
+                    Z_OPT=1,
+                    ZCURRENTLOCALVERSION=1,
+                    ZLATESTVERSIONSYNCEDTOCLOUD=0,
+                    ZREMINDER=None,
+                    ZLOCALVERSIONDATE=1.0,
+                    ZSECTION=None,
+                    Z5_SECTION=None,
+                    ZOBJECT=31,
+                    Z13_OBJECT=25,
+                    ZINCLOUD=0,
+                    ZCKSERVERRECORDDATA=None,
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            preview_args = argparse.Namespace(
+                db=str(db),
+                search=None,
+                list="Beta",
+                limit=10,
+                preview_digest=None,
+                apply=False,
+                no_backup=True,
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(adapter, "FILES", files_root),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_repair_attachments(preview_args)
+            preview = output.call_args.args[0]
+            apply_args = argparse.Namespace(
+                **{
+                    **vars(preview_args),
+                    "apply": True,
+                    "preview_digest": preview["target"]["candidate_digest"],
+                }
+            )
+            replacements = (
+                {
+                    "attachment": {"pk": 40, "id": "REPAIRED-1"},
+                    "sync": {"mobile_visible_likely": True},
+                },
+                {
+                    "attachment": {"pk": 41, "id": "REPAIRED-2"},
+                    "sync": {"mobile_visible_likely": True},
+                },
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(adapter, "FILES", files_root),
+                mock.patch.object(
+                    adapter,
+                    "attach_image_reminderkit_record",
+                    side_effect=replacements,
+                ) as attach,
+                mock.patch.object(adapter, "log_action", return_value=None),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                exit_code = adapter.cmd_repair_attachments(apply_args)
+            receipt = output.call_args.args[0]
+            con = sqlite3.connect(db)
+            try:
+                states = con.execute(
+                    "select ZCKIDENTIFIER,ZMARKEDFORDELETION from ZREMCDOBJECT "
+                    "where ZCKIDENTIFIER like 'REPAIR-ATTACH%' order by ZCKIDENTIFIER"
+                ).fetchall()
+            finally:
+                con.close()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["after"]["counts"]["repaired"], 2)
+        self.assertEqual(receipt["after"]["counts"]["failed"], 0)
+        self.assertEqual([row[1] for row in states], [1, 1])
+        self.assertEqual(attach.call_count, 2)
 
     def test_main_maps_partial_failure_to_manual_repair_or_compensated_status(self) -> None:
         parser = mock.Mock()

@@ -20,6 +20,7 @@ static NSArray<NSString *> *BridgeOperations(void) {
         @"complete_reminder",
         @"reopen_reminder",
         @"move_reminder",
+        @"delete_reminder",
     ];
 }
 
@@ -95,7 +96,7 @@ static NSDictionary *BridgeResponse(NSString *operation,
         @"schema_version" : @(BridgeSchemaVersion),
         @"operation" : operation ?: (id)[NSNull null],
         @"status" : status,
-        @"ok" : @(![status isEqualToString:@"failed_no_mutation"]),
+        @"ok" : [NSNumber numberWithBool:![status isEqualToString:@"failed_no_mutation"]],
     } mutableCopy];
     if (data != nil) {
         payload[@"data"] = data;
@@ -276,13 +277,13 @@ static NSDictionary *Capabilities(void) {
             @"complete" : @YES,
             @"reopen" : @YES,
             @"move" : @YES,
-            @"delete" : @NO,
+            @"delete" : @YES,
         },
         @"fields" : @{
             @"title" : @YES,
             @"notes" : @YES,
             @"url" : @YES,
-            @"plain_location" : @YES,
+            @"plain_location" : @NO,
             @"priority_0_to_9" : @YES,
             @"typed_all_day_due" : @YES,
             @"typed_timed_due" : @YES,
@@ -868,10 +869,6 @@ static void ApplyMutableFields(EKReminder *reminder, NSDictionary *fields) {
     if (URL != nil) {
         reminder.URL = URL == [NSNull null] ? nil : [NSURL URLWithString:(NSString *)URL];
     }
-    id location = fields[@"location"];
-    if (location != nil) {
-        reminder.location = location == [NSNull null] ? nil : (NSString *)location;
-    }
     NSNumber *priority = fields[@"priority"];
     if (priority != nil) {
         reminder.priority = priority.unsignedIntegerValue;
@@ -955,18 +952,14 @@ static EKReminder *ReminderByIdentifier(EKEventStore *store, NSString *identifie
 
 static void CheckExpectedLastModified(EKReminder *reminder, id expected) {
     NSDate *current = reminder.lastModifiedDate;
-    if (expected == [NSNull null]) {
-        if (current == nil) {
-            return;
-        }
-    } else if ([expected isKindOfClass:[NSString class]]) {
+    if ([expected isKindOfClass:[NSString class]]) {
         NSDate *expectedDate = ParseISODate((NSString *)expected);
         if (expectedDate != nil && current != nil && fabs([expectedDate timeIntervalSinceDate:current]) < 0.0011) {
             return;
         }
     } else {
         RaiseRequest(@"invalid_precondition",
-                     @"expected_last_modified must be an RFC 3339 string or null",
+                     @"expected_last_modified must be an RFC 3339 string",
                      @"invalid_request",
                      @{});
     }
@@ -987,6 +980,7 @@ static NSDictionary *EventKitFailure(NSString *operation, NSError *error) {
                 error.code == EKErrorReminderLocationsNotSupported ||
                 error.code == EKErrorAlarmProximityNotSupported ||
                 error.code == EKErrorCalendarReadOnly ||
+                error.code == EKErrorEventNotMutable ||
                 error.code == EKErrorProcedureAlarmsNotMutable ||
                 error.code == EKErrorOSNotSupported)) {
         category = @"unsupported";
@@ -1085,6 +1079,124 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
             warnings,
             BridgeError(@"post_commit_verification_exception",
                         @"EventKit committed the write, but post-write verification could not be completed",
+                        @"verification",
+                        YES,
+                        @{ @"exception" : exception.name ?: @"NSException" }));
+    }
+}
+
+static NSDictionary *DeleteAndVerify(EKEventStore *store,
+                                     NSString *identifier,
+                                     id expectedLastModified,
+                                     NSString *operation) {
+    NSString *operationID = NewOperationIdentifier();
+    if (![expectedLastModified isKindOfClass:[NSString class]]) {
+        RaiseRequest(@"invalid_precondition",
+                     @"expected_last_modified must be an RFC 3339 string",
+                     @"invalid_request",
+                     @{});
+    }
+    EKCalendarItem *item = [store calendarItemWithIdentifier:identifier];
+    if (item == nil) {
+        return Failure(
+            operation,
+            @"reminder_not_found",
+            @"Reminder was not found; read current state before retrying",
+            @"not_found",
+            @{
+                @"reminder_id" : identifier,
+                @"retry_policy" : @"read_before_retry",
+            });
+    }
+    if (![item isKindOfClass:[EKReminder class]]) {
+        RaiseRequest(@"reminder_not_found",
+                     @"Reminder was not found",
+                     @"not_found",
+                     @{ @"reminder_id" : identifier });
+    }
+    EKReminder *reminder = (EKReminder *)item;
+    CheckExpectedLastModified(reminder, expectedLastModified);
+    NSDictionary *before = ReminderJSON(reminder);
+    NSDictionary *target = ReminderTarget(reminder);
+    NSError *error = nil;
+    if (![store removeReminder:reminder commit:YES error:&error]) {
+        return EventKitFailure(
+            operation,
+            error ?: [NSError errorWithDomain:EKErrorDomain code:EKErrorInternalFailure userInfo:nil]);
+    }
+
+    @try {
+        [store reset];
+        BOOL absent = [store calendarItemWithIdentifier:identifier] == nil;
+        NSDictionary *after = @{ @"id" : identifier, @"not_found" : @(absent) };
+        NSDictionary *verification = @{
+            @"state" : absent ? @"read_back" : @"pending",
+            @"store_no_longer_active" : @(absent),
+            @"write_performed" : @YES,
+            @"recently_deleted_ui_verified" : @NO,
+        };
+        NSDictionary *recovery = @{
+            @"semantics" : @"native_recently_deleted_expected",
+            @"plugin_backup" : @"not_created",
+            @"retry_policy" : @"read_before_retry",
+            @"recently_deleted_ui_verified" : @NO,
+        };
+        if (absent) {
+            return MutationReceipt(operation,
+                                   operationID,
+                                   @"verified",
+                                   target,
+                                   before,
+                                   after,
+                                   verification,
+                                   recovery,
+                                   nil,
+                                   nil);
+        }
+        return MutationReceipt(
+            operation,
+            operationID,
+            @"committed_verification_pending",
+            target,
+            before,
+            after,
+            verification,
+            recovery,
+            @[@{
+                @"code" : @"verification_pending",
+                @"message" : @"EventKit accepted the deletion but the reminder remains visible in read-back.",
+            }],
+            BridgeError(@"sync_pending",
+                        @"EventKit accepted the deletion but read-back is still pending",
+                        @"verification",
+                        YES,
+                        @{ @"reminder_id" : identifier }));
+    } @catch (NSException *exception) {
+        return MutationReceipt(
+            operation,
+            operationID,
+            @"committed_verification_pending",
+            target,
+            before,
+            @{ @"id" : identifier, @"read_back_pending" : @YES },
+            @{
+                @"state" : @"pending",
+                @"store_no_longer_active" : @NO,
+                @"write_performed" : @YES,
+                @"recently_deleted_ui_verified" : @NO,
+            },
+            @{
+                @"semantics" : @"native_recently_deleted_expected",
+                @"plugin_backup" : @"not_created",
+                @"retry_policy" : @"read_before_retry",
+                @"recently_deleted_ui_verified" : @NO,
+            },
+            @[@{
+                @"code" : @"post_commit_verification_exception",
+                @"message" : @"EventKit committed the deletion before read-back raised an exception.",
+            }],
+            BridgeError(@"sync_pending",
+                        @"EventKit committed the deletion but post-write verification failed",
                         @"verification",
                         YES,
                         @{ @"exception" : exception.name ?: @"NSException" }));
@@ -1417,7 +1529,7 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         ApplyMutableFields(reminder, request);
         NSDictionary *desired = ReminderJSON(reminder);
         NSMutableArray<NSString *> *keys = [NSMutableArray arrayWithObject:@"calendar_id"];
-        for (NSString *key in @[ @"title", @"notes", @"url", @"location", @"priority", @"due", @"alarms", @"recurrence_rules" ]) {
+        for (NSString *key in @[ @"title", @"notes", @"url", @"priority", @"due", @"alarms", @"recurrence_rules" ]) {
             if (request[key] != nil) {
                 [keys addObject:key];
             }
@@ -1429,6 +1541,12 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
                              nil,
                              ProjectionForKeys(desired, keys),
                              YES);
+    }
+    if ([operation isEqualToString:@"delete_reminder"]) {
+        return DeleteAndVerify(store,
+                               RequiredString(request, @"reminder_id"),
+                               request[@"expected_last_modified"],
+                               operation);
     }
     EKReminder *reminder = ReminderByIdentifier(store, RequiredString(request, @"reminder_id"));
     CheckExpectedLastModified(reminder, request[@"expected_last_modified"]);

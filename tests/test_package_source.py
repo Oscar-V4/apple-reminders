@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -135,6 +137,56 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(
             {member for member in members if member.startswith(prefix + "assets/")},
             {prefix + "assets/icon.png"},
+        )
+
+    def test_packaged_server_ignores_all_backend_overrides_even_in_test_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            archive = build_source_package.build_package(ROOT, base / "build")
+            with zipfile.ZipFile(archive) as handle:
+                handle.extractall(base / "extracted")
+            manifest = json.loads(
+                (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+            )
+            plugin_root = base / "extracted" / manifest["name"]
+            server = plugin_root / "mcp" / "server.py"
+            overrides = {
+                "APPLE_REMINDERS_ADAPTER_PATH": str(base / "outside-adapter.py"),
+                "APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH": str(base / "outside-eventkit.py"),
+                "APPLE_REMINDERS_DOCTOR_PATH": str(base / "outside-doctor.py"),
+                "APPLE_REMINDERS_MCP_TEST_MODE": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            probe = (
+                "import importlib.util,json,sys;"
+                "from pathlib import Path;"
+                "path=Path(sys.argv[1]);"
+                "spec=importlib.util.spec_from_file_location('packaged_server',path);"
+                "module=importlib.util.module_from_spec(spec);"
+                "sys.modules[spec.name]=module;"
+                "spec.loader.exec_module(module);"
+                "print(json.dumps([str(module.adapter_path()),"
+                "str(module.eventkit_bridge_path()),str(module.doctor_path())]))"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, str(server)],
+                cwd=plugin_root,
+                env={**os.environ, **overrides},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [
+                str((plugin_root / "scripts" / "reminders_adapter.py").resolve()),
+                str((plugin_root / "scripts" / "eventkit_bridge.py").resolve()),
+                str((plugin_root / "scripts" / "reminders_doctor.py").resolve()),
+            ],
         )
 
 

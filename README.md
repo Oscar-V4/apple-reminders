@@ -36,7 +36,7 @@ artifact and does not include private adapters.
 | EventKit helper | Public reminders access for supported fields | Requires macOS Reminders permission; runtime success is permission/account dependent |
 | AppleScript | Public app automation and native deletion fallback | May require Automation permission and an available Reminders app |
 | SQLite adapter | Sections, tags, URL attachments, bounded cache/audit/repair surfaces | Private schema; can break after a macOS update; writes must be schema-gated and verified |
-| ReminderKit helper | Native image-attachment path | Private framework; not an App Store API; mobile-sync evidence is not an iPhone-screen confirmation |
+| ReminderKit helpers | Native image-attachment and list-section save paths | Private framework; not an App Store API; CloudKit read-back is not an iPhone-screen confirmation |
 | Doctor | Content-free metadata, schema, permission-symptom, and toolchain checks | Does not prove write semantics, iCloud convergence, or device visibility |
 
 The MCP process can invoke tools that mutate reminders. Those changes may sync
@@ -122,10 +122,12 @@ is a prerequisite, not a guarantee that a future write is semantically safe.
 
 ### Data-free performance benchmark
 
-The repeatable benchmark measures cold MCP initialization/tool discovery,
-Python-only EventKit request validation, an isolated-home doctor run, source
-audit, and deterministic package build time. It reports median and p95 latency
-plus allowlisted source/archive bytes:
+The repeatable benchmark measures cold MCP initialization/tool discovery, the
+actual MCP-to-doctor route in an isolated home, Python-only EventKit request
+validation, fresh and cached EventKit helper builds, source audit, and
+deterministic package build time. It reports median and p95 latency, evaluates
+generous p95 regression budgets for the production startup paths, and records
+allowlisted source/archive bytes:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
@@ -133,9 +135,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
   --build-samples 5 --build-warmups 1 --output benchmark.json
 ```
 
-It does not load EventKit, request TCC access, open Reminders, or read reminder
-rows. Use `--plugin-root` to compare another clean checkout on the same machine.
-Timing results are advisory because host load varies; the deterministic release
+It compiles but never runs the EventKit helper, does not request TCC access, open
+Reminders, or read reminder rows. Use `--plugin-root` to compare another clean
+checkout on the same machine. A p95 budget failure exits with status 2; use
+`--no-enforce-performance-gates` only for an advisory diagnostic run. Timing
+is end-to-end subprocess wall time, including Python/process startup. It varies
+with host load and is not a cross-machine score; the deterministic release
 archive has a CI-tested 800,000-byte budget.
 
 ## Deterministic Source Package
@@ -146,6 +151,11 @@ license/privacy/readme files, and the adapter/native-helper sources required by
 those components. It intentionally excludes tests, contributor docs, GitHub
 workflows, the OpenMinis export, reverse-engineering screenshots, bytecode,
 databases, journals, caches, backups, and pre-existing archives.
+
+The packaged MCP always resolves its bundled adapter, EventKit bridge, and
+doctor. Backend path overrides work only in an explicit source-test mode while
+the source-only `tests/test_mcp_server.py` gate exists; release archives omit
+that gate and ignore all three overrides.
 
 Build and audit without contacting Reminders:
 
@@ -168,14 +178,19 @@ The MCP tool contract lives in `schemas/mcp-tools.json`; the adapter CLI is
 instead of relying on an old command list. Broadly, the implementation covers:
 
 - bounded account/list/section/reminder/tag and attachment reads;
-- exact-ID EventKit reminder create/update/complete/reopen/move operations and
-  exact-ID native deletion;
-- list creation by exact name with optional color and emblem, plus section and
-  tag operations;
+- exact-ID EventKit reminder create/update/complete/reopen/move/delete operations;
+- list creation by exact name with optional color and emblem, native ReminderKit
+  section creation/membership with CloudKit version read-back, plus tag operations;
 - first-class MCP tools for URL/image attachment, exact attachment replacement
   and deletion, and digest-bound preview/apply repair workflows where the
   current private-interface capability gate permits them;
 - local diagnostics, backup, cache, and privacy-log maintenance.
+
+Private existing-reminder mutations require a fresh `reminder_version` from
+`list_reminder_attachments` as `if_version`. `delete_reminder` is public
+EventKit instead: read the exact reminder first and pass its fresh
+`last_modified` as `expected_last_modified`. The adapter's DB delete remains a
+capability-gated diagnostic CLI path, not an MCP fallback.
 
 Unsupported, ambiguous, permission-blocked, schema-unknown, or
 verification-pending requests must be reported as such. The plugin must not

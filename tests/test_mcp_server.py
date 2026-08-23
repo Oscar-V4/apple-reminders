@@ -24,6 +24,7 @@ def run_server(
     eventkit_bridge_path: Path | None = None,
     doctor_path: Path | None = None,
     home_path: Path | None = None,
+    enable_test_backends: bool = True,
 ) -> list[dict[str, Any]]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -33,6 +34,10 @@ def run_server(
         env["APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH"] = str(eventkit_bridge_path)
     if doctor_path is not None:
         env["APPLE_REMINDERS_DOCTOR_PATH"] = str(doctor_path)
+    if enable_test_backends:
+        env["APPLE_REMINDERS_MCP_TEST_MODE"] = "1"
+    else:
+        env.pop("APPLE_REMINDERS_MCP_TEST_MODE", None)
     if home_path is not None:
         env["HOME"] = str(home_path)
     completed = subprocess.run(
@@ -182,7 +187,7 @@ elif operation == "fetch_reminders":
     }
 elif operation == "read_reminder":
     data = {"reminder": {"id": request["reminder_id"], "title": "Exact"}}
-elif operation in {"create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "move_reminder"}:
+elif operation in {"create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "move_reminder", "delete_reminder"}:
     payload = {
         "schema_version": 1,
         "operation": operation,
@@ -264,8 +269,22 @@ class McpPackagingTests(unittest.TestCase):
             )
 
         delete = by_name["delete_reminder"]
-        self.assertEqual(delete["inputSchema"]["required"], ["reminder_id"])
-        self.assertIn("if_version", delete["inputSchema"]["properties"])
+        self.assertEqual(
+            delete["inputSchema"]["required"],
+            ["reminder_id", "expected_last_modified"],
+        )
+        self.assertEqual(
+            delete["inputSchema"]["properties"]["expected_last_modified"]["type"],
+            "string",
+        )
+        delete_id = delete["inputSchema"]["properties"]["reminder_id"]
+        self.assertEqual(delete_id["type"], "string")
+        self.assertEqual(delete_id["minLength"], 1)
+        self.assertEqual(delete_id["maxLength"], 2048)
+        self.assertNotIn("pattern", delete_id)
+        self.assertIn("opaque", delete_id["description"])
+        self.assertNotIn("if_version", delete["inputSchema"]["properties"])
+        self.assertIn("EventKit", delete["description"])
         self.assertTrue(delete["annotations"]["destructiveHint"])
         self.assertNotIn("title", delete["inputSchema"]["properties"])
         self.assertNotIn("list_name", delete["inputSchema"]["properties"])
@@ -287,8 +306,21 @@ class McpPackagingTests(unittest.TestCase):
         self.assertNotIn("offset", fetch["inputSchema"]["properties"])
         self.assertIn("calendar_ids", fetch["inputSchema"]["properties"])
 
-        for name in ("attach_url_to_reminder", "delete_reminder_attachment"):
-            self.assertIn("if_version", by_name[name]["inputSchema"]["properties"])
+        guarded_private_mutations = {
+            "add_reminder_tag",
+            "remove_reminder_tag",
+            "move_reminder_to_section",
+            "attach_image_to_reminder",
+            "attach_url_to_reminder",
+            "delete_reminder_attachment",
+            "replace_reminder_attachment",
+        }
+        for name in guarded_private_mutations:
+            with self.subTest(name=name):
+                schema = by_name[name]["inputSchema"]
+                self.assertIn("if_version", schema["properties"])
+                self.assertIn("if_version", schema["required"])
+                self.assertIn("list_reminder_attachments", by_name[name]["description"])
 
         self.assertTrue(by_name["reminders_plugin_doctor"]["annotations"]["readOnlyHint"])
         self.assertTrue(by_name["get_reminders_capabilities"]["annotations"]["readOnlyHint"])
@@ -303,6 +335,10 @@ class McpPackagingTests(unittest.TestCase):
             ["calendar_id", "title", "idempotency_key"],
         )
         self.assertIn("recurrence_rules", create["inputSchema"]["properties"])
+        self.assertEqual(
+            create["inputSchema"]["properties"]["notes"]["maxLength"],
+            100_000,
+        )
         create_list = by_name["create_reminder_list"]
         self.assertIn("color", create_list["inputSchema"]["properties"])
         self.assertIn("emblem", create_list["inputSchema"]["properties"])
@@ -311,6 +347,12 @@ class McpPackagingTests(unittest.TestCase):
             update["inputSchema"]["required"],
             ["reminder_id", "expected_last_modified", "patch"],
         )
+        self.assertEqual(
+            update["inputSchema"]["properties"]["patch"]["properties"]["notes"][
+                "maxLength"
+            ],
+            100_000,
+        )
         attach_image = by_name["attach_image_to_reminder"]
         self.assertEqual(
             attach_image["inputSchema"]["required"],
@@ -318,6 +360,14 @@ class McpPackagingTests(unittest.TestCase):
         )
         self.assertNotIn("backend", attach_image["inputSchema"]["properties"])
         self.assertIn("list_reminder_attachments", attach_image["description"])
+        self.assertIn(
+            "fresh",
+            attach_image["inputSchema"]["properties"]["if_version"]["description"],
+        )
+        self.assertIn(
+            "private existing-item mutations",
+            by_name["list_reminder_attachments"]["description"],
+        )
         repair_apply = by_name["apply_reminder_attachment_repairs"]
         self.assertEqual(repair_apply["inputSchema"]["required"], ["candidate_digest"])
         self.assertFalse(repair_apply["inputSchema"]["properties"]["no_backup"]["default"])
@@ -325,9 +375,42 @@ class McpPackagingTests(unittest.TestCase):
             "list_reminder_attachments",
             by_name["replace_reminder_attachment"]["description"],
         )
+        self.assertIn(
+            "fresh",
+            by_name["replace_reminder_attachment"]["inputSchema"]["properties"][
+                "if_version"
+            ]["description"],
+        )
 
 
 class McpProtocolTests(unittest.TestCase):
+    def test_backend_path_override_is_inert_without_source_test_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            adapter = temp_root / "mock_adapter.py"
+            marker = adapter.with_suffix(".called")
+            mock_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_reminder_sections",
+                            "arguments": {"limit": 1},
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                home_path=temp_root / "isolated-home",
+                enable_test_backends=False,
+            )
+
+        self.assertFalse(marker.exists())
+        self.assertTrue(responses[1]["result"]["isError"])
+
     def test_notification_shaped_tool_call_cannot_execute_a_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             adapter = Path(tmp) / "mock_adapter.py"
@@ -568,10 +651,13 @@ class McpProtocolTests(unittest.TestCase):
         self.assertTrue(bridge_request["writable_only"])
         self.assertNotIn("limit", bridge_request)
 
-    def test_mock_delete_call_uses_only_exact_id_and_version(self) -> None:
+    def test_delete_call_uses_public_eventkit_with_exact_precondition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            adapter = Path(tmp) / "mock_adapter.py"
+            temp_root = Path(tmp)
+            adapter = temp_root / "mock_adapter.py"
             mock_adapter(adapter)
+            bridge = temp_root / "mock_eventkit.py"
+            mock_eventkit_bridge(bridge)
             responses = run_server(
                 [
                     initialize(),
@@ -581,18 +667,54 @@ class McpProtocolTests(unittest.TestCase):
                         "method": "tools/call",
                         "params": {
                             "name": "delete_reminder",
-                            "arguments": {"reminder_id": REMINDER_ID, "if_version": 7},
+                            "arguments": {
+                                "reminder_id": REMINDER_ID,
+                                "expected_last_modified": "2026-08-06T00:00:00Z",
+                            },
                         },
                     }
                 ],
                 adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+            )
+
+        result = responses[1]["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["structuredContent"]["backend"], "eventkit_public_sdk")
+        self.assertEqual(result["structuredContent"]["operation"], "delete_reminder")
+
+    def test_invalid_eventkit_transport_after_possible_delete_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = Path(tmp) / "invalid_eventkit.py"
+            bridge.write_text("print('not-json')\n", encoding="utf-8")
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "delete_reminder",
+                            "arguments": {
+                                "reminder_id": REMINDER_ID,
+                                "expected_last_modified": "2026-08-06T00:00:00Z",
+                            },
+                        },
+                    },
+                ],
+                eventkit_bridge_path=bridge,
             )
 
         result = responses[1]["result"]
         self.assertFalse(result["isError"])
         self.assertEqual(
-            result["structuredContent"]["argv"],
-            ["delete_reminder", "--id", REMINDER_ID, "--if-version", "7"],
+            result["structuredContent"]["status"],
+            "committed_verification_pending",
+        )
+        self.assertEqual(
+            result["structuredContent"]["error"]["code"],
+            "sync_pending",
         )
 
     def test_private_feature_concurrency_fields_reach_the_adapter(self) -> None:
@@ -766,12 +888,22 @@ class McpProtocolTests(unittest.TestCase):
                 },
                 "move_reminder",
             ),
+            (
+                "delete_reminder",
+                {
+                    "reminder_id": REMINDER_ID,
+                    "expected_last_modified": timestamp,
+                },
+                "delete_reminder",
+            ),
             ("create_reminder", create_arguments, "create_reminder"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)
             bridge = temp_root / "mock_eventkit.py"
             mock_eventkit_bridge(bridge)
+            adapter = temp_root / "forbidden_adapter.py"
+            adapter.write_text("raise SystemExit(99)\n", encoding="utf-8")
             messages = [initialize()]
             for request_id, (name, arguments, _) in enumerate(calls, start=2):
                 messages.append(
@@ -794,6 +926,7 @@ class McpProtocolTests(unittest.TestCase):
             )
             responses = run_server(
                 messages,
+                adapter_path=adapter,
                 eventkit_bridge_path=bridge,
                 home_path=temp_root / "home",
             )
@@ -805,7 +938,7 @@ class McpProtocolTests(unittest.TestCase):
 
         for response, (_, _, operation) in zip(responses[1:-1], calls, strict=True):
             result = response["result"]
-            self.assertFalse(result["isError"])
+            self.assertFalse(result["isError"], result)
             self.assertEqual(result["structuredContent"]["operation"], operation)
             self.assertEqual(result["structuredContent"]["backend"], "eventkit_public_sdk")
         first_create = responses[1]["result"]["structuredContent"]
@@ -819,7 +952,7 @@ class McpProtocolTests(unittest.TestCase):
             conflict["structuredContent"]["error"]["code"],
             "concurrent_modification",
         )
-        self.assertEqual(bridge_call_count, 5)
+        self.assertEqual(bridge_call_count, 6)
         self.assertEqual(
             [request["operation"] for request in bridge_requests],
             [
@@ -828,11 +961,57 @@ class McpProtocolTests(unittest.TestCase):
                 "complete_reminder",
                 "reopen_reminder",
                 "move_reminder",
+                "delete_reminder",
             ],
         )
         self.assertNotIn("idempotency_key", bridge_requests[0])
         self.assertEqual(bridge_requests[1]["patch"]["notes"], None)
         self.assertEqual(bridge_requests[4]["calendar_id"], "LIST-B")
+
+    def test_pending_eventkit_create_retry_replays_a_valid_receipt(self) -> None:
+        create_arguments = {
+            "calendar_id": "LIST-A",
+            "title": "Pending creation",
+            "idempotency_key": "eventkit:create:pending:2026",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "pending_eventkit.py"
+            bridge.write_text(
+                """import json
+import sys
+from pathlib import Path
+
+request = json.load(sys.stdin)
+marker = Path(__file__).with_suffix('.called')
+marker.write_text((marker.read_text() if marker.exists() else '') + 'called\\n')
+print('not-json')
+""",
+                encoding="utf-8",
+            )
+            call = {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": "create_reminder", "arguments": create_arguments},
+            }
+            responses = run_server(
+                [initialize(), {**call, "id": 2}, {**call, "id": 3}],
+                eventkit_bridge_path=bridge,
+                home_path=temp_root / "home",
+            )
+            bridge_call_count = len(
+                bridge.with_suffix(".called").read_text(encoding="utf-8").splitlines()
+            )
+
+        first = responses[1]["result"]
+        replay = responses[2]["result"]
+        self.assertFalse(first["isError"])
+        self.assertFalse(replay["isError"], replay)
+        self.assertEqual(first["structuredContent"]["after"], {})
+        self.assertEqual(replay["structuredContent"]["after"], {})
+        self.assertTrue(replay["structuredContent"]["replayed"])
+        self.assertEqual(replay["structuredContent"]["error"]["code"], "sync_pending")
+        self.assertEqual(bridge_call_count, 1)
 
     def test_mock_tag_cleanup_requires_digest_and_preserves_backup_default(self) -> None:
         digest = "a" * 64
@@ -1166,6 +1345,20 @@ class McpProtocolTests(unittest.TestCase):
                             "url": "https://example.com/image.png",
                             "if_version": 1,
                             "idempotency_key": "invalid:both",
+                        },
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "create_reminder",
+                        "arguments": {
+                            "calendar_id": "LIST-A",
+                            "title": "Malformed URL",
+                            "url": "http://[::1",
+                            "idempotency_key": "invalid:malformed-url",
                         },
                     },
                 },

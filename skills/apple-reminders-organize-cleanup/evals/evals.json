@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "생각 주머니 목록에서 실행 가능한 것만 이번 주 섹션으로 옮겨줘.",
-      "expected_output": "Reads the named list and sections first, identifies exact candidate reminder IDs, previews current and intended section membership, and applies move_reminder_to_section only after clear delegation or approval.",
+      "expected_output": "Reads the named list and sections first, identifies exact candidate reminder IDs, captures a fresh reminder_version, previews current and intended section membership, and applies move_reminder_to_section with that if_version only after clear delegation or approval.",
       "assertions": [
         "Does not treat section names as global.",
         "Verifies the affected list or reminders after moves."

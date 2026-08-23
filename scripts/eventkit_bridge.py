@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -40,6 +41,7 @@ INFO_PLIST_PATH = SCRIPT_DIR / "eventkit_bridge_info.plist"
 SCHEMA_PATH = SCRIPT_DIR / "eventkit_bridge_schema.json"
 DEFAULT_CACHE_ROOT = Path.home() / "Library/Caches/apple-reminders-codex/eventkit-bridge"
 MAX_REQUEST_BYTES = 1_000_000
+MAX_NOTES_CHARS = 100_000
 NATIVE_TIMEOUT_SECONDS = 45
 HELPER_BUNDLE_IDENTIFIER = "com.codex.apple-reminders.eventkit-bridge"
 
@@ -57,6 +59,7 @@ OPERATIONS = {
     "complete_reminder",
     "reopen_reminder",
     "move_reminder",
+    "delete_reminder",
 }
 
 MUTATION_OPERATIONS = {
@@ -65,6 +68,7 @@ MUTATION_OPERATIONS = {
     "complete_reminder",
     "reopen_reminder",
     "move_reminder",
+    "delete_reminder",
 }
 
 EXIT_CODES = {
@@ -148,6 +152,56 @@ def validation_error_response(
     )
 
 
+def mutation_outcome_unknown_response(
+    request: dict[str, Any],
+    *,
+    reason_code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    operation = request.get("operation")
+    if operation not in MUTATION_OPERATIONS:
+        raise ValueError("Only EventKit mutations can have an unknown commit outcome")
+    target = {
+        key: request[key]
+        for key in ("reminder_id", "calendar_id")
+        if isinstance(request.get(key), str)
+    }
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "operation": operation,
+        "status": "committed_verification_pending",
+        "ok": True,
+        "operation_id": str(uuid.uuid4()).upper(),
+        "backend": "eventkit_public_sdk",
+        "target": target,
+        "before": {},
+        "after": {},
+        "verification": {
+            "state": "pending",
+            "write_performed": None,
+            "reason_code": reason_code,
+        },
+        "recovery": {
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        },
+        "warnings": [
+            {
+                "code": "verification_pending",
+                "message": "The native process may have committed; read the target before retrying.",
+            }
+        ],
+        "error": {
+            "code": "sync_pending",
+            "reason_code": reason_code,
+            "message": message,
+            "details": details or {},
+        },
+    }
+    return payload
+
+
 def fail(
     code: str,
     message: str,
@@ -204,6 +258,17 @@ def normalized_string(
     return value
 
 
+def normalized_reminder_identifier(value: Any, path: str) -> str:
+    identifier = normalized_string(value, path, maximum=2_048)
+    if identifier.strip().lower().startswith("x-apple-reminder://"):
+        fail(
+            "invalid_identifier",
+            f"{path} must be the exact opaque ID returned by a reminder read, not a Reminders deep link",
+            details={"path": path, "expected": "opaque_reminder_id"},
+        )
+    return identifier
+
+
 def normalized_bool(value: Any, path: str) -> bool:
     if not isinstance(value, bool):
         fail("invalid_type", f"{path} must be a boolean", details={"path": path})
@@ -248,13 +313,13 @@ def parse_rfc3339(value: Any, path: str) -> tuple[str, datetime]:
         )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            fail("missing_utc_offset", f"{path} must include a UTC offset", details={"path": path})
+        canonical = parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+    except (OverflowError, ValueError):
         fail("invalid_rfc3339", f"{path} is not a valid timestamp", details={"path": path})
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        fail("missing_utc_offset", f"{path} must include a UTC offset", details={"path": path})
-    canonical = parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
     return canonical, parsed
 
 
@@ -273,7 +338,10 @@ def normalized_url(value: Any, path: str) -> str | None:
     if value is None:
         return None
     text = normalized_string(value, path, maximum=100_000)
-    parsed = urlparse(text)
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        fail("invalid_url", f"{path} must be a valid URL", details={"path": path})
     if not parsed.scheme:
         fail("invalid_url", f"{path} must include a URL scheme", details={"path": path})
     return text
@@ -310,7 +378,7 @@ def normalize_due(value: Any, path: str) -> dict[str, Any] | None:
         zone_name = normalized_string(due["time_zone"], f"{path}.time_zone")
         try:
             zone = ZoneInfo(zone_name)
-        except ZoneInfoNotFoundError:
+        except (ValueError, ZoneInfoNotFoundError):
             fail(
                 "invalid_time_zone",
                 f"{path}.time_zone must be a known IANA time-zone name",
@@ -598,7 +666,7 @@ def normalize_recurrence_rules(value: Any, path: str) -> list[dict[str, Any]] | 
     return [normalize_recurrence(item, f"{path}[{index}]") for index, item in enumerate(value)]
 
 
-PATCH_FIELDS = {"title", "notes", "url", "location", "priority", "due", "alarms", "recurrence_rules"}
+PATCH_FIELDS = {"title", "notes", "url", "priority", "due", "alarms", "recurrence_rules"}
 
 
 def normalize_mutable_fields(obj: dict[str, Any], *, path: str, create: bool) -> dict[str, Any]:
@@ -607,11 +675,11 @@ def normalize_mutable_fields(obj: dict[str, Any], *, path: str, create: bool) ->
         result["title"] = normalized_string(obj["title"], f"{path}.title", maximum=10_000)
     elif create:
         fail("missing_fields", f"{path} is missing required field: title", details={"path": path})
-    for key in ("notes", "location"):
+    for key in ("notes",):
         if key in obj:
             value = obj[key]
             result[key] = None if value is None else normalized_string(
-                value, f"{path}.{key}", allow_empty=True, maximum=1_000_000
+                value, f"{path}.{key}", allow_empty=True, maximum=MAX_NOTES_CHARS
             )
     if "url" in obj:
         result["url"] = normalized_url(obj["url"], f"{path}.url")
@@ -642,9 +710,13 @@ def normalize_mutable_fields(obj: dict[str, Any], *, path: str, create: bool) ->
     return result
 
 
-def normalize_expected_last_modified(value: Any, path: str) -> str | None:
+def normalize_expected_last_modified(value: Any, path: str) -> str:
     if value is None:
-        return None
+        fail(
+            "invalid_type",
+            f"{path} must be an RFC 3339 string",
+            details={"path": path},
+        )
     canonical, _ = parse_rfc3339(value, path)
     return canonical
 
@@ -686,7 +758,9 @@ def normalize_request(raw: Any) -> dict[str, Any]:
     if operation == "read_reminder":
         reject_unknown(request, COMMON | {"reminder_id"})
         require_fields(request, {"reminder_id"})
-        normalized["reminder_id"] = normalized_string(request["reminder_id"], "$.reminder_id")
+        normalized["reminder_id"] = normalized_reminder_identifier(
+            request["reminder_id"], "$.reminder_id"
+        )
         return normalized
     if operation == "fetch_reminders":
         allowed = COMMON | {
@@ -774,7 +848,9 @@ def normalize_request(raw: Any) -> dict[str, Any]:
     if operation == "update_reminder":
         reject_unknown(request, COMMON | {"reminder_id", "expected_last_modified", "patch"})
         require_fields(request, {"reminder_id", "expected_last_modified", "patch"})
-        normalized["reminder_id"] = normalized_string(request["reminder_id"], "$.reminder_id")
+        normalized["reminder_id"] = normalized_reminder_identifier(
+            request["reminder_id"], "$.reminder_id"
+        )
         normalized["expected_last_modified"] = normalize_expected_last_modified(
             request["expected_last_modified"], "$.expected_last_modified"
         )
@@ -787,7 +863,19 @@ def normalize_request(raw: Any) -> dict[str, Any]:
     if operation in {"complete_reminder", "reopen_reminder"}:
         reject_unknown(request, COMMON | {"reminder_id", "expected_last_modified"})
         require_fields(request, {"reminder_id", "expected_last_modified"})
-        normalized["reminder_id"] = normalized_string(request["reminder_id"], "$.reminder_id")
+        normalized["reminder_id"] = normalized_reminder_identifier(
+            request["reminder_id"], "$.reminder_id"
+        )
+        normalized["expected_last_modified"] = normalize_expected_last_modified(
+            request["expected_last_modified"], "$.expected_last_modified"
+        )
+        return normalized
+    if operation == "delete_reminder":
+        reject_unknown(request, COMMON | {"reminder_id", "expected_last_modified"})
+        require_fields(request, {"reminder_id", "expected_last_modified"})
+        normalized["reminder_id"] = normalized_reminder_identifier(
+            request["reminder_id"], "$.reminder_id"
+        )
         normalized["expected_last_modified"] = normalize_expected_last_modified(
             request["expected_last_modified"], "$.expected_last_modified"
         )
@@ -795,7 +883,9 @@ def normalize_request(raw: Any) -> dict[str, Any]:
     if operation == "move_reminder":
         reject_unknown(request, COMMON | {"reminder_id", "expected_last_modified", "calendar_id"})
         require_fields(request, {"reminder_id", "expected_last_modified", "calendar_id"})
-        normalized["reminder_id"] = normalized_string(request["reminder_id"], "$.reminder_id")
+        normalized["reminder_id"] = normalized_reminder_identifier(
+            request["reminder_id"], "$.reminder_id"
+        )
         normalized["calendar_id"] = normalized_string(request["calendar_id"], "$.calendar_id")
         normalized["expected_last_modified"] = normalize_expected_last_modified(
             request["expected_last_modified"], "$.expected_last_modified"
@@ -840,9 +930,16 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
     digest = helper_digest()
     build_dir = root / digest
     binary = build_dir / "reminders-eventkit"
-    if binary.is_file() and os.access(binary, os.X_OK) and not force:
-        return binary
+    if cache_root is None:
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.parent.chmod(0o700)
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
     build_dir.mkdir(parents=True, exist_ok=True)
+    build_dir.chmod(0o700)
+    if binary.is_file() and os.access(binary, os.X_OK) and not force:
+        binary.chmod(0o700)
+        return binary
     with tempfile.NamedTemporaryFile(prefix="reminders-eventkit-", dir=build_dir, delete=False) as temp:
         temporary_binary = Path(temp.name)
     temporary_binary.unlink(missing_ok=True)
@@ -910,7 +1007,7 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
         temporary_binary.unlink(missing_ok=True)
         diagnostics = (signing.stderr or signing.stdout).strip()
         raise RuntimeError(f"EventKit bridge ad-hoc signing failed: {diagnostics}")
-    temporary_binary.chmod(0o755)
+    temporary_binary.chmod(0o700)
     os.replace(temporary_binary, binary)
     return binary
 
@@ -962,8 +1059,34 @@ def invoke_native(
     cache_root: Path | None = None,
     timeout: int = NATIVE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    binary = build_helper(cache_root)
-    encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        binary = build_helper(cache_root)
+    except Exception as exc:
+        return response(
+            request["operation"],
+            "failed_no_mutation",
+            error={
+                "code": "unexpected_error",
+                "reason_code": "native_helper_build_failed",
+                "message": f"EventKit helper could not be prepared ({type(exc).__name__})",
+                "retryable": False,
+                "details": {},
+            },
+        )
+    try:
+        encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, UnicodeError, ValueError) as exc:
+        return response(
+            request["operation"],
+            "failed_no_mutation",
+            error={
+                "code": "unexpected_error",
+                "reason_code": "native_request_encoding_failed",
+                "message": f"EventKit request could not be encoded ({type(exc).__name__})",
+                "retryable": False,
+                "details": {},
+            },
+        )
     try:
         result = subprocess.run(
             [str(binary)],
@@ -974,6 +1097,13 @@ def invoke_native(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        if request["operation"] in MUTATION_OPERATIONS:
+            return mutation_outcome_unknown_response(
+                request,
+                reason_code="native_timeout",
+                message=f"EventKit operation exceeded {timeout} seconds",
+                details={"timeout_seconds": timeout},
+            )
         return response(
             request["operation"],
             "failed_no_mutation",
@@ -1002,6 +1132,13 @@ def invoke_native(
         return validate_response(decoded, request["operation"])
     except (UnicodeDecodeError, json.JSONDecodeError, RuntimeError) as exc:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        if request["operation"] in MUTATION_OPERATIONS:
+            return mutation_outcome_unknown_response(
+                request,
+                reason_code="invalid_native_response",
+                message=str(exc),
+                details={"exit_code": result.returncode, "stderr": stderr[-4000:]},
+            )
         return response(
             request["operation"],
             "failed_no_mutation",
@@ -1122,6 +1259,20 @@ def main(argv: list[str] | None = None) -> int:
         normalized = normalize_request(raw)
     except BridgeValidationError as exc:
         payload = validation_error_response(operation, exc)
+        emit(payload)
+        return EXIT_CODES[payload["status"]]
+    except Exception as exc:
+        payload = response(
+            operation,
+            "failed_no_mutation",
+            error={
+                "code": "unexpected_error",
+                "reason_code": "request_normalization_failed",
+                "message": f"Request normalization failed ({type(exc).__name__})",
+                "retryable": False,
+                "details": {},
+            },
+        )
         emit(payload)
         return EXIT_CODES[payload["status"]]
 

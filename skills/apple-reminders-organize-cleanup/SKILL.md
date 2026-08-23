@@ -22,11 +22,11 @@ Use this skill when the user's goal is to improve reminder structure or reduce c
 
 Read `../apple-reminders/references/adapter-cli.md` before invoking commands.
 
-- Use `create_reminder_section` for new sections after confirming the list.
-- Use `move_reminder_to_section` only within the same list. Use `move_reminder_to_list` for an EventKit list-to-list move; it requires the target `calendar_id` and fresh `expected_last_modified`.
+- Use `create_reminder_section` for new sections after confirming the list. It saves through ReminderKit and returns `verified` only after the section CloudKit version reaches iCloud; an older same-name local-only section is repaired in place.
+- Use `move_reminder_to_section` only within the same list and pass the fresh `reminder_version` from `list_reminder_attachments` as `if_version`. It saves through ReminderKit and verifies the list CloudKit version; calling it again with the same target repairs an older local-only membership. Use `move_reminder_to_list` for an EventKit list-to-list move; it requires the target `calendar_id` and fresh `expected_last_modified`.
 - Use `complete_reminder` for completion. Preserve notes, date, priority, flag, list, tags, URLs, and attachments.
-- Use `delete_reminder` by exact ID. Its default `backend=auto` selects DB soft-delete only with exact recovery/sync parity evidence; otherwise it uses native AppleScript. Never retry an uncertain native attempt through DB.
-- Use `add_reminder_tag` and `remove_reminder_tag` for tag assignment changes.
+- Use `delete_reminder` by exact ID with the fresh `last_modified` from the resolving public read. It uses EventKit, verifies local absence, and never retries through AppleScript or the private DB. Describe Recently Deleted as expected unless it was checked in the actual UI.
+- Use `add_reminder_tag` and `remove_reminder_tag` for tag assignment changes, passing the fresh `reminder_version` as `if_version`.
 - Unused-label cleanup intentionally hard-deletes only orphan label rows. First call `preview_unused_reminder_tags` with tag or literal prefix, account scope when available, and a limit. Apply with `cleanup_unused_reminder_tags` only when the preview is untruncated and its exact `candidate_digest` is unchanged; report backup and recovery semantics.
 
 ## Preview Format

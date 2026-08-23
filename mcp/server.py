@@ -52,8 +52,11 @@ TOOLS_SCHEMA_PATH = PLUGIN_ROOT / "schemas" / "mcp-tools.json"
 DEFAULT_ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 DEFAULT_EVENTKIT_BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
 DEFAULT_DOCTOR_PATH = PLUGIN_ROOT / "scripts" / "reminders_doctor.py"
+SOURCE_TEST_GATE = PLUGIN_ROOT / "tests" / "test_mcp_server.py"
+TEST_MODE_ENV = "APPLE_REMINDERS_MCP_TEST_MODE"
 
 ADAPTER_TIMEOUT_SECONDS = 45
+EVENTKIT_BRIDGE_TIMEOUT_SECONDS = 60
 MAX_ADAPTER_STDOUT_BYTES = 2_000_000
 MAX_EVENTKIT_REQUEST_BYTES = 1_000_000
 MAX_MCP_MESSAGE_BYTES = 2_000_000
@@ -112,10 +115,6 @@ ROUTES: dict[str, ToolRoute] = {
     "create_reminder_list": ToolRoute(
         command="create_list",
         options=(("name", "--name"), ("color", "--color"), ("emblem", "--emblem")),
-    ),
-    "delete_reminder": ToolRoute(
-        command="delete_reminder",
-        options=(("reminder_id", "--id"), ("if_version", "--if-version")),
     ),
     "show_reminder": ToolRoute(
         command="show_reminder",
@@ -241,6 +240,7 @@ EVENTKIT_MUTATION_ROUTES: dict[str, str] = {
     "complete_reminder": "complete_reminder",
     "reopen_reminder": "reopen_reminder",
     "move_reminder_to_list": "move_reminder",
+    "delete_reminder": "delete_reminder",
 }
 
 
@@ -472,7 +472,10 @@ def _validate_format(name: str, value: str, format_name: str) -> None:
             raise ToolInputError(f"{name} must include an explicit UTC offset or Z")
         return
     if format_name == "uri":
-        parsed = urllib.parse.urlparse(value)
+        try:
+            parsed = urllib.parse.urlparse(value)
+        except ValueError as exc:
+            raise ToolInputError(f"{name} must be a valid absolute URI") from exc
         if not parsed.scheme:
             raise ToolInputError(f"{name} must be an absolute URI with a scheme")
         if parsed.scheme in {"http", "https"} and not parsed.netloc:
@@ -659,19 +662,30 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _backend_path(default: Path, override_env: str) -> Path:
+    # Release archives intentionally omit tests/, so packaged runtime cannot
+    # redirect a reviewed backend through process environment. Source-level
+    # integration tests opt in explicitly and keep their substitutes local to
+    # the disposable test checkout.
+    if os.environ.get(TEST_MODE_ENV) != "1" or not SOURCE_TEST_GATE.is_file():
+        return default
+    configured = os.environ.get(override_env)
+    return Path(configured).expanduser().resolve() if configured else default
+
+
 def adapter_path() -> Path:
-    configured = os.environ.get("APPLE_REMINDERS_ADAPTER_PATH")
-    return Path(configured).expanduser().resolve() if configured else DEFAULT_ADAPTER_PATH
+    return _backend_path(DEFAULT_ADAPTER_PATH, "APPLE_REMINDERS_ADAPTER_PATH")
 
 
 def eventkit_bridge_path() -> Path:
-    configured = os.environ.get("APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH")
-    return Path(configured).expanduser().resolve() if configured else DEFAULT_EVENTKIT_BRIDGE_PATH
+    return _backend_path(
+        DEFAULT_EVENTKIT_BRIDGE_PATH,
+        "APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH",
+    )
 
 
 def doctor_path() -> Path:
-    configured = os.environ.get("APPLE_REMINDERS_DOCTOR_PATH")
-    return Path(configured).expanduser().resolve() if configured else DEFAULT_DOCTOR_PATH
+    return _backend_path(DEFAULT_DOCTOR_PATH, "APPLE_REMINDERS_DOCTOR_PATH")
 
 
 def _load_local_module(name: str, path: Path) -> Any:
@@ -955,6 +969,19 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             decode_eventkit_cursor(cursor, arguments) if cursor is not None else 0
         )
     request = {"schema_version": 1, "operation": operation, **bridge_arguments}
+
+    def transport_failure(
+        *, code: str, message: str, details: dict[str, Any] | None = None
+    ) -> tuple[dict[str, Any], bool]:
+        if operation in EVENTKIT_MUTATION_ROUTES.values():
+            payload = bundled_eventkit_bridge_module().mutation_outcome_unknown_response(
+                request,
+                reason_code=code,
+                message=message,
+                details=details,
+            )
+            return payload, False
+        return {"ok": False, "error": {"code": code, "message": message}}, True
     encoded_request = json.dumps(request, ensure_ascii=False)
     if len(encoded_request.encode("utf-8")) > MAX_EVENTKIT_REQUEST_BYTES:
         return (
@@ -975,19 +1002,14 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=ADAPTER_TIMEOUT_SECONDS,
+            timeout=EVENTKIT_BRIDGE_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "eventkit_bridge_timeout",
-                    "message": "The EventKit bridge timed out before returning a result.",
-                },
-            },
-            True,
+        return transport_failure(
+            code="eventkit_bridge_timeout",
+            message="The EventKit bridge timed out before returning a result.",
+            details={"timeout_seconds": EVENTKIT_BRIDGE_TIMEOUT_SECONDS},
         )
     except OSError as exc:
         return (
@@ -1003,53 +1025,32 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
 
     stdout = completed.stdout.strip()
     if len(stdout.encode("utf-8", errors="replace")) > MAX_ADAPTER_STDOUT_BYTES:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "eventkit_bridge_output_too_large",
-                    "message": "The EventKit bridge result exceeded the MCP output bound.",
-                },
-            },
-            True,
+        return transport_failure(
+            code="eventkit_bridge_output_too_large",
+            message="The EventKit bridge result exceeded the MCP output bound.",
+            details={"exit_code": completed.returncode},
         )
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "invalid_eventkit_bridge_response",
-                    "message": "The EventKit bridge returned an invalid JSON response.",
-                    "exit_code": completed.returncode,
-                },
-            },
-            True,
+        return transport_failure(
+            code="invalid_eventkit_bridge_response",
+            message="The EventKit bridge returned an invalid JSON response.",
+            details={"exit_code": completed.returncode},
         )
     if not isinstance(payload, dict):
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "invalid_eventkit_bridge_response",
-                    "message": "The EventKit bridge response must be a JSON object.",
-                },
-            },
-            True,
+        return transport_failure(
+            code="invalid_eventkit_bridge_response",
+            message="The EventKit bridge response must be a JSON object.",
+            details={"exit_code": completed.returncode},
         )
     try:
         bundled_eventkit_bridge_module().validate_response(payload, operation)
     except RuntimeError as exc:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "invalid_eventkit_bridge_response",
-                    "message": str(exc),
-                },
-            },
-            True,
+        return transport_failure(
+            code="invalid_eventkit_bridge_response",
+            message=str(exc),
+            details={"exit_code": completed.returncode},
         )
     is_error = payload.get("ok") is not True
     return payload, is_error
@@ -1117,22 +1118,20 @@ def invoke_eventkit_mutation(
                 callback=execute_once,
             )
             if payload.get("replayed") is True and payload.get("status") == "committed_verification_pending":
-                payload.setdefault(
-                    "warnings",
-                    [
-                        {
-                            "code": "sync_pending",
-                            "message": "This replayed creation receipt is still awaiting verification.",
-                        }
-                    ],
-                )
-                payload.setdefault(
-                    "error",
+                payload["warnings"] = [
                     {
                         "code": "sync_pending",
-                        "message": "The original creation committed but verification remains pending.",
-                    },
+                        "message": "This replayed creation receipt is still awaiting verification.",
+                    }
+                ]
+                pending_error = payload.get("error")
+                if not isinstance(pending_error, dict):
+                    pending_error = {}
+                pending_error["code"] = "sync_pending"
+                pending_error["message"] = (
+                    "The original creation committed but verification remains pending."
                 )
+                payload["error"] = pending_error
         else:
             payload = execute_once()
     except EventKitBridgeFailure as exc:

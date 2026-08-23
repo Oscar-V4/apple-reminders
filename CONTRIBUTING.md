@@ -38,6 +38,11 @@ CI must use synthetic fixtures and static validation. Do not add a CI step that
 opens a user's Reminders database, launches Reminders, prompts for permission,
 loads a private framework, or performs a write.
 
+Mock backend substitution is source-test-only: set
+`APPLE_REMINDERS_MCP_TEST_MODE=1` only in tests while
+`tests/test_mcp_server.py` exists. Packaged runtime intentionally ignores
+adapter, EventKit bridge, and doctor path overrides.
+
 ## Plugin and MCP Contract
 
 - Keep `.codex-plugin/plugin.json` name aligned with the plugin directory and
@@ -72,12 +77,17 @@ must continue to pass `scripts/validate_minis_export.py`.
 - Preserve fields the user did not ask to change.
 - Keep destructive/bulk operations previewable, bounded, and recoverable where
   possible.
-- Prefer EventKit or AppleScript for fields those public paths support.
-- Gate private SQLite writes on explicit schema requirements, transactions,
-  read-back, and truthful recovery semantics.
+- Prefer EventKit for fields and deletion that its public API supports; keep AppleScript for narrow compatibility/UI handoff cases.
+- Gate private SQLite writes on explicit schema requirements, a fresh matching
+  reminder version for existing-item mutations, transactions, read-back, and
+  truthful recovery semantics. The MCP delete path stays in EventKit; the adapter's DB delete is diagnostic-only and remains version/capability gated.
 - Treat ReminderKit and private store behavior as version-sensitive. Never turn
   a failed private path into an unreported fallback.
-- Do not hard-delete Reminders database rows.
+- Never hard-delete reminder rows. A URL attachment object row may be removed
+  only under the documented native-parity contract: exact private-schema gate,
+  fresh reminder version, one transaction, retained-and-bumped cloud-state
+  tombstone, and read-back. Unused-label cleanup is the separate digest-gated
+  maintenance exception documented in ADR 0009.
 - Never infer success from process exit status alone.
 - `verified` must name its evidence. Do not translate local/CloudKit evidence
   into “confirmed on iPhone” or guaranteed iCloud/shared-list delivery.

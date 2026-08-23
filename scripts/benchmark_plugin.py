@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Benchmark data-free Apple Reminders plugin startup and packaging paths.
 
-The benchmark never loads EventKit, requests TCC access, opens the Reminders
-application, or reads reminder rows.  Doctor runs use an isolated temporary
-HOME, and EventKit requests stop after Python-side validation.
+The benchmark never runs the native helper or calls EventKit APIs, requests TCC
+access, opens the Reminders application, or reads reminder rows. Doctor runs use
+the real MCP route with an isolated temporary HOME. On macOS, EventKit helper
+tests compile but never execute the helper; request tests stop after Python-side
+validation.
 """
 
 from __future__ import annotations
@@ -26,6 +28,18 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+P95_BUDGETS_MS = {
+    "mcp_initialize_tools_list": 300.0,
+    "mcp_doctor_route": 1_500.0,
+    "eventkit_helper_build_fresh": 2_500.0,
+    "eventkit_helper_build_cached": 350.0,
+}
+BENCHMARK_ENV_DENYLIST = {
+    "APPLE_REMINDERS_MCP_TEST_MODE",
+    "APPLE_REMINDERS_ADAPTER_PATH",
+    "APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH",
+    "APPLE_REMINDERS_DOCTOR_PATH",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +49,7 @@ class CommandCase:
     stdin: str = ""
     allowed_returncodes: tuple[int, ...] = (0,)
     environment: dict[str, str] | None = None
+    output_contract: str | None = None
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -44,13 +59,57 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def summarize(samples_ms: list[float]) -> dict[str, Any]:
+    median_ms = statistics.median(samples_ms)
     return {
         "samples": len(samples_ms),
         "min_ms": round(min(samples_ms), 3),
-        "median_ms": round(statistics.median(samples_ms), 3),
+        "median_ms": round(median_ms, 3),
         "mean_ms": round(statistics.fmean(samples_ms), 3),
+        "stdev_ms": round(statistics.stdev(samples_ms), 3) if len(samples_ms) > 1 else 0.0,
+        "mad_ms": round(statistics.median(abs(value - median_ms) for value in samples_ms), 3),
         "p95_ms": round(percentile(samples_ms, 0.95), 3),
         "max_ms": round(max(samples_ms), 3),
+    }
+
+
+def evaluate_performance_gates(
+    measurements: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    cases: dict[str, dict[str, Any]] = {}
+    passed = True
+    complete = True
+    for name, budget_ms in P95_BUDGETS_MS.items():
+        measurement = measurements.get(name, {})
+        if measurement.get("status") == "skipped":
+            cases[name] = {
+                "status": "skipped",
+                "reason": measurement.get("reason", "unsupported"),
+                "budget_ms": budget_ms,
+            }
+            complete = False
+            passed = False
+            continue
+        actual_ms = measurement.get("p95_ms")
+        if not isinstance(actual_ms, (int, float)) or isinstance(actual_ms, bool):
+            cases[name] = {
+                "status": "invalid",
+                "budget_ms": budget_ms,
+            }
+            complete = False
+            passed = False
+            continue
+        case_passed = actual_ms <= budget_ms
+        cases[name] = {
+            "status": "passed" if case_passed else "failed",
+            "actual_ms": actual_ms,
+            "budget_ms": budget_ms,
+        }
+        passed = passed and case_passed
+    return {
+        "metric": "p95_ms",
+        "complete": complete,
+        "passed": passed,
+        "cases": cases,
     }
 
 
@@ -59,6 +118,8 @@ def run_command(case: CommandCase, *, root: Path = ROOT) -> None:
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if case.environment:
         environment.update(case.environment)
+    for name in BENCHMARK_ENV_DENYLIST:
+        environment.pop(name, None)
     completed = subprocess.run(
         case.command,
         cwd=root,
@@ -74,6 +135,39 @@ def run_command(case: CommandCase, *, root: Path = ROOT) -> None:
         raise RuntimeError(
             f"{case.name} exited {completed.returncode}: {completed.stderr.strip()}"
         )
+    if case.output_contract == "mcp_success":
+        try:
+            responses = [
+                json.loads(line)
+                for line in completed.stdout.splitlines()
+                if line.strip()
+            ]
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{case.name} emitted invalid MCP JSON") from exc
+        if not responses:
+            raise RuntimeError(f"{case.name} emitted no MCP responses")
+        for response in responses:
+            if not isinstance(response, dict) or "error" in response:
+                raise RuntimeError(f"{case.name} reported an MCP error")
+            result = response.get("result")
+            if not isinstance(result, dict) or result.get("isError") is True:
+                raise RuntimeError(f"{case.name} reported an MCP error")
+        requests = [
+            json.loads(line)
+            for line in case.stdin.splitlines()
+            if line.strip()
+        ]
+        expected_ids = [request["id"] for request in requests if "id" in request]
+        response_ids = [response.get("id") for response in responses]
+        if len(response_ids) != len(expected_ids) or set(response_ids) != set(expected_ids):
+            raise RuntimeError(f"{case.name} MCP response IDs did not match requests")
+    elif case.output_contract == "json_ok":
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{case.name} emitted invalid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise RuntimeError(f"{case.name} did not report ok=true")
 
 
 def benchmark_action(
@@ -154,6 +248,7 @@ def package_snapshot(root: Path = ROOT) -> dict[str, Any]:
 
 def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
     root = args.plugin_root.expanduser().resolve()
+    system = platform.system()
     if not (root / ".codex-plugin" / "plugin.json").is_file():
         raise RuntimeError(f"plugin root is missing its manifest: {root}")
     initialize = {
@@ -168,6 +263,13 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
     }
     tools_list = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     mcp_stdin = json.dumps(initialize) + "\n" + json.dumps(tools_list) + "\n"
+    doctor_call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "reminders_plugin_doctor", "arguments": {}},
+    }
+    doctor_stdin = json.dumps(initialize) + "\n" + json.dumps(doctor_call) + "\n"
     eventkit_stdin = json.dumps(
         {
             "schema_version": 1,
@@ -186,28 +288,31 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
 
-    with tempfile.TemporaryDirectory(prefix="apple-reminders-benchmark-home-") as home:
+    with (
+        tempfile.TemporaryDirectory(prefix="apple-reminders-benchmark-home-") as home,
+        tempfile.TemporaryDirectory(
+            prefix="apple-reminders-benchmark-eventkit-cache-"
+        ) as eventkit_cache,
+    ):
         cases = [
             CommandCase(
                 "mcp_initialize_tools_list",
                 (PYTHON, str(root / "mcp" / "server.py")),
                 stdin=mcp_stdin,
+                output_contract="mcp_success",
             ),
             CommandCase(
                 "eventkit_validate_create",
                 (PYTHON, str(root / "scripts" / "eventkit_bridge.py"), "--validate-only"),
                 stdin=eventkit_stdin,
+                output_contract="json_ok",
             ),
             CommandCase(
-                "doctor_isolated_home",
-                (
-                    PYTHON,
-                    str(root / "scripts" / "reminders_doctor.py"),
-                    "--skip-helper-syntax-check",
-                    "--compact",
-                ),
-                allowed_returncodes=(0, 1),
+                "mcp_doctor_route",
+                (PYTHON, str(root / "mcp" / "server.py")),
+                stdin=doctor_stdin,
                 environment={"HOME": home},
+                output_contract="mcp_success",
             ),
             CommandCase(
                 "source_package_audit",
@@ -217,6 +322,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
                     str(root),
                     "--json",
                 ),
+                output_contract="json_ok",
             ),
         ]
         measurements = {
@@ -227,6 +333,48 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
             )
             for case in cases
         }
+        eventkit_build_cases = (
+            CommandCase(
+                "eventkit_helper_build_fresh",
+                (
+                    PYTHON,
+                    str(root / "scripts" / "eventkit_bridge.py"),
+                    "--build-only",
+                    "--cache-dir",
+                    eventkit_cache,
+                    "--force-build",
+                ),
+                output_contract="json_ok",
+            ),
+            CommandCase(
+                "eventkit_helper_build_cached",
+                (
+                    PYTHON,
+                    str(root / "scripts" / "eventkit_bridge.py"),
+                    "--build-only",
+                    "--cache-dir",
+                    eventkit_cache,
+                ),
+                output_contract="json_ok",
+            ),
+        )
+        if system == "Darwin":
+            measurements.update(
+                {
+                    case.name: benchmark_action(
+                        lambda selected=case: run_command(selected, root=root),
+                        warmups=args.build_warmups,
+                        samples=args.build_samples,
+                    )
+                    for case in eventkit_build_cases
+                }
+            )
+        else:
+            for case in eventkit_build_cases:
+                measurements[case.name] = {
+                    "status": "skipped",
+                    "reason": "requires_macos",
+                }
 
     def build_once() -> None:
         with tempfile.TemporaryDirectory(prefix="apple-reminders-benchmark-build-") as output:
@@ -249,6 +397,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
         warmups=args.build_warmups,
         samples=args.build_samples,
     )
+    performance_gates = evaluate_performance_gates(measurements)
     return {
         "schema_version": 1,
         "label": args.label,
@@ -259,18 +408,33 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
             "dirty": bool(git_value("status", "--porcelain", root=root)),
         },
         "platform": {
-            "system": platform.system(),
+            "system": system,
             "release": platform.release(),
             "machine": platform.machine(),
             "python": platform.python_version(),
         },
+        "measurement_semantics": {
+            "timing": "end_to_end_subprocess_wall_clock",
+            "process_startup_included": True,
+            "host_load_controlled": False,
+            "cross_machine_comparable": False,
+            "doctor_home_state": "isolated_empty_temporary_home",
+        },
         "safety": {
             "isolated_home": True,
+            "doctor_isolated_home": True,
+            "doctor_via_mcp_route": True,
+            "eventkit_validation_only": True,
+            "eventkit_helper_compiled": system == "Darwin",
+            "eventkit_live_invocation": False,
             "eventkit_loaded": False,
+            "eventkit_api_called": False,
+            "native_helper_executed": False,
             "tcc_requested": False,
             "reminder_rows_read": False,
         },
         "package": package_snapshot(root),
+        "performance_gates": performance_gates,
         "measurements": measurements,
     }
 
@@ -288,6 +452,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--build-samples", type=int, default=5)
     parser.add_argument("--build-warmups", type=int, default=1)
+    parser.add_argument(
+        "--no-enforce-performance-gates",
+        action="store_true",
+        help="Report p95 budget failures without returning exit status 2",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if min(args.samples, args.build_samples) < 1 or min(args.warmups, args.build_warmups) < 0:
@@ -303,6 +472,15 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"benchmark failed: {exc}\n")
         return 1
     sys.stdout.write(rendered)
+    gates = payload.get("performance_gates", {})
+    if not args.no_enforce_performance_gates and gates.get("passed") is False:
+        failed = [
+            name
+            for name, result in gates.get("cases", {}).items()
+            if result.get("status") in {"failed", "invalid"}
+        ]
+        sys.stderr.write(f"benchmark performance gate failed: {', '.join(failed)}\n")
+        return 2
     return 0
 
 

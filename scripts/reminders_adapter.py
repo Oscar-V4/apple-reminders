@@ -64,6 +64,7 @@ URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
 SUBPROCESS_TIMEOUT_SECONDS = 30
 ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 6
+SECTION_SYNC_VERIFY_TIMEOUT_SECONDS = 10
 JOURNAL_MAX_BYTES = 1_000_000
 JOURNAL_RETENTION_DAYS = 30
 IDEMPOTENCY_RETENTION_DAYS = 30
@@ -73,6 +74,28 @@ RESULT_STATUSES = set(RESULT_RECEIPT_STATUSES)
 ERROR_CODES = set(STABLE_ERROR_CODES)
 REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
 COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("runtime")
+MUTATION_COMMANDS = frozenset(
+    {
+        "purge_logs",
+        "cleanup_tags",
+        "create_list",
+        "create_reminder",
+        "update_reminder",
+        "complete_reminder",
+        "reopen_reminder",
+        "delete_reminder",
+        "show_reminder",
+        "add_tag",
+        "remove_tag",
+        "create_section",
+        "move_to_section",
+        "attach_image",
+        "attach_url",
+        "repair_attachments",
+        "delete_attachment",
+        "replace_attachment",
+    }
+)
 
 
 class AdapterError(RuntimeError):
@@ -145,6 +168,39 @@ def operation_receipt(
         recovery=recovery,
         warnings=warnings,
         **extra,
+    )
+
+
+def command_failure_receipt(
+    args: argparse.Namespace,
+    message: str,
+    *,
+    code: str,
+    status: str,
+    **details: Any,
+) -> dict[str, Any]:
+    target = {
+        name: value
+        for name in ("id", "list_id", "section_id", "attachment_id")
+        if (value := getattr(args, name, None)) is not None
+    }
+    mutation_not_performed = status == "failed_no_mutation"
+    return operation_receipt(
+        status=status,
+        operation=args.command,
+        backend="adapter_boundary",
+        target=target,
+        after={},
+        verification={
+            "state": "not_performed" if mutation_not_performed else "manual_repair_required",
+            "write_performed": False if mutation_not_performed else None,
+        },
+        recovery={
+            "semantics": "not_applicable"
+            if mutation_not_performed
+            else "manual_inspection_required"
+        },
+        error={"code": code, "message": message, **details},
     )
 
 
@@ -698,7 +754,12 @@ def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
                 result[str(item_key)] = idempotency_result_snapshot(item, key=str(item_key))
             elif isinstance(item, (dict, list, tuple)):
                 nested = idempotency_result_snapshot(item, key=str(item_key))
-                if nested not in ({}, []):
+                preserve_empty_receipt_object = (
+                    isinstance(item, dict)
+                    and normalized
+                    in {"target", "before", "after", "verification", "recovery"}
+                )
+                if nested not in ({}, []) or preserve_empty_receipt_object:
                     result[str(item_key)] = nested
         return result
     if isinstance(value, (list, tuple)):
@@ -1089,8 +1150,22 @@ def reminder_mutation_snapshot(reminder: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def require_reminder_version(reminder: dict[str, Any], expected: int | None) -> None:
-    if expected is not None and reminder.get("Z_OPT") != expected:
+def require_reminder_version(
+    reminder: dict[str, Any],
+    expected: int | None,
+    *,
+    required: bool = False,
+) -> None:
+    if expected is None:
+        if required:
+            raise AdapterError(
+                "A fresh reminder version is required for this private-store mutation",
+                code="invalid_input",
+                required_field="if_version",
+                current_version=reminder.get("Z_OPT"),
+            )
+        return
+    if reminder.get("Z_OPT") != expected:
         raise AdapterError(
             "Reminder changed since it was read",
             code="concurrent_modification",
@@ -1474,7 +1549,7 @@ def image_attachment_audit_items(
     rows = con.execute(
         f"""
         select r.Z_PK as reminder_pk,r.ZCKIDENTIFIER as reminder_id,r.ZTITLE as reminder_title,
-               r.ZACCOUNT as reminder_account,l.ZNAME as list_name,
+               r.ZACCOUNT as reminder_account,r.Z_OPT as reminder_version,l.ZNAME as list_name,
                o.Z_PK,o.Z_ENT,o.ZCKIDENTIFIER,o.ZCKCLOUDSTATE,o.ZREMINDER2,o.Z_FOK_REMINDER1,
                o.ZFILENAME,o.ZSHA512SUM,o.ZUTI,o.ZFILESIZE,o.ZWIDTH,o.ZHEIGHT,o.ZURL,o.ZHOSTURL,
                o.ZMARKEDFORDELETION,
@@ -1507,6 +1582,7 @@ def image_attachment_audit_items(
                     "title": row["reminder_title"],
                     "list": row["list_name"],
                     "account": row["reminder_account"],
+                    "version": row["reminder_version"],
                 },
                 "attachment": attachment,
                 "problem": (
@@ -1726,6 +1802,116 @@ def reminderkit_attach_helper() -> Path:
     return helper
 
 
+def reminderkit_sections_helper() -> Path:
+    source = Path(__file__).resolve().with_name("remkit_sections.m")
+    if not source.exists():
+        raise AdapterError(f"ReminderKit section helper source not found: {source.name}")
+    helper = CACHE_DIR / "remkit_sections"
+    ensure_private_dir(CACHE_DIR)
+    lock_path = CACHE_DIR / "remkit_sections.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        needs_build = (
+            not helper.exists()
+            or not os.access(helper, os.X_OK)
+            or source.stat().st_mtime > helper.stat().st_mtime
+        )
+        if not needs_build:
+            return helper
+        clang = shutil.which("clang")
+        if not clang:
+            raise AdapterError("clang is required to build the ReminderKit section helper")
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=".remkit_sections.",
+            dir=CACHE_DIR,
+            delete=False,
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            try:
+                proc = subprocess.run(
+                    [
+                        clang,
+                        "-x",
+                        "objective-c",
+                        "-fobjc-arc",
+                        "-framework",
+                        "Foundation",
+                        "-framework",
+                        "AppKit",
+                        "-o",
+                        str(temp_path),
+                        str(source),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("ReminderKit section helper build timed out") from exc
+            if proc.returncode != 0:
+                raise AdapterError(
+                    (proc.stderr or proc.stdout).strip()
+                    or "Failed to build ReminderKit section helper"
+                )
+            temp_path.chmod(0o700)
+            os.replace(temp_path, helper)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return helper
+
+
+def invoke_reminderkit_section(operation: str, *arguments: str) -> dict[str, Any]:
+    helper = reminderkit_sections_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), operation, *arguments],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit section operation timed out",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            operation=operation,
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit section helper returned invalid JSON",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_output_present=bool(raw or proc.stderr.strip()),
+            operation=operation,
+        ) from exc
+    if proc.returncode != 0 or not payload.get("ok"):
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = payload.get("error") or "ReminderKit section operation failed"
+        if detail:
+            message = f"{message}: {detail}"
+        mutation_attempted = bool(payload.get("mutation_attempted"))
+        raise AdapterError(
+            message,
+            code="sync_pending" if mutation_attempted else "unexpected_error",
+            partial_failure=mutation_attempted,
+            mutation_outcome_unknown=mutation_attempted,
+            operation=operation,
+        )
+    return payload
+
+
 def attach_image_reminderkit_record(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
@@ -1937,10 +2123,10 @@ def update_primary_key(con: sqlite3.Connection, ent: int, new_max: int) -> None:
     con.execute("update Z_PRIMARYKEY set Z_MAX=max(Z_MAX, ?) where Z_ENT=?", (new_max, ent))
 
 
-def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) -> None:
+def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) -> bool:
     if cloud_pk is None:
-        return
-    con.execute(
+        return False
+    result = con.execute(
         """
         update ZREMCKCLOUDSTATE
         set Z_OPT=coalesce(Z_OPT,0)+1,
@@ -1950,6 +2136,76 @@ def bump_cloud_state(con: sqlite3.Connection, cloud_pk: int | None, now: float) 
         """,
         (now, cloud_pk),
     )
+    return result.rowcount == 1
+
+
+def cloud_sync_evidence(
+    con: sqlite3.Connection,
+    *,
+    table: str,
+    identifier: str,
+) -> dict[str, Any]:
+    if table not in {"ZREMCDBASELIST", "ZREMCDBASESECTION"}:
+        raise ValueError(f"Unsupported CloudKit owner table: {table}")
+    row = con.execute(
+        f"""
+        select cs.ZCURRENTLOCALVERSION as current_local_version,
+               cs.ZLATESTVERSIONSYNCEDTOCLOUD as latest_synced_version,
+               cs.ZINCLOUD as in_cloud
+        from {table} owner
+        left join ZREMCKCLOUDSTATE cs on cs.Z_PK=owner.ZCKCLOUDSTATE
+        where upper(owner.ZCKIDENTIFIER)=?
+        """,
+        (normalize_uuid(identifier),),
+    ).fetchone()
+    if not row:
+        return {
+            "object_found": False,
+            "in_cloud": None,
+            "current_local_version": None,
+            "latest_synced_version": None,
+            "icloud_sync_verified": False,
+        }
+    current = row["current_local_version"]
+    synced = row["latest_synced_version"]
+    in_cloud = row["in_cloud"]
+    verified = (
+        in_cloud == 1
+        and current is not None
+        and synced is not None
+        and int(synced) >= int(current)
+    )
+    return {
+        "object_found": True,
+        "in_cloud": in_cloud,
+        "current_local_version": current,
+        "latest_synced_version": synced,
+        "icloud_sync_verified": verified,
+    }
+
+
+def wait_for_cloud_sync(
+    db: Path,
+    *,
+    table: str,
+    identifier: str,
+    timeout: float = SECTION_SYNC_VERIFY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    evidence: dict[str, Any] = {}
+    while True:
+        fresh = connect(db)
+        try:
+            evidence = cloud_sync_evidence(
+                fresh,
+                table=table,
+                identifier=identifier,
+            )
+        finally:
+            fresh.close()
+        if evidence.get("icloud_sync_verified") is True or time.time() >= deadline:
+            return evidence
+        time.sleep(0.25)
 
 
 def update_list_order(con: sqlite3.Connection, list_row: dict[str, Any], reminder_id: str, add: bool, now: float) -> None:
@@ -2752,7 +3008,11 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
         capability = require_command_capability(con, "tag_assignment_db")
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before = reminder_mutation_snapshot(reminder)
         now = core_now()
         account_id = account_identifier(con, reminder.get("ZACCOUNT"))
@@ -2890,7 +3150,11 @@ def cmd_remove_tag(args: argparse.Namespace) -> int:
         capability = require_command_capability(con, "tag_assignment_db")
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before = reminder_mutation_snapshot(reminder)
         label = find_tag_label(con, tag, account_id=account_identifier(con, reminder.get("ZACCOUNT")))
         if not label:
@@ -3776,7 +4040,7 @@ def cmd_update_reminder(args: argparse.Namespace) -> int:
             capability = require_command_capability(con, "update_reminder_db")
             con.execute("begin immediate")
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-            require_reminder_version(reminder, expected_version)
+            require_reminder_version(reminder, expected_version, required=True)
             before = reminder_mutation_snapshot(reminder)
             updates: list[str] = []
             params: list[Any] = []
@@ -4006,7 +4270,7 @@ def set_completion(args: argparse.Namespace, *, completed: bool) -> int:
             capability = require_command_capability(con, "set_completion_db")
             con.execute("begin immediate")
             reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-            require_reminder_version(reminder, expected_version)
+            require_reminder_version(reminder, expected_version, required=True)
             before = reminder_mutation_snapshot(reminder)
             if bool(reminder.get("ZCOMPLETED")) is completed:
                 con.commit()
@@ -4200,7 +4464,19 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
     try:
         if requested_backend == "auto":
             verified, auto_evidence = db_soft_delete_verified(con)
-            selected_backend = "db" if verified else "applescript"
+            version_precondition_provided = isinstance(args.if_version, int) and not isinstance(
+                args.if_version,
+                bool,
+            )
+            db_path_eligible = verified and version_precondition_provided
+            auto_evidence = {
+                **(auto_evidence or {}),
+                "version_precondition_provided": version_precondition_provided,
+                "db_path_eligible": db_path_eligible,
+            }
+            if verified and not version_precondition_provided:
+                auto_evidence["reason"] = "version_precondition_required"
+            selected_backend = "db" if db_path_eligible else "applescript"
 
         if selected_backend == "db":
             resolved_write_db = resolve_database(args.db, write=True)
@@ -4217,7 +4493,7 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
                 title=args.title,
                 list_name=args.list,
             )
-            require_reminder_version(reminder, args.if_version)
+            require_reminder_version(reminder, args.if_version, required=True)
             before = reminder_mutation_snapshot(reminder)
             list_row = None
             if reminder.get("ZLIST"):
@@ -4327,6 +4603,7 @@ def cmd_delete_reminder(args: argparse.Namespace) -> int:
                     },
                     warnings=[warning] if warning else None,
                     backend_requested=requested_backend,
+                    auto_evidence=auto_evidence,
                     capability=capability,
                 )
             con.close()
@@ -4439,6 +4716,164 @@ def section_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def use_native_section_backend(args: argparse.Namespace) -> bool:
+    return getattr(args, "db", None) is None
+
+
+def cmd_create_section_reminderkit(args: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    db = resolve_database(None)
+    con = connect(db)
+    try:
+        capability = require_command_capability(con, "create_section_db")
+        list_row = find_list(con, name=args.list, list_id=args.list_id)
+        existing_row = con.execute(
+            """
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where s.ZLIST=? and s.ZDISPLAYNAME=? and coalesce(s.ZMARKEDFORDELETION,0)=0
+            """,
+            (list_row["Z_PK"], args.name),
+        ).fetchone()
+        existing = dict(existing_row) if existing_row else None
+        existing_sync = (
+            cloud_sync_evidence(
+                con,
+                table="ZREMCDBASESECTION",
+                identifier=existing["ZCKIDENTIFIER"],
+            )
+            if existing
+            else None
+        )
+    finally:
+        con.close()
+
+    if existing and existing_sync and existing_sync.get("icloud_sync_verified") is True:
+        payload = section_payload(existing)
+        json_out(
+            operation_receipt(
+                status="unchanged",
+                operation="create_section",
+                operation_id=operation_id,
+                backend="reminderkit_private",
+                target={"id": payload["id"], "list_id": list_row["ZCKIDENTIFIER"]},
+                after={"section": payload, "created": False},
+                verification={
+                    "state": "cloud_read_back",
+                    "database_row": True,
+                    "icloud_sync": "verified",
+                    "cloud": existing_sync,
+                },
+                recovery={"semantics": "not_applicable"},
+                capability=capability,
+            )
+        )
+        return 0
+
+    repaired_existing = existing is not None
+    if existing:
+        section_id = existing["ZCKIDENTIFIER"]
+        temporary_name = f"{args.name[:511]}\u2060"
+        invoke_reminderkit_section("repair", section_id, temporary_name)
+        try:
+            helper_payload = invoke_reminderkit_section("repair", section_id, args.name)
+        except AdapterError as exc:
+            exc.details.setdefault("section_id", section_id)
+            exc.details.setdefault("recovery", "repair_section_display_name")
+            raise
+    else:
+        helper_payload = invoke_reminderkit_section(
+            "create",
+            list_row["ZCKIDENTIFIER"],
+            args.name,
+        )
+        section_id = normalize_uuid(str(helper_payload.get("section_id") or ""))
+        if not section_id:
+            raise AdapterError(
+                "ReminderKit created a section without returning its identifier",
+                code="sync_pending",
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+            )
+
+    sync = wait_for_cloud_sync(
+        db,
+        table="ZREMCDBASESECTION",
+        identifier=section_id,
+    )
+    fresh = connect(db)
+    try:
+        created_row = fresh.execute(
+            """
+            select s.*, l.ZCKIDENTIFIER as LIST_ID, l.ZNAME as LIST_NAME
+            from ZREMCDBASESECTION s
+            join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
+            where upper(s.ZCKIDENTIFIER)=? and s.ZLIST=?
+              and s.ZDISPLAYNAME=? and coalesce(s.ZMARKEDFORDELETION,0)=0
+            """,
+            (section_id, list_row["Z_PK"], args.name),
+        ).fetchone()
+    finally:
+        fresh.close()
+    if not created_row:
+        raise AdapterError(
+            "ReminderKit section save could not be read back",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            section_id=section_id,
+        )
+
+    status = "verified" if sync.get("icloud_sync_verified") is True else "committed_verification_pending"
+    created = section_payload(created_row)
+    warning = log_action(
+        "create_section",
+        {
+            "operation_id": operation_id,
+            "db": str(db),
+            "list": list_row["ZNAME"],
+            "section": args.name,
+            "id": section_id,
+            "backend": "reminderkit",
+            "repaired_existing": repaired_existing,
+        },
+    )
+    warnings: list[dict[str, Any] | str] = []
+    if warning:
+        warnings.append(warning)
+    if status != "verified":
+        warnings.append("The section exists locally, but iCloud upload is still pending.")
+    json_out(
+        operation_receipt(
+            status=status,
+            operation="create_section",
+            operation_id=operation_id,
+            backend="reminderkit_private",
+            target={"id": section_id, "list_id": list_row["ZCKIDENTIFIER"]},
+            after={
+                "section": created,
+                "created": not repaired_existing,
+                "repaired_existing": repaired_existing,
+            },
+            verification={
+                "state": "cloud_read_back" if status == "verified" else "local_read_back",
+                "database_row": True,
+                "icloud_sync": "verified" if status == "verified" else "pending",
+                "cloud": sync,
+                "helper_saved": helper_payload.get("saved") is True,
+            },
+            recovery={
+                "semantics": "remove_section_in_reminders" if not repaired_existing else "not_applicable",
+                "automatic_restore_available": False,
+            },
+            warnings=warnings or None,
+            capability=capability,
+        )
+    )
+    return 0
+
+
 def cmd_create_section(args: argparse.Namespace) -> int:
     if not args.list_id and not args.list:
         raise AdapterError(
@@ -4446,6 +4881,8 @@ def cmd_create_section(args: argparse.Namespace) -> int:
             code="ambiguous_target",
             required_selector="list_id | list",
         )
+    if use_native_section_backend(args):
+        return cmd_create_section_reminderkit(args)
     operation_id = new_operation_id()
     db = resolve_database(args.db, write=True)
     con = connect(db)
@@ -4554,18 +4991,25 @@ def cmd_create_section(args: argparse.Namespace) -> int:
         )
         json_out(
             operation_receipt(
-                status="verified",
+                status="committed_verification_pending",
                 operation="create_section",
                 operation_id=operation_id,
                 backend="sqlite_private",
                 target={"id": section_id, "list_id": list_row["ZCKIDENTIFIER"]},
                 after={"section": created, "created": True},
-                verification={"state": "read_back", "database_row": True},
+                verification={
+                    "state": "local_read_back",
+                    "database_row": True,
+                    "icloud_sync": "not_verified",
+                },
                 recovery={
                     "semantics": "remove_section_in_reminders",
                     "automatic_restore_available": False,
                 },
-                warnings=[warning] if warning else None,
+                warnings=[
+                    *([warning] if warning else []),
+                    "Direct SQLite section creation is local-only until a native Reminders save repairs it.",
+                ],
                 capability=capability,
             )
         )
@@ -4575,6 +5019,169 @@ def cmd_create_section(args: argparse.Namespace) -> int:
         raise
     finally:
         con.close()
+
+
+def cmd_move_to_section_reminderkit(args: argparse.Namespace) -> int:
+    operation_id = new_operation_id()
+    db = resolve_database(None)
+    con = connect(db)
+    try:
+        capability = require_command_capability(con, "move_to_section_db")
+        reminder = find_reminder(
+            con,
+            reminder_id=args.id,
+            title=args.title,
+            list_name=args.list,
+        )
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
+        before_reminder = reminder_mutation_snapshot(reminder)
+        if not reminder.get("ZLIST"):
+            raise AdapterError(
+                "Reminder is not assigned to an active list",
+                code="ambiguous_target",
+            )
+        list_row_raw = con.execute(
+            "select * from ZREMCDBASELIST where Z_PK=?",
+            (reminder["ZLIST"],),
+        ).fetchone()
+        if not list_row_raw:
+            raise AdapterError("Reminder list was not found", code="ambiguous_target")
+        list_row = dict(list_row_raw)
+        section = find_section(
+            con,
+            list_pk=list_row["Z_PK"],
+            name=args.section,
+            section_id=args.section_id,
+        )
+        mapping = membership_map(list_row.get("ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"))
+        reminder_key = reminder["ZCKIDENTIFIER"].upper()
+        previous_section_id = mapping.get(reminder_key)
+        target_section_id = section["ZCKIDENTIFIER"].upper()
+        list_sync = cloud_sync_evidence(
+            con,
+            table="ZREMCDBASELIST",
+            identifier=list_row["ZCKIDENTIFIER"],
+        )
+    finally:
+        con.close()
+
+    if (
+        previous_section_id == target_section_id
+        and list_sync.get("icloud_sync_verified") is True
+    ):
+        json_out(
+            operation_receipt(
+                status="unchanged",
+                operation="move_to_section",
+                operation_id=operation_id,
+                backend="reminderkit_private",
+                target={"id": reminder_key, "section_id": target_section_id},
+                before={"reminder": before_reminder, "section_id": previous_section_id},
+                after={"reminder": before_reminder, "section_id": previous_section_id},
+                verification={
+                    "state": "cloud_read_back",
+                    "section_membership": True,
+                    "icloud_sync": "verified",
+                    "cloud": list_sync,
+                },
+                recovery={"semantics": "not_applicable"},
+                capability=capability,
+            )
+        )
+        return 0
+
+    helper_payload = invoke_reminderkit_section(
+        "move",
+        reminder_key,
+        target_section_id,
+    )
+    sync = wait_for_cloud_sync(
+        db,
+        table="ZREMCDBASELIST",
+        identifier=list_row["ZCKIDENTIFIER"],
+    )
+    fresh = connect(db)
+    try:
+        refreshed_reminder = find_reminder(fresh, reminder_id=reminder_key)
+        refreshed_list = fresh.execute(
+            "select * from ZREMCDBASELIST where Z_PK=?",
+            (list_row["Z_PK"],),
+        ).fetchone()
+        refreshed_mapping = membership_map(
+            refreshed_list["ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA"]
+            if refreshed_list
+            else None
+        )
+    finally:
+        fresh.close()
+    if refreshed_mapping.get(reminder_key) != target_section_id:
+        raise AdapterError(
+            "ReminderKit section move could not be read back",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reminder_id=reminder_key,
+            section_id=target_section_id,
+        )
+
+    status = "verified" if sync.get("icloud_sync_verified") is True else "committed_verification_pending"
+    warning = log_action(
+        "move_to_section",
+        {
+            "operation_id": operation_id,
+            "reminder": reminder_key,
+            "section": target_section_id,
+            "backend": "reminderkit",
+            "repaired_existing": previous_section_id == target_section_id,
+        },
+    )
+    warnings: list[dict[str, Any] | str] = []
+    if warning:
+        warnings.append(warning)
+    if status != "verified":
+        warnings.append("The section membership exists locally, but iCloud upload is still pending.")
+    recovery = (
+        {"semantics": "not_applicable"}
+        if previous_section_id == target_section_id
+        else {
+            "semantics": "move_to_previous_section"
+            if previous_section_id
+            else "remove_section_membership",
+            "previous_section_id": previous_section_id,
+            "automatic_restore_available": False,
+        }
+    )
+    json_out(
+        operation_receipt(
+            status=status,
+            operation="move_to_section",
+            operation_id=operation_id,
+            backend="reminderkit_private",
+            target={"id": reminder_key, "section_id": target_section_id},
+            before={"reminder": before_reminder, "section_id": previous_section_id},
+            after={
+                "reminder": reminder_mutation_snapshot(refreshed_reminder),
+                "section_id": target_section_id,
+                "section": section["ZDISPLAYNAME"],
+                "repaired_existing": previous_section_id == target_section_id,
+            },
+            verification={
+                "state": "cloud_read_back" if status == "verified" else "local_read_back",
+                "section_membership": True,
+                "icloud_sync": "verified" if status == "verified" else "pending",
+                "cloud": sync,
+                "helper_saved": helper_payload.get("saved") is True,
+            },
+            recovery=recovery,
+            warnings=warnings or None,
+            capability=capability,
+        )
+    )
+    return 0
 
 
 def cmd_move_to_section(args: argparse.Namespace) -> int:
@@ -4590,13 +5197,19 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
             code="ambiguous_target",
             required_selector="section_id | section",
         )
+    if use_native_section_backend(args):
+        return cmd_move_to_section_reminderkit(args)
     operation_id = new_operation_id()
     con = connect(db)
     try:
         capability = require_command_capability(con, "move_to_section_db")
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before_reminder = reminder_mutation_snapshot(reminder)
         if not reminder.get("ZLIST"):
             raise AdapterError("Reminder is not assigned to an active list", code="ambiguous_target")
@@ -4667,7 +5280,7 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
         )
         json_out(
             operation_receipt(
-                status="verified",
+                status="committed_verification_pending",
                 operation="move_to_section",
                 operation_id=operation_id,
                 backend="sqlite_private",
@@ -4681,13 +5294,20 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
                     "section_id": section["ZCKIDENTIFIER"],
                     "section": section["ZDISPLAYNAME"],
                 },
-                verification={"state": "read_back", "section_membership": True},
+                verification={
+                    "state": "local_read_back",
+                    "section_membership": True,
+                    "icloud_sync": "not_verified",
+                },
                 recovery={
                     "semantics": "move_to_previous_section" if previous_section_id else "remove_section_membership",
                     "previous_section_id": previous_section_id,
                     "automatic_restore_available": False,
                 },
-                warnings=[warning] if warning else None,
+                warnings=[
+                    *([warning] if warning else []),
+                    "Direct SQLite section membership is local-only until a native Reminders save repairs it.",
+                ],
                 capability=capability,
             )
         )
@@ -4808,7 +5428,14 @@ def attach_image_record(con: sqlite3.Connection, reminder: dict[str, Any], image
         raise
 
 
-def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: str) -> dict[str, Any]:
+def attach_url_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    url: str,
+    *,
+    preferred_order: int | None = None,
+    preserve_preferred_order: bool = False,
+) -> dict[str, Any]:
     normalized = normalized_url(url)
     existing = con.execute(
         """
@@ -4826,14 +5453,16 @@ def attach_url_record(con: sqlite3.Connection, reminder: dict[str, Any], url: st
     object_id = str(uuid.uuid4()).upper()
     object_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCDObject'").fetchone()[0]
     cloud_pk = con.execute("select Z_MAX + 1 from Z_PRIMARYKEY where Z_NAME='REMCKCloudState'").fetchone()[0]
-    sort_order = con.execute(
-        """
-        select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
-        from ZREMCDOBJECT
-        where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
-        """,
-        (reminder["Z_PK"],),
-    ).fetchone()[0]
+    sort_order = preferred_order
+    if not preserve_preferred_order:
+        sort_order = con.execute(
+            """
+            select coalesce(max(coalesce(Z_FOK_REMINDER1,0)),1024)+1024
+            from ZREMCDOBJECT
+            where ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
+            """,
+            (reminder["Z_PK"],),
+        ).fetchone()[0]
     columns = [
         "Z_PK",
         "Z_ENT",
@@ -4912,6 +5541,78 @@ def soft_delete_attachment_record(
     return attachment_payload({**attachment, "ZMARKEDFORDELETION": 1})
 
 
+def delete_url_attachment_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> dict[str, Any]:
+    if int(attachment["Z_ENT"]) != URL_ATTACHMENT_ENT:
+        raise AdapterError("Only URL attachment rows use native row-deletion semantics")
+    now = core_now()
+    cloud_pk = attachment.get("ZCKCLOUDSTATE")
+    cloud_before = con.execute(
+        """
+        select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+        from ZREMCKCLOUDSTATE where Z_PK=?
+        """,
+        (cloud_pk,),
+    ).fetchone()
+    if (
+        cloud_before is None
+        or cloud_before["ZOBJECT"] != attachment["Z_PK"]
+        or cloud_before["Z13_OBJECT"] != URL_ATTACHMENT_ENT
+    ):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone is missing or owns another object",
+            code="schema_mismatch",
+        )
+    result = con.execute(
+        "delete from ZREMCDOBJECT where Z_PK=? and Z_ENT=?",
+        (attachment["Z_PK"], URL_ATTACHMENT_ENT),
+    )
+    if result.rowcount != 1:
+        raise AdapterError("URL attachment row could not be deleted", code="schema_mismatch")
+    if not bump_cloud_state(con, cloud_pk, now):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone could not be updated",
+            code="schema_mismatch",
+        )
+    cloud_after = con.execute(
+        """
+        select ZCURRENTLOCALVERSION,ZOBJECT,Z13_OBJECT
+        from ZREMCKCLOUDSTATE where Z_PK=?
+        """,
+        (cloud_pk,),
+    ).fetchone()
+    expected_cloud_version = int(cloud_before["ZCURRENTLOCALVERSION"] or 0) + 1
+    if (
+        cloud_after is None
+        or cloud_after["ZCURRENTLOCALVERSION"] != expected_cloud_version
+        or cloud_after["ZOBJECT"] != attachment["Z_PK"]
+        or cloud_after["Z13_OBJECT"] != URL_ATTACHMENT_ENT
+    ):
+        raise AdapterError(
+            "URL attachment cloud-state tombstone update could not be verified",
+            code="schema_mismatch",
+        )
+    touch_reminder(con, reminder, now)
+    return {
+        **attachment_payload(attachment),
+        "row_deleted": True,
+        "cloud_state_tombstone_retained": True,
+    }
+
+
+def delete_attachment_record(
+    con: sqlite3.Connection,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if int(attachment["Z_ENT"]) == URL_ATTACHMENT_ENT:
+        return delete_url_attachment_record(con, reminder, attachment), "row_deleted"
+    return soft_delete_attachment_record(con, reminder, attachment), "soft_deleted"
+
+
 def compensate_new_attachment(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
@@ -4937,22 +5638,35 @@ def attachment_replacement_readback(
     con: sqlite3.Connection,
     *,
     old_attachment_pk: int,
+    old_attachment_ent: int,
     new_attachment_pk: int,
-) -> dict[str, bool]:
+    expected_new_order: int | None = None,
+    verify_new_order: bool = False,
+) -> dict[str, bool | str]:
     old_state = con.execute(
         "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
         (old_attachment_pk,),
     ).fetchone()
-    active_new = con.execute(
+    new_state = con.execute(
         """
-        select count(*) from ZREMCDOBJECT
+        select Z_FOK_REMINDER1 from ZREMCDOBJECT
         where Z_PK=? and coalesce(ZMARKEDFORDELETION,0)=0
         """,
         (new_attachment_pk,),
-    ).fetchone()[0]
+    ).fetchone()
+    old_row_deleted = old_state is None
+    old_soft_deleted = bool(old_state and old_state["ZMARKEDFORDELETION"])
+    old_removed = old_row_deleted if old_attachment_ent == URL_ATTACHMENT_ENT else old_soft_deleted
+    order_preserved = not verify_new_order or (
+        new_state is not None and new_state["Z_FOK_REMINDER1"] == expected_new_order
+    )
     return {
-        "old_attachment_soft_deleted": bool(old_state and old_state["ZMARKEDFORDELETION"]),
-        "new_attachment_active": active_new == 1,
+        "old_attachment_removed": old_removed,
+        "old_attachment_removal": "row_deleted" if old_row_deleted else "soft_deleted",
+        "old_attachment_row_deleted": old_row_deleted,
+        "old_attachment_soft_deleted": old_soft_deleted,
+        "new_attachment_active": new_state is not None,
+        "replacement_order_preserved": order_preserved,
     }
 
 
@@ -4969,7 +5683,11 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
     try:
         capability = require_command_capability(con, "attachment_mutation_db")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before = reminder_mutation_snapshot(reminder)
         if args.backend == "reminderkit":
             try:
@@ -5141,7 +5859,11 @@ def cmd_attach_url(args: argparse.Namespace) -> int:
         capability = require_command_capability(con, "attachment_mutation_db")
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before = reminder_mutation_snapshot(reminder)
         result = attach_url_record(con, reminder, url)
         attachment = result["attachment"]
@@ -5279,6 +6001,7 @@ def repair_candidate_digest(candidates: list[dict[str, Any]]) -> str:
     stable = [
         {
             "reminder_id": item.get("reminder", {}).get("id"),
+            "reminder_version": item.get("reminder", {}).get("version"),
             "attachment_id": item.get("attachment", {}).get("id"),
             "problem": item.get("problem"),
             "source_files": sorted(item.get("source_files", [])),
@@ -5383,7 +6106,28 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
 
         repaired: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        blocked_reminder_ids: set[str] = set()
+        expected_reminder_versions: dict[str, int] = {}
         for item in selected:
+            reminder_id = item["reminder"]["id"]
+            preview_version = item["reminder"].get("version")
+            if not isinstance(preview_version, int) or isinstance(preview_version, bool):
+                raise AdapterError(
+                    "Attachment repair candidate is missing a valid reminder version",
+                    code="schema_mismatch",
+                    reminder_id=reminder_id,
+                )
+            previous = expected_reminder_versions.setdefault(reminder_id, preview_version)
+            if previous != preview_version:
+                raise AdapterError(
+                    "Attachment repair candidates disagree on the reminder version",
+                    code="concurrent_modification",
+                    reminder_id=reminder_id,
+                    expected_version=previous,
+                    candidate_version=preview_version,
+                )
+        for item in selected:
+            reminder_id = item["reminder"]["id"]
             attachment = item["attachment"]
             sources = source_paths_for_attachment(attachment)
             if not sources:
@@ -5396,11 +6140,32 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 )
                 continue
             source = sources[0]
+            if reminder_id in blocked_reminder_ids:
+                failed.append(
+                    {
+                        "reminder": item["reminder"],
+                        "attachment": attachment,
+                        "source_file": source.name,
+                        "error": "skipped_after_unknown_mutation",
+                        "partial_failure": False,
+                        "mutation_outcome_unknown": False,
+                        "skipped_after_unknown_mutation": True,
+                        "replacement_committed": False,
+                        "compensated": False,
+                        "compensation_error": None,
+                    }
+                )
+                continue
             reminder = None
             new_result = None
             item_committed = False
             try:
                 reminder = find_reminder(con, reminder_id=item["reminder"]["id"], title=None, list_name=None)
+                require_reminder_version(
+                    reminder,
+                    expected_reminder_versions[item["reminder"]["id"]],
+                    required=True,
+                )
                 try:
                     new_result = attach_image_reminderkit_record(con, reminder, source)
                 except AttachmentVerificationError as attach_exc:
@@ -5410,6 +6175,10 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 deleted = soft_delete_attachment_record(con, reminder, item["_row"])
                 con.commit()
                 item_committed = True
+                refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
+                expected_reminder_versions[item["reminder"]["id"]] = refreshed_reminder[
+                    "Z_OPT"
+                ]
                 result = {
                     "reminder": item["reminder"],
                     "old_attachment": attachment,
@@ -5433,18 +6202,37 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 con.rollback()
                 compensation = None
                 compensation_error = None
+                error_details = exc.details if isinstance(exc, AdapterError) else {}
+                reported_partial_failure = error_details.get("partial_failure") is True
+                mutation_outcome_unknown = (
+                    error_details.get("mutation_outcome_unknown") is True
+                )
                 if not item_committed and reminder is not None and new_result is not None:
                     try:
                         compensation = compensate_new_attachment(con, reminder, new_result)
+                        if compensation is not None:
+                            refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
+                            expected_reminder_versions[item["reminder"]["id"]] = (
+                                refreshed_reminder["Z_OPT"]
+                            )
                     except Exception as cleanup_exc:
                         compensation_error = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                partial_failure = (
+                    reported_partial_failure or new_result is not None or item_committed
+                )
+                if partial_failure and (
+                    compensation is None or compensation_error is not None
+                ):
+                    blocked_reminder_ids.add(reminder_id)
                 failed.append(
                     {
                         "reminder": item["reminder"],
                         "attachment": attachment,
                         "source_file": source.name,
                         "error": f"{type(exc).__name__}: {exc}",
-                        "partial_failure": new_result is not None,
+                        "partial_failure": partial_failure,
+                        "mutation_outcome_unknown": mutation_outcome_unknown,
+                        "skipped_after_unknown_mutation": False,
                         "new_attachment_id": (
                             new_result.get("attachment", {}).get("id")
                             if new_result is not None
@@ -5465,10 +6253,10 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
             status = "unchanged"
         elif not failed:
             status = "verified"
-        elif repaired:
-            status = "partial_success"
         elif uncompensated_partial:
             status = "failed_manual_repair_required"
+        elif repaired:
+            status = "partial_success"
         else:
             status = "failed_no_mutation"
         json_out(
@@ -5489,14 +6277,18 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                     "repaired": repaired,
                     "failed": failed,
                 },
-                verification={
+        verification={
                     "state": "per_item_read_back",
                     "verified_repairs": len(repaired),
                     "failed_repairs": len(failed),
                     "manual_repair_required": uncompensated_partial,
                 },
                 recovery={
-                    "semantics": "best_effort_live_container_backup",
+                    "semantics": (
+                        "read_before_retry_and_inspect_attachments"
+                        if uncompensated_partial
+                        else "best_effort_live_container_backup"
+                    ),
                     "backup": backup,
                     "automatic_restore_available": False,
                 },
@@ -5525,7 +6317,11 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
         capability = require_command_capability(con, "attachment_mutation_db")
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
-        require_reminder_version(reminder, getattr(args, "if_version", None))
+        require_reminder_version(
+            reminder,
+            getattr(args, "if_version", None),
+            required=True,
+        )
         before_reminder = reminder_mutation_snapshot(reminder)
         selected, candidates, reason = resolve_attachment_selection(
             con,
@@ -5543,17 +6339,22 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
                 candidates=candidates,
             )
         before_attachment = attachment_payload(selected)
-        deleted = soft_delete_attachment_record(con, reminder, selected)
+        deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         refreshed_attachment = con.execute(
             "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
             (selected["Z_PK"],),
         ).fetchone()
-        if not refreshed_attachment or not refreshed_attachment["ZMARKEDFORDELETION"]:
+        attachment_removed = (
+            refreshed_attachment is None
+            if deletion_mode == "row_deleted"
+            else bool(refreshed_attachment and refreshed_attachment["ZMARKEDFORDELETION"])
+        )
+        if not attachment_removed:
             raise AdapterError("Attachment deletion could not be read back", code="schema_mismatch")
         after_reminder = reminder_mutation_snapshot(reread_reminder(con, reminder["Z_PK"]))
         con.commit()
         warning = log_action(
-            "delete_attachment_soft",
+            "delete_attachment",
             {
                 "operation_id": operation_id,
                 "reminder": reminder["ZCKIDENTIFIER"],
@@ -5572,7 +6373,15 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
                 },
                 before={"reminder": before_reminder, "attachment": before_attachment},
                 after={"reminder": after_reminder, "attachment": deleted},
-                verification={"state": "read_back", "attachment_soft_deleted": True},
+                verification={
+                    "state": "read_back",
+                    "attachment_removed": True,
+                    "attachment_row_deleted": deletion_mode == "row_deleted",
+                    "attachment_soft_deleted": deletion_mode == "soft_deleted",
+                    "cloud_state_tombstone_retained": deleted.get(
+                        "cloud_state_tombstone_retained"
+                    ),
+                },
                 recovery={
                     "semantics": (
                         "reattach_url"
@@ -5615,11 +6424,13 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
     committed = False
     try:
         capability = require_command_capability(con, "attachment_mutation_db")
+        if args.url:
+            con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         expected_version = getattr(args, "if_version", None)
         if not isinstance(expected_version, int) or isinstance(expected_version, bool):
             expected_version = None
-        require_reminder_version(reminder, expected_version)
+        require_reminder_version(reminder, expected_version, required=True)
         before_reminder = reminder_mutation_snapshot(reminder)
         selected, candidates, reason = resolve_attachment_selection(
             con,
@@ -5637,6 +6448,23 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
                 candidates=candidates,
             )
         old_attachment = attachment_payload(selected)
+        if args.url:
+            replacement_url = normalized_url(args.url)
+            existing_url = con.execute(
+                """
+                select Z_PK,ZCKIDENTIFIER
+                from ZREMCDOBJECT
+                where ZREMINDER2=? and Z_ENT=? and ZURL=?
+                  and coalesce(ZMARKEDFORDELETION,0)=0
+                """,
+                (reminder["Z_PK"], URL_ATTACHMENT_ENT, replacement_url),
+            ).fetchone()
+            if existing_url is not None:
+                raise AdapterError(
+                    "Replacement URL is already attached to this reminder",
+                    code="invalid_input",
+                    existing_attachment_id=existing_url["ZCKIDENTIFIER"],
+                )
         if args.image:
             try:
                 new_result = attach_image_reminderkit_record(
@@ -5651,22 +6479,40 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
                 raise AdapterError("Replacement source is the same as the selected existing attachment")
             con.execute("begin immediate")
-            deleted = soft_delete_attachment_record(con, reminder, selected)
+            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         else:
-            con.execute("begin immediate")
-            new_result = attach_url_record(con, reminder, args.url)
+            new_result = attach_url_record(
+                con,
+                reminder,
+                args.url,
+                preferred_order=selected.get("Z_FOK_REMINDER1"),
+                preserve_preferred_order=True,
+            )
             new_attachment = new_result.get("attachment") or {}
             if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
                 raise AdapterError("Replacement source is the same as the selected existing attachment")
-            deleted = soft_delete_attachment_record(con, reminder, selected)
+            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         con.commit()
         committed = True
         readback = attachment_replacement_readback(
             con,
             old_attachment_pk=selected["Z_PK"],
+            old_attachment_ent=int(selected["Z_ENT"]),
             new_attachment_pk=int(new_attachment.get("pk")),
+            expected_new_order=(selected.get("Z_FOK_REMINDER1") if args.url else None),
+            verify_new_order=bool(args.url),
         )
-        if not all(readback.values()):
+        replacement_verified = (
+            bool(
+                readback.get(
+                    "old_attachment_removed",
+                    readback.get("old_attachment_soft_deleted"),
+                )
+            )
+            and bool(readback.get("new_attachment_active"))
+            and readback.get("replacement_order_preserved") is not False
+        )
+        if not replacement_verified:
             public_new_result = dict(new_result)
             public_new_result.pop("_row", None)
             return operation_receipt(
@@ -5721,6 +6567,9 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             verification={
                 "state": "read_back",
                 **readback,
+                "old_attachment_cloud_state_retained": deleted.get(
+                    "cloud_state_tombstone_retained"
+                ),
                 "mobile_visible_likely": (
                     new_result.get("sync", {}).get("mobile_visible_likely")
                     if args.image
@@ -6012,7 +6861,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--tag", required=True)
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_add_tag)
 
     p = sub.add_parser("remove_tag")
@@ -6021,7 +6870,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--tag", required=True)
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_remove_tag)
 
     p = sub.add_parser("cleanup_tags")
@@ -6114,7 +6963,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--section")
     p.add_argument("--section-id")
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_move_to_section)
 
     p = sub.add_parser("attach_image")
@@ -6124,7 +6973,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.add_argument("--image", required=True)
     p.add_argument("--backend", choices=["reminderkit", "db"], default="reminderkit")
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_attach_image)
 
@@ -6134,7 +6983,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--list")
     p.add_argument("--url", required=True)
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_attach_url)
 
     p = sub.add_parser("list_attachments")
@@ -6174,7 +7023,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", choices=["image", "url"])
     p.add_argument("--filename")
     p.add_argument("--url")
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.set_defaults(func=cmd_delete_attachment)
 
     p = sub.add_parser("replace_attachment")
@@ -6189,7 +7038,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--old-url")
     p.add_argument("--image")
     p.add_argument("--url")
-    p.add_argument("--if-version", type=int)
+    p.add_argument("--if-version", type=int, required=True)
     p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_replace_attachment)
 
@@ -6210,13 +7059,35 @@ def main(argv: list[str] | None = None) -> int:
                 if details.get("compensated") and not details.get("compensation_error")
                 else "failed_manual_repair_required"
             )
+        status = explicit_status or "failed_no_mutation"
+        if getattr(args, "command", None) in MUTATION_COMMANDS:
+            json_out(
+                command_failure_receipt(
+                    args,
+                    str(exc),
+                    code=exc.code,
+                    status=status,
+                    **details,
+                )
+            )
+            return 1
         return fail(
             str(exc),
             code=exc.code,
-            status=explicit_status or "failed_no_mutation",
+            status=status,
             **details,
         )
     except Exception as exc:
+        if getattr(args, "command", None) in MUTATION_COMMANDS:
+            json_out(
+                command_failure_receipt(
+                    args,
+                    f"{type(exc).__name__}: {exc}",
+                    code="unexpected_error",
+                    status="failed_manual_repair_required",
+                )
+            )
+            return 1
         return fail(f"{type(exc).__name__}: {exc}", code="unexpected_error")
 
 

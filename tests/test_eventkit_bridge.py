@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,44 @@ class EventKitRequestValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "time_zone_offset_mismatch")
+
+    def test_timed_due_rejects_path_like_time_zone_as_typed_input_error(self) -> None:
+        for zone_name in ("/etc/passwd", "../zoneinfo/UTC"):
+            with self.subTest(zone_name=zone_name):
+                with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+                    eventkit_bridge.normalize_request(
+                        {
+                            "schema_version": 1,
+                            "operation": "create_reminder",
+                            "calendar_id": "CALENDAR-1",
+                            "title": "Invalid zone",
+                            "due": {
+                                "kind": "timed",
+                                "date_time": "2026-08-05T14:30:00+09:00",
+                                "time_zone": zone_name,
+                            },
+                        }
+                    )
+
+                self.assertEqual(raised.exception.code, "invalid_time_zone")
+
+    def test_timed_due_rejects_utc_conversion_overflow_as_typed_input_error(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "create_reminder",
+                    "calendar_id": "CALENDAR-1",
+                    "title": "Overflow boundary",
+                    "due": {
+                        "kind": "timed",
+                        "date_time": "0001-01-01T00:00:00+14:00",
+                        "time_zone": "Etc/GMT-14",
+                    },
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_rfc3339")
 
     def test_all_day_due_is_distinct_from_timed_due(self) -> None:
         normalized = eventkit_bridge.normalize_request(
@@ -252,6 +292,93 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "missing_fields")
 
+    def test_delete_reminder_requires_exact_id_and_last_modified(self) -> None:
+        normalized = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "delete_reminder",
+                "reminder_id": "REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+            }
+        )
+
+        self.assertEqual(normalized["operation"], "delete_reminder")
+        self.assertEqual(normalized["reminder_id"], "REMINDER-1")
+        self.assertEqual(
+            normalized["expected_last_modified"],
+            "2026-08-05T00:00:00.000Z",
+        )
+
+    def test_delete_reminder_rejects_null_last_modified(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "delete_reminder",
+                    "reminder_id": "REMINDER-1",
+                    "expected_last_modified": None,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_type")
+
+    def test_existing_item_operations_reject_reminder_deep_links(self) -> None:
+        requests = (
+            {
+                "schema_version": 1,
+                "operation": "read_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+            },
+            {
+                "schema_version": 1,
+                "operation": "update_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+                "patch": {"title": "Changed"},
+            },
+            {
+                "schema_version": 1,
+                "operation": "complete_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+            },
+            {
+                "schema_version": 1,
+                "operation": "reopen_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+            },
+            {
+                "schema_version": 1,
+                "operation": "move_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+                "calendar_id": "CALENDAR-1",
+            },
+            {
+                "schema_version": 1,
+                "operation": "delete_reminder",
+                "reminder_id": "x-apple-reminder://REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+            },
+        )
+
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+                    eventkit_bridge.normalize_request(request)
+
+                self.assertEqual(raised.exception.code, "invalid_identifier")
+
+    def test_native_delete_does_not_claim_missing_identifier_was_already_deleted(self) -> None:
+        source = (ROOT / "scripts" / "reminders_eventkit.m").read_text(encoding="utf-8")
+
+        self.assertNotIn('@"already_absent"', source)
+        self.assertIn(
+            '@"Reminder was not found; read current state before retrying"',
+            source,
+        )
+
     def test_update_preserves_explicit_null_clear_in_patch(self) -> None:
         normalized = eventkit_bridge.normalize_request(
             {
@@ -275,12 +402,80 @@ class EventKitRequestValidationTests(unittest.TestCase):
                     "schema_version": 1,
                     "operation": "update_reminder",
                     "reminder_id": "REMINDER-1",
-                    "expected_last_modified": None,
+                    "expected_last_modified": "2026-08-05T00:00:00Z",
                     "patch": {"flagged": True},
                 }
             )
 
         self.assertEqual(raised.exception.code, "unknown_fields")
+
+    def test_plain_location_is_rejected_instead_of_committing_a_noop(self) -> None:
+        for request in (
+            {
+                "schema_version": 1,
+                "operation": "create_reminder",
+                "calendar_id": "CALENDAR-1",
+                "title": "Unsupported location",
+                "location": "Market",
+            },
+            {
+                "schema_version": 1,
+                "operation": "update_reminder",
+                "reminder_id": "REMINDER-1",
+                "expected_last_modified": "2026-08-05T00:00:00Z",
+                "patch": {"location": "Market"},
+            },
+        ):
+            with self.subTest(operation=request["operation"]):
+                with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+                    eventkit_bridge.normalize_request(request)
+
+                self.assertEqual(raised.exception.code, "unknown_fields")
+                self.assertEqual(raised.exception.details["fields"], ["location"])
+
+    def test_malformed_url_is_a_typed_validation_error(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "create_reminder",
+                    "calendar_id": "CALENDAR-1",
+                    "title": "Malformed URL",
+                    "url": "http://[::1",
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_url")
+
+    def test_notes_character_bound_fits_worst_case_json_transport(self) -> None:
+        normalized = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "create_reminder",
+                "calendar_id": "CALENDAR-1",
+                "title": "Bounded notes",
+                "notes": "\0" * 100_000,
+            }
+        )
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLess(len(encoded), eventkit_bridge.MAX_REQUEST_BYTES)
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "create_reminder",
+                    "calendar_id": "CALENDAR-1",
+                    "title": "Oversized notes",
+                    "notes": "n" * 100_001,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "string_too_long")
 
 
 class EventKitContractTests(unittest.TestCase):
@@ -352,6 +547,87 @@ class EventKitContractTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
 
+    def test_native_timeout_after_possible_mutation_is_verification_pending(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "delete_reminder",
+            "reminder_id": "OPAQUE-REMINDER-ID",
+            "expected_last_modified": "2026-08-08T00:00:00.000Z",
+        }
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(
+                eventkit_bridge.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["/helper"], 45),
+            ),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["verification"]["state"], "pending")
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(payload["error"]["code"], "sync_pending")
+        self.assertEqual(payload["error"]["reason_code"], "native_timeout")
+        self.assertIs(eventkit_bridge.validate_response(payload, "delete_reminder"), payload)
+
+    def test_native_helper_build_failure_is_no_mutation_failure(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "calendar_id": "CALENDAR-1",
+            "title": "Never launched",
+        }
+        with mock.patch.object(
+            eventkit_bridge,
+            "build_helper",
+            side_effect=PermissionError("cache denied"),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["reason_code"], "native_helper_build_failed")
+
+    def test_invalid_native_output_after_possible_mutation_is_verification_pending(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "update_reminder",
+            "reminder_id": "OPAQUE-REMINDER-ID",
+            "expected_last_modified": "2026-08-08T00:00:00.000Z",
+            "patch": {"title": "Changed"},
+        }
+        completed = subprocess.CompletedProcess(["/helper"], 0, b"not-json", b"")
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(eventkit_bridge.subprocess, "run", return_value=completed),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(payload["error"]["reason_code"], "invalid_native_response")
+        self.assertIs(eventkit_bridge.validate_response(payload, "update_reminder"), payload)
+
+    def test_native_timeout_for_read_remains_a_no_mutation_failure(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "read_reminder",
+            "reminder_id": "OPAQUE-REMINDER-ID",
+        }
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(
+                eventkit_bridge.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["/helper"], 45),
+            ),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertFalse(payload["ok"])
+
     def test_verified_create_fixture_satisfies_full_mutation_receipt(self) -> None:
         payload = self.mutation_fixture("create_reminder", "verified")
 
@@ -404,11 +680,41 @@ class EventKitContractTests(unittest.TestCase):
         self.assertTrue(payload["data"]["validation_only"])
         self.assertEqual(payload["data"]["normalized_request"], request)
 
+    def test_unexpected_prelaunch_normalization_exception_is_no_mutation_failure(self) -> None:
+        raw = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "calendar_id": "CALENDAR-1",
+            "title": "Never launched",
+        }
+        with (
+            mock.patch.object(eventkit_bridge, "read_request", return_value=raw),
+            mock.patch.object(
+                eventkit_bridge,
+                "normalize_request",
+                side_effect=RuntimeError("normalizer bug"),
+            ),
+            mock.patch.object(eventkit_bridge, "invoke_native") as invoke_native,
+            mock.patch.object(eventkit_bridge, "emit") as emit,
+        ):
+            exit_code = eventkit_bridge.main(["--validate-only"])
+
+        payload = emit.call_args.args[0]
+        self.assertEqual(exit_code, eventkit_bridge.EXIT_CODES["failed_no_mutation"])
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["reason_code"], "request_normalization_failed")
+        invoke_native.assert_not_called()
+
     @unittest.skipUnless(sys.platform == "darwin", "Objective-C EventKit helper requires macOS")
-    def test_native_helper_compiles_and_static_operations_do_not_read_reminders(self) -> None:
+    def test_native_helper_static_operations_emit_valid_receipts_without_reading_reminders(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             binary = eventkit_bridge.build_helper(Path(directory))
             self.assertTrue(binary.is_file())
+            self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(Path(directory).stat().st_mode), 0o700)
             signature = subprocess.run(
                 ["codesign", "-d", "--verbose=2", str(binary)],
                 stdout=subprocess.PIPE,
@@ -434,6 +740,10 @@ class EventKitContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(payload["operation"], operation)
                 self.assertEqual(payload["status"], "verified")
+                self.assertIs(payload["ok"], True)
+                if operation == "capabilities":
+                    self.assertIs(payload["data"]["fields"]["plain_location"], False)
+                self.assertIs(eventkit_bridge.validate_response(payload, operation), payload)
 
     @unittest.skipUnless(sys.platform == "darwin", "Objective-C EventKit helper requires macOS")
     def test_native_helper_rejects_bad_schema_before_eventkit_access(self) -> None:

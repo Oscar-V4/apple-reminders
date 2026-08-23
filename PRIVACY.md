@@ -26,8 +26,8 @@ other devices or shared-list participants.
 ## Execution and Network Boundaries
 
 - `.mcp.json` launches `mcp/server.py` as a local stdio subprocess.
-- The MCP server invokes bundled local adapters; it does not call a
-  plugin-owned web service.
+- The MCP server invokes bundled local adapters; packaged runtime ignores
+  backend path overrides and does not call a plugin-owned web service.
 - EventKit and AppleScript operations communicate with macOS system services or
   the Reminders app.
 - Apple Reminders and iCloud may transmit and sync data according to the user's

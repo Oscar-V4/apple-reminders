@@ -41,12 +41,28 @@ Image attachment proof, revised after iPhone testing:
 - `attach_image --backend db` remains a fallback/diagnostic path only. Treat those rows as local-only unless `audit_attachments` proves otherwise.
 - `repair_attachments` finds local-only image rows, locates the source file by SHA512, reattaches through ReminderKit, and soft-deletes the older local-only attachment object after a backup.
 
+URL attachment proof from a native Reminders add/replace/delete round trip:
+
+- Native URL replacement physically removes the old `ZREMCDOBJECT` row, keeps its `ZREMCKCLOUDSTATE` row as the sync tombstone, and gives the new URL row the old display order.
+- Native URL deletion likewise removes the object row and retains/bump-syncs the cloud state. The adapter mirrors those URL-specific semantics; image attachment deletion and repair continue to use soft-delete behavior.
+- The live evidence was captured on macOS 26.5.2 (25F84), Reminders 7.0,
+  against schema fingerprint
+  `82761d59e465cf4c90ca8c98bb51eab498c6976e81d608023535f3bf0ec63d62`.
+  The public EventKit `EKReminder.url` field was considered but cannot represent
+  multiple ordered URL attachment objects. The private operation therefore
+  touches only the exact URL `ZREMCDOBJECT` row, its existing
+  `ZREMCKCLOUDSTATE` (`ZCURRENTLOCALVERSION`, `ZLOCALVERSIONDATE`), and the
+  parent reminder version inside one write transaction. It fails and rolls
+  back if the cloud-state row is absent or its bumped version cannot be read
+  back. Other builds remain subject to the doctor/schema gate and live
+  verification; this observation is not a general macOS compatibility claim.
+
 Section proof:
 
 - Insert a `REMCDListSection` row.
 - Link it to the list.
-- Update list section membership JSON so reminder UUIDs map to section UUIDs.
-- Restart/read Reminders and verify native section rendering.
+- Create sections and update list-section membership through `REMSaveRequest` in `remkit_sections.m` so Reminders generates its native CRDT and CloudKit state.
+- Verify the section or list cloud state reaches `inCloud=1` with `latestSyncedVersion >= currentLocalVersion`; local native rendering alone is insufficient.
 
 URL attachment proof:
 
@@ -88,7 +104,11 @@ Cache commands:
 
 The cache is not a source of truth. It stores only lightweight fields that can be rebuilt from Reminders: list and section IDs/names, reminder IDs/titles, tag names/counts, completion, priority, flagged state, due/display/completion/modified timestamps, image and URL attachment counts, and notes length plus SHA-256 hash. It does not store image contents, attachment payloads, or full notes.
 
-Supported private writes include sections, mobile-visible image attachments through ReminderKit, URL attachment objects, tag assignment writes, attachment soft-delete/replacement, and local-only image attachment repair. Location alarms are supported only through the public EventKit bridge with explicit coordinates and enter/leave proximity. Unsupported writes as of this note include urgent alerts and message-when-messaging alerts; do not emulate them through private fields.
+Supported private writes include CloudKit-verified sections and mobile-visible image attachments through ReminderKit, URL attachment objects, tag assignment writes, native-parity attachment removal/replacement, and local-only image attachment repair. Location alarms are supported only through the public EventKit bridge with explicit coordinates and enter/leave proximity. Unsupported writes as of this note include urgent alerts and message-when-messaging alerts; do not emulate them through private fields.
+
+Every private mutation of an existing reminder requires a fresh matching
+`if_version`; obtain it from `list_attachments`/`list_reminder_attachments`
+immediately before the write.
 
 Cache searches do not search note bodies because the cache does not keep them. Use `search_reminders` when full note text must be searched from the source database.
 
@@ -101,6 +121,6 @@ Cache searches do not search note bodies because the cache does not keep them. U
 - Keep transactions narrow.
 - Verify every write by reading back through the app state or database.
 - For public reminder fields, prefer the EventKit MCP tools. The adapter's AppleScript text-sync exists for legacy/private creation paths and is not a reason to choose DB-only writes.
-- `delete_reminder` uses `backend=auto`: a DB soft-delete is eligible only with exact OS/Reminders/schema evidence for recovery and sync parity; otherwise it uses native AppleScript. Never fall back to DB after an uncertain native attempt.
+- MCP `delete_reminder` uses public EventKit with a fresh last-modified precondition and no private fallback. An unresolvable identifier returns a no-write not-found result and requires a fresh read; it is not treated as proof that a previous delete succeeded because EventKit identifiers can change after a full sync. The adapter CLI retains `backend=auto`/DB soft-delete only for compatibility and diagnostic recovery-parity work; DB eligibility still requires a fresh version plus exact environment evidence.
 - `cleanup_tags --apply` intentionally hard-deletes unused label rows, but only after a scoped preview digest, literal wildcard handling, a write lock, account-aware revalidation, zero-reference proof, backup, and read-back.
 - Treat private-store writes as local-first until iCloud behavior is tested more deeply. For image attachments specifically, do not report success for user-facing capture unless the read-back shows CloudKit/mobile visibility evidence.

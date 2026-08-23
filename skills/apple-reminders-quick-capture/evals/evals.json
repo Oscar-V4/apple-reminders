@@ -13,7 +13,7 @@
     {
       "id": 2,
       "prompt": "이 URL을 취업캠프 준비에 참고 링크로 저장해줘: https://example.com",
-      "expected_output": "Creates or resolves the target reminder/list scope, attaches the normalized URL only after exact target resolution, reads back attachment evidence, and reports the reminder ID plus attachment status.",
+      "expected_output": "Creates or resolves the target reminder/list scope, reads the exact reminder, calls list_reminder_attachments for a fresh reminder_version, attaches the normalized URL with that if_version, reads back attachment evidence, and reports the reminder ID plus attachment status.",
       "assertions": [
         "Uses exact target IDs for follow-up attachment work.",
         "Does not claim unsupported fields were written."

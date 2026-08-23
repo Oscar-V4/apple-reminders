@@ -14,8 +14,8 @@ Use this skill for attachment-specific work. The safety target is exact reminder
 1. Resolve the target reminder by exact ID or by a bounded search that proves there is one match. Stop and show candidates on ambiguity.
 2. Resolve the exact source image path or URL before writing. Do not guess from "the screenshot" when multiple files or no attached image are available.
 3. Call `list_reminder_attachments` first and retain its `reminder_version`. For image attachment, use `attach_image_to_reminder` with the exact reminder ID, absolute source path, that required `if_version`, and a fresh idempotency key. Its backend is fixed to the normal ReminderKit path. Treat `mobile_visible_likely: true` as CloudKit/mobile-sync evidence, not direct iPhone-screen confirmation.
-4. For URL attachment, call `attach_url_to_reminder` with the normalized URL and read back `list_reminder_attachments`.
-5. For replace/delete, list attachments first and select by `attachment_id`, `attachment_pk`, exact filename, or exact URL. Do not remove the only plausible match without showing candidates when selection is ambiguous.
+4. For URL attachment, call `attach_url_to_reminder` with the normalized URL and captured `reminder_version` as `if_version`, then read back `list_reminder_attachments`.
+5. For replace/delete, list attachments first, pass that read's `reminder_version` as `if_version`, and select by `attachment_id`, `attachment_pk`, exact filename, or exact URL. Do not remove the only plausible match without showing candidates when selection is ambiguous.
 6. For repair, run bounded `audit_reminder_attachments` with `problems_only=true`, then `preview_reminder_attachment_repairs`. Apply only by passing the unchanged `candidate_digest` to `apply_reminder_attachment_repairs`; keep the default backup unless the user explicitly accepts the recovery tradeoff.
 7. Report the top-level receipt status exactly: `unchanged`, `verified`, `committed_verification_pending`, or `partial_success`. `persisted_sync_pending` may appear only as nested verification evidence, not as a receipt status. Surface stable failure codes separately.
 
@@ -38,7 +38,7 @@ fetch_reminders (bounded exact candidates)
 - Say "mobile visibility evidence was found" for `mobile_visible_likely: true`.
 - Treat absent or false mobile evidence as pending or local-only, even if the Mac UI can render the image.
 - For `replace_reminder_attachment` and `apply_reminder_attachment_repairs`, surface any partial-success risk and recovery details because those flows cross ReminderKit and SQLite-backed cleanup.
-- Do not hard-delete copied image files. Attachment deletion should remove or soft-delete the Reminders attachment object through the adapter only.
+- Do not hard-delete copied image files. Use the adapter only: image objects take its recoverable soft-delete path, while URL metadata rows use the native row-removal plus retained cloud-state tombstone behavior.
 
 ## Output Rules
 

@@ -42,6 +42,7 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/reminders_doctor.py"),
     Path("scripts/reminders_eventkit.m"),
     Path("scripts/remkit_attach_image.m"),
+    Path("scripts/remkit_sections.m"),
 }
 ALLOWED_SKILL_FILES = {
     Path("SKILL.md"),

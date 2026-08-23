@@ -18,6 +18,15 @@
         "Separates dry-run candidates from applied changes.",
         "Surfaces partial-success risk for repair apply."
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "취업캠프 준비 미리알림의 기존 참고 링크를 새 URL로 바꿔줘.",
+      "expected_output": "Resolves the exact reminder and attachment, calls list_reminder_attachments immediately before writing, passes its fresh reminder_version as if_version to replace_reminder_attachment, and reads back both old and new attachment state.",
+      "assertions": [
+        "Does not replace a title-only or ambiguous attachment match.",
+        "Does not omit the fresh version precondition."
+      ]
     }
   ]
 }

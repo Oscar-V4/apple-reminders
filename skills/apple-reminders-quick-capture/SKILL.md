@@ -42,8 +42,8 @@ For an all-day due date use `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute a
 
 ## Attachments During Capture
 
-- For image capture, resolve the exact source file and target reminder first, then use `attach_image_to_reminder` through the attachment maintenance rules.
-- A normal reminder URL can be supplied in the EventKit create. When the user specifically wants a Reminders URL-attachment object, create first, then use `attach_url_to_reminder` and read back attachment evidence.
+- For image capture, resolve the exact source file and target reminder, call `list_reminder_attachments` for a fresh `reminder_version`, then pass it as `if_version` to `attach_image_to_reminder` through the attachment maintenance rules.
+- A normal reminder URL can be supplied in the EventKit create. When the user specifically wants a Reminders URL-attachment object, create and read the exact reminder, call `list_reminder_attachments`, pass its fresh `reminder_version` as `if_version` to `attach_url_to_reminder`, and read back attachment evidence.
 - Do not claim iPhone image visibility from local rendering. Report `mobile_visible_likely` as sync evidence only.
 
 ## Output Rules

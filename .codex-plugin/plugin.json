@@ -1,6 +1,6 @@
 {
   "name": "apple-reminders",
-  "version": "0.2.0",
+  "version": "0.2.0+codex.20260823122253",
   "description": "Manage Apple Reminders through a local MCP and macOS adapters with explicit verification and private-API trust boundaries.",
   "author": {
     "name": "Soo",

@@ -541,6 +541,102 @@ class DeleteReminderContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "concurrent_modification")
         self.assertEqual(row, (0, 2))
 
+    def test_explicit_db_delete_requires_version_precondition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "delete.sqlite"
+            reminder_id = create_delete_store(db)
+            args = self.make_args(db, reminder_id)
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.cmd_delete_reminder(args)
+
+            con = sqlite3.connect(db)
+            try:
+                row = con.execute(
+                    "select ZMARKEDFORDELETION,ZLIST from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()
+            finally:
+                con.close()
+
+        self.assertEqual(raised.exception.code, "invalid_input")
+        self.assertEqual(row, (0, 2))
+
+    def test_auto_without_version_uses_native_even_when_db_capability_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "delete.sqlite"
+            reminder_id = create_delete_store(db)
+            args = self.make_args(db, reminder_id, backend="auto")
+            evidence = {"verified": True, "source": "synthetic-test"}
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(
+                    adapter,
+                    "db_soft_delete_verified",
+                    return_value=(True, evidence),
+                ),
+                mock.patch.object(
+                    adapter,
+                    "run_osascript",
+                    return_value=f"x-apple-reminder://{reminder_id}",
+                ) as run_osascript,
+                mock.patch.object(adapter, "log_action", return_value=None),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_delete_reminder(args)
+
+            con = sqlite3.connect(db)
+            try:
+                row = con.execute(
+                    "select ZMARKEDFORDELETION,ZLIST from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()
+            finally:
+                con.close()
+
+        receipt = output.call_args.args[0]
+        self.assertEqual(receipt["backend"], "applescript")
+        self.assertEqual(receipt["backend_requested"], "auto")
+        self.assertFalse(receipt["auto_evidence"]["db_path_eligible"])
+        self.assertEqual(receipt["auto_evidence"]["reason"], "version_precondition_required")
+        self.assertEqual(row, (0, 2))
+        run_osascript.assert_called_once()
+
+    def test_auto_with_matching_version_uses_verified_db_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "delete.sqlite"
+            reminder_id = create_delete_store(db)
+            args = self.make_args(db, reminder_id, backend="auto", if_version=3)
+            evidence = {"verified": True, "source": "synthetic-test"}
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(
+                    adapter,
+                    "db_soft_delete_verified",
+                    return_value=(True, evidence),
+                ),
+                mock.patch.object(adapter, "run_osascript") as run_osascript,
+                mock.patch.object(adapter, "log_action", return_value=None),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_delete_reminder(args)
+
+            con = sqlite3.connect(db)
+            try:
+                row = con.execute(
+                    "select ZMARKEDFORDELETION,ZLIST from ZREMCDREMINDER where Z_PK=1"
+                ).fetchone()
+            finally:
+                con.close()
+
+        receipt = output.call_args.args[0]
+        self.assertEqual(receipt["backend"], "db")
+        self.assertEqual(receipt["backend_requested"], "auto")
+        self.assertTrue(receipt["auto_evidence"]["db_path_eligible"])
+        self.assertTrue(receipt["auto_evidence"]["version_precondition_provided"])
+        self.assertEqual(row, (1, None))
+        run_osascript.assert_not_called()
+
     def test_auto_uses_native_until_db_recovery_parity_is_verified(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Path(temp_dir) / "delete.sqlite"

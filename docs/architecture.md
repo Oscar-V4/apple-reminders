@@ -21,18 +21,20 @@ The dependency-light shape is therefore:
    - Encodes behavior, safety policy, output conventions, and when to read before writing.
 2. Typed local MCP boundary
    - A bundled stdio server exposes discoverable JSON Schema tools, bounded reads, opaque pagination, exact identifiers, and normalized mutation receipts.
+   - Packaged runtime resolves only bundled backend executables; path overrides are confined to source tests and cannot be enabled from a release archive.
    - It owns transport validation and routing, not Reminders business logic.
    - First-run tools separate content-free diagnostics, capability discovery, and the explicit EventKit permission prompt.
 3. Public EventKit bridge
-   - Uses EventKit for accounts, lists, bounded reminder reads, create/update, complete/reopen, and list-to-list moves.
+   - Uses EventKit for accounts, lists, bounded reminder reads, create/update, complete/reopen, list-to-list moves, and deletion.
    - Represents due dates, alarms, and recurrence as separate typed fields and preserves untouched fields on patches.
-   - Requires `expected_last_modified` for existing-reminder writes and read-back verification after saves.
+   - Requires `expected_last_modified` for existing-reminder writes, including deletion, and performs read-back verification.
 4. Private adapter core
    - A local CLI/library performs JSON-in/JSON-out operations for Reminders-only surfaces that EventKit cannot express.
-   - Uses private ReminderKit for image attachments because iPhone visibility requires native CloudKit attachment records.
-   - Uses private store writes only for native Reminders surfaces not exposed publicly, such as sections, tags, URL attachments, and bounded repair/audit flows.
+   - Uses private ReminderKit for image attachments and list-section saves because mobile visibility requires native Reminders/CloudKit transactions.
+   - Uses private store writes only for remaining native Reminders surfaces not exposed publicly, such as tags, URL attachments, and bounded repair/audit flows. Direct SQLite section writes are diagnostic-only and never count as iCloud verification.
+   - Requires a fresh matching reminder version before mutating an existing reminder; its DB delete command is diagnostic-only and is not an MCP fallback.
 5. Native UI handoff
-   - AppleScript remains a narrow fallback for recoverable deletion and an explicit `show_reminder` handoff.
+   - AppleScript remains a narrow compatibility path and an explicit `show_reminder` handoff, not the normal delete backend.
    - Foreground interaction is not the primary data path.
 
 ## Why Not UI Automation First
@@ -46,7 +48,7 @@ Normal operation should be background-first:
 - verify by read-back
 - optionally open Reminders only when the user asks to inspect the result
 
-For image attachments, the verification target is iPhone visibility, not local Mac rendering. A SQLite-only image row can show in Reminders on the Mac while failing to appear on iOS because it lacks CloudKit server-record state. The adapter therefore defaults to the ReminderKit image backend and exposes `audit_attachments` plus `repair_attachments` for older local-only rows.
+For image attachments and sections, the verification target is mobile-sync evidence, not local Mac rendering. A SQLite-only image or section row can show in Reminders on the Mac while failing to appear on iOS because the Reminders daemon never accepted it as a native CloudKit save. The adapter therefore uses ReminderKit for both image attachments and section writes, verifies CloudKit versions, and can repair older local-only sections in place.
 
 ## MCP Contract
 
