@@ -744,6 +744,8 @@ def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
                     "reason",
                     "verified",
                     "replayed",
+                    "attachment_active",
+                    "code",
                 }
                 or normalized.endswith("_id")
                 or normalized.endswith("_ids")

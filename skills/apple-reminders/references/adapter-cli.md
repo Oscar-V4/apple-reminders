@@ -12,6 +12,8 @@ First-run tools are deliberately separate:
 
 Public reads use `list_reminder_accounts`, `list_reminder_lists`, `fetch_reminders`, and `read_reminder`. Existing-reminder EventKit writes require the exact ID plus `expected_last_modified`; create requires an idempotency key. `fetch_reminders` requires a native semantic bound in addition to a limit: calendar IDs, an incomplete due range, or a completed completion range. Its opaque cursor is valid only with unchanged filters, sort, and page size.
 
+A non-null URL passed to the public MCP create/update tools is a deliberate hybrid operation: after EventKit succeeds, the MCP obtains a fresh private reminder version and verifies the matching native URL attachment. Call `attach_url_to_reminder` directly only for extra URL attachments or explicit recovery from `partial_success`.
+
 The rest of this reference documents the lower-level private implementation and maintenance escape hatch.
 
 ## Adapter CLI

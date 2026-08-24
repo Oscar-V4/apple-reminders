@@ -19,6 +19,10 @@ Copy Google Calendar's product contract rather than its hosted-connector impleme
 
 Keep private SQLite and ReminderKit behavior for tags, sections, advanced attachments, repair, and verified fast paths that public APIs cannot express. Section creation and membership use native ReminderKit saves plus CloudKit version read-back because direct SQLite rows can remain local-only indefinitely. Every private existing-item write consumes a fresh matching reminder version; all private writes are command-schema-gated, path-confined, transactional where possible, read back, and explicit about recovery limits.
 
+## Visible URL Policy
+
+A non-null `url` supplied to MCP reminder create or update is one hybrid product operation. EventKit stores the public URL metadata, then the private adapter obtains a fresh reminder version and creates the matching native URL attachment that the Reminders app displays. The combined receipt is `verified` only after attachment read-back. If EventKit committed but attachment verification fails, the receipt is `partial_success` with explicit attachment recovery rather than a false success. Create retries replay the combined receipt and do not duplicate either object. Setting `patch.url` to null clears only EventKit metadata; URL attachment deletion remains a separate explicit operation because a reminder can own multiple attachments.
+
 ## Delete Policy
 
 The MCP `delete_reminder` path uses public EventKit with an exact reminder ID and fresh `expected_last_modified`. It verifies that the reminder is absent from the local EventKit store and reports Recently Deleted as expected but unverified until UI evidence is available. An identifier that is already unresolvable is a no-write not-found result, not proof of a prior successful deletion, because EventKit identifiers can change after a full sync. The caller must read current state before retrying. The path never falls back to AppleScript or SQLite. The adapter's capability-gated DB soft-delete remains a diagnostic CLI path only.

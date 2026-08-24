@@ -142,6 +142,97 @@ print(json.dumps(payload))
     )
 
 
+def mock_visible_url_adapter(path: Path) -> None:
+    path.write_text(
+        """from __future__ import annotations
+import json
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+request_log = Path(__file__).with_suffix(".requests")
+previous = request_log.read_text(encoding="utf-8") if request_log.exists() else ""
+request_log.write_text(previous + json.dumps(argv) + "\\n", encoding="utf-8")
+command = argv[0] if argv else None
+reminder_id = argv[argv.index("--id") + 1]
+if command == "list_attachments":
+    payload = {
+        "ok": True,
+        "reminder_id": reminder_id,
+        "reminder_version": 12,
+        "attachments": [],
+        "truncated": False,
+    }
+elif command == "attach_url":
+    url = argv[argv.index("--url") + 1]
+    payload = {
+        "ok": True,
+        "status": "verified",
+        "operation": "attach_url",
+        "operation_id": "8D0346C4-90B4-48D7-A18D-A8F3E9B68054",
+        "backend": "sqlite_private",
+        "target": {
+            "id": reminder_id,
+            "attachment_id": "URL-ATTACHMENT",
+        },
+        "before": {"id": reminder_id},
+        "after": {
+            "reminder": {"id": reminder_id},
+            "attachment": {
+                "id": "URL-ATTACHMENT",
+                "type": "url",
+                "url": url,
+            },
+        },
+        "verification": {"state": "read_back", "attachment_active": True},
+        "recovery": {"semantics": "delete_attachment"},
+    }
+else:
+    raise SystemExit(99)
+print(json.dumps(payload))
+""",
+        encoding="utf-8",
+    )
+
+
+def mock_failing_visible_url_adapter(path: Path) -> None:
+    path.write_text(
+        """from __future__ import annotations
+import json
+import sys
+
+argv = sys.argv[1:]
+command = argv[0] if argv else None
+reminder_id = argv[argv.index("--id") + 1]
+if command == "list_attachments":
+    payload = {
+        "ok": True,
+        "reminder_id": reminder_id,
+        "reminder_version": 12,
+        "attachments": [],
+        "truncated": False,
+    }
+elif command == "attach_url":
+    payload = {
+        "ok": False,
+        "status": "failed_no_mutation",
+        "operation": "attach_url",
+        "operation_id": "4EA7E143-1456-4F28-B11A-97597EE0EF51",
+        "backend": "sqlite_private",
+        "target": {"id": reminder_id},
+        "after": {},
+        "verification": {"state": "failed"},
+        "recovery": {"semantics": "not_applicable"},
+        "error": {"code": "schema_mismatch", "message": "fixture failure"},
+    }
+else:
+    raise SystemExit(99)
+print(json.dumps(payload))
+""",
+        encoding="utf-8",
+    )
+
+
 def mock_eventkit_bridge(path: Path) -> None:
     path.write_text(
         """from __future__ import annotations
@@ -335,6 +426,11 @@ class McpPackagingTests(unittest.TestCase):
             ["calendar_id", "title", "idempotency_key"],
         )
         self.assertIn("recurrence_rules", create["inputSchema"]["properties"])
+        self.assertIn("visible URL attachment", create["description"])
+        self.assertIn(
+            "visible URL attachment",
+            create["inputSchema"]["properties"]["url"]["description"],
+        )
         self.assertEqual(
             create["inputSchema"]["properties"]["notes"]["maxLength"],
             100_000,
@@ -352,6 +448,12 @@ class McpPackagingTests(unittest.TestCase):
                 "maxLength"
             ],
             100_000,
+        )
+        self.assertIn(
+            "visible URL attachment",
+            update["inputSchema"]["properties"]["patch"]["properties"]["url"][
+                "description"
+            ],
         )
         attach_image = by_name["attach_image_to_reminder"]
         self.assertEqual(
@@ -967,6 +1069,203 @@ class McpProtocolTests(unittest.TestCase):
         self.assertNotIn("idempotency_key", bridge_requests[0])
         self.assertEqual(bridge_requests[1]["patch"]["notes"], None)
         self.assertEqual(bridge_requests[4]["calendar_id"], "LIST-B")
+
+    def test_create_with_url_verifies_a_native_reminders_attachment(self) -> None:
+        url = "https://example.com/results"
+        create_arguments = {
+            "calendar_id": "LIST-A",
+            "title": "Check results",
+            "url": url,
+            "idempotency_key": "eventkit:create:visible-url:2026",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "mock_eventkit.py"
+            adapter = temp_root / "mock_adapter.py"
+            mock_eventkit_bridge(bridge)
+            mock_visible_url_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "create_reminder",
+                            "arguments": create_arguments,
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "create_reminder",
+                            "arguments": create_arguments,
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+                home_path=temp_root / "home",
+            )
+            request_log = adapter.with_suffix(".requests")
+            adapter_requests = (
+                [json.loads(line) for line in request_log.read_text(encoding="utf-8").splitlines()]
+                if request_log.exists()
+                else []
+            )
+
+        result = responses[1]["result"]
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(payload["status"], "verified")
+        self.assertIn("url_attachment", payload["after"])
+        self.assertEqual(payload["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
+        self.assertEqual(payload["after"]["url_attachment"]["url"], url)
+        self.assertTrue(payload["verification"]["url_attachment"]["attachment_active"])
+        replay = responses[2]["result"]["structuredContent"]
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
+        self.assertTrue(replay["verification"]["url_attachment"]["attachment_active"])
+        self.assertEqual(
+            adapter_requests,
+            [
+                ["list_attachments", "--id", "REMINDER-CREATED", "--limit", "1"],
+                [
+                    "attach_url",
+                    "--id",
+                    "REMINDER-CREATED",
+                    "--url",
+                    url,
+                    "--if-version",
+                    "12",
+                ],
+            ],
+        )
+
+    def test_update_with_url_verifies_a_native_reminders_attachment(self) -> None:
+        url = "https://example.com/results"
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "mock_eventkit.py"
+            adapter = temp_root / "mock_adapter.py"
+            mock_eventkit_bridge(bridge)
+            mock_visible_url_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "update_reminder",
+                            "arguments": {
+                                "reminder_id": "REMINDER-1",
+                                "expected_last_modified": "2026-08-06T00:00:00Z",
+                                "patch": {"url": url},
+                            },
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+            )
+            request_log = adapter.with_suffix(".requests")
+            adapter_requests = (
+                [json.loads(line) for line in request_log.read_text(encoding="utf-8").splitlines()]
+                if request_log.exists()
+                else []
+            )
+
+        result = responses[1]["result"]
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(payload["status"], "verified")
+        self.assertIn("url_attachment", payload["after"])
+        self.assertEqual(payload["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
+        self.assertEqual(payload["after"]["url_attachment"]["url"], url)
+        self.assertTrue(payload["verification"]["url_attachment"]["attachment_active"])
+        self.assertEqual(
+            adapter_requests,
+            [
+                ["list_attachments", "--id", "REMINDER-1", "--limit", "1"],
+                [
+                    "attach_url",
+                    "--id",
+                    "REMINDER-1",
+                    "--url",
+                    url,
+                    "--if-version",
+                    "12",
+                ],
+            ],
+        )
+
+    def test_url_attachment_failure_preserves_the_eventkit_write_as_partial_success(self) -> None:
+        url = "https://example.com/results"
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "mock_eventkit.py"
+            adapter = temp_root / "mock_adapter.py"
+            mock_eventkit_bridge(bridge)
+            mock_failing_visible_url_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "create_reminder",
+                            "arguments": {
+                                "calendar_id": "LIST-A",
+                                "title": "Check results",
+                                "url": url,
+                                "idempotency_key": "eventkit:create:partial-url:2026",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "create_reminder",
+                            "arguments": {
+                                "calendar_id": "LIST-A",
+                                "title": "Check results",
+                                "url": url,
+                                "idempotency_key": "eventkit:create:partial-url:2026",
+                            },
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+                home_path=temp_root / "home",
+            )
+
+        result = responses[1]["result"]
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"], result)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "partial_success")
+        self.assertEqual(payload["after"]["id"], "REMINDER-CREATED")
+        self.assertEqual(payload["verification"]["url_attachment"]["state"], "failed")
+        self.assertFalse(payload["verification"]["url_attachment"]["attachment_active"])
+        self.assertEqual(payload["warnings"][-1]["code"], "schema_mismatch")
+        self.assertEqual(
+            payload["recovery"]["url_attachment"]["semantics"],
+            "call_attach_url_to_reminder_after_fresh_attachment_read",
+        )
+        replay = responses[2]["result"]["structuredContent"]
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["status"], "partial_success")
+        self.assertEqual(replay["warnings"][-1]["code"], "schema_mismatch")
 
     def test_pending_eventkit_create_retry_replays_a_valid_receipt(self) -> None:
         create_arguments = {

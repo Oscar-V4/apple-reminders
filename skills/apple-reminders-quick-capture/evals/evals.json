@@ -18,6 +18,15 @@
         "Uses exact target IDs for follow-up attachment work.",
         "Does not claim unsupported fields were written."
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "UPCOMING EVENTS에 결과 발표를 9월 11일 종일로 추가하고 https://example.com/results 링크도 넣어줘.",
+      "expected_output": "Calls create_reminder once with the exact calendar ID, typed all-day due value, URL, and a fresh idempotency key. Treats verified as proof that both EventKit metadata and the visible native URL attachment passed read-back, then reads the exact reminder and reports the combined receipt without a redundant attach call.",
+      "assertions": [
+        "Does not invent an alarm from the due date.",
+        "Reports partial_success and the URL attachment recovery path if the visible attachment step fails."
+      ]
     }
   ]
 }

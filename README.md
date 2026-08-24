@@ -179,6 +179,7 @@ instead of relying on an old command list. Broadly, the implementation covers:
 
 - bounded account/list/section/reminder/tag and attachment reads;
 - exact-ID EventKit reminder create/update/complete/reopen/move/delete operations;
+- hybrid URL create/update that preserves EventKit metadata and verifies the matching user-visible native URL attachment before reporting full success;
 - list creation by exact name with optional color and emblem, native ReminderKit
   section creation/membership with CloudKit version read-back, plus tag operations;
 - first-class MCP tools for URL/image attachment, exact attachment replacement

@@ -433,7 +433,7 @@
     {
       "name": "create_reminder",
       "title": "Create Reminder",
-      "description": "Create one reminder in an exact EventKit list ID using Apple's public API. Supports typed due dates, absolute or coordinate-backed location alarms, URL, priority, and one recurrence rule. Plain location text is intentionally unsupported because current Reminders stores discard it on read-back. A required idempotency key makes retries replay the original receipt instead of creating a duplicate.",
+      "description": "Create one reminder in an exact EventKit list ID using Apple's public API. Supports typed due dates, absolute or coordinate-backed location alarms, URL, priority, and one recurrence rule. A supplied URL is also created as a visible URL attachment and must pass native attachment read-back before the combined receipt is verified. Plain location text is intentionally unsupported because current Reminders stores discard it on read-back. A required idempotency key makes retries replay the original combined receipt instead of creating a duplicate.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -458,7 +458,7 @@
             "type": "string",
             "format": "uri",
             "maxLength": 100000,
-            "description": "Optional reminder URL with an explicit scheme."
+            "description": "Optional reminder URL with an explicit scheme. The plugin stores the EventKit value and ensures the same value exists as a visible URL attachment in Reminders."
           },
           "priority": {
             "type": "integer",
@@ -633,7 +633,7 @@
     {
       "name": "update_reminder",
       "title": "Update Reminder",
-      "description": "Update one reminder through Apple's public EventKit API using its exact ID and the last_modified value from read_reminder or fetch_reminders. Only fields inside patch change; null explicitly clears nullable fields. A stale last_modified value fails without mutation.",
+      "description": "Update one reminder through Apple's public EventKit API using its exact ID and the last_modified value from read_reminder or fetch_reminders. Only fields inside patch change. A non-null URL also ensures a visible native URL attachment; null clears only nullable EventKit metadata and never implicitly deletes attachments. A stale last_modified value fails without mutation.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -655,7 +655,12 @@
             "properties": {
               "title": {"type": "string", "minLength": 1, "maxLength": 10000},
               "notes": {"type": ["string", "null"], "maxLength": 100000},
-              "url": {"type": ["string", "null"], "format": "uri", "maxLength": 100000},
+              "url": {
+                "type": ["string", "null"],
+                "format": "uri",
+                "maxLength": 100000,
+                "description": "A non-null URL updates EventKit metadata and ensures a visible URL attachment in Reminders. Null clears only EventKit URL metadata; attachment deletion remains an explicit attachment operation."
+              },
               "priority": {"type": "integer", "minimum": 0, "maximum": 9},
               "due": {
                 "oneOf": [

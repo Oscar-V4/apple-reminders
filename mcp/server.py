@@ -1088,6 +1088,133 @@ def normalize_eventkit_payload(
     return payload
 
 
+def _mutation_reminder_id(payload: dict[str, Any]) -> str | None:
+    for container_name in ("target", "after"):
+        container = payload.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for key in ("reminder_id", "id", "external_id"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _url_attachment_partial_receipt(
+    payload: dict[str, Any],
+    *,
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    payload["ok"] = True
+    payload["status"] = "partial_success"
+    payload.setdefault("warnings", []).append(
+        {
+            "code": code,
+            "message": message,
+        }
+    )
+    verification = payload.setdefault("verification", {})
+    verification["url_attachment"] = {
+        "state": "failed",
+        "status": "failed_manual_repair_required",
+        "attachment_active": False,
+        "error_code": code,
+    }
+    recovery = payload.setdefault("recovery", {})
+    recovery["url_attachment"] = {
+        "semantics": "call_attach_url_to_reminder_after_fresh_attachment_read",
+        "automatic_retry_safe": False,
+    }
+    return payload
+
+
+def ensure_visible_url_attachment(
+    payload: dict[str, Any],
+    url: str,
+) -> dict[str, Any]:
+    if payload.get("status") not in {"verified", "unchanged"}:
+        return payload
+    reminder_id = _mutation_reminder_id(payload)
+    if reminder_id is None:
+        return _url_attachment_partial_receipt(
+            payload,
+            code="native_url_attachment_target_missing",
+            message=(
+                "The EventKit write succeeded, but its reminder identifier was unavailable for "
+                "the visible URL attachment step."
+            ),
+        )
+
+    list_arguments = {"reminder_id": reminder_id, "limit": 1}
+    list_payload, list_is_error = invoke_adapter(
+        build_adapter_argv("list_reminder_attachments", list_arguments)
+    )
+    reminder_version = list_payload.get("reminder_version")
+    if (
+        list_is_error
+        or not isinstance(reminder_version, int)
+        or isinstance(reminder_version, bool)
+        or reminder_version < 0
+    ):
+        error = list_payload.get("error") if isinstance(list_payload.get("error"), dict) else {}
+        return _url_attachment_partial_receipt(
+            payload,
+            code=str(error.get("code") or "native_url_attachment_precondition_failed"),
+            message=(
+                "The EventKit write succeeded, but the plugin could not obtain a fresh reminder "
+                "version for the visible URL attachment."
+            ),
+        )
+
+    attach_arguments = {
+        "reminder_id": reminder_id,
+        "url": url,
+        "if_version": reminder_version,
+    }
+    attach_payload, attach_is_error = invoke_adapter(
+        build_adapter_argv("attach_url_to_reminder", attach_arguments)
+    )
+    receipt_error = (
+        validate_adapter_receipt(attach_payload, expected_operation="attach_url")
+        if not attach_is_error
+        else None
+    )
+    attachment = (
+        attach_payload.get("after", {}).get("attachment")
+        if isinstance(attach_payload.get("after"), dict)
+        else None
+    )
+    attachment_active = (
+        attach_payload.get("verification", {}).get("attachment_active") is True
+        if isinstance(attach_payload.get("verification"), dict)
+        else False
+    )
+    if attach_is_error or receipt_error or not isinstance(attachment, dict) or not attachment_active:
+        error = attach_payload.get("error") if isinstance(attach_payload.get("error"), dict) else {}
+        return _url_attachment_partial_receipt(
+            payload,
+            code=str(
+                error.get("code")
+                or ("invalid_adapter_receipt" if receipt_error else "native_url_attachment_failed")
+            ),
+            message=(
+                "The EventKit write succeeded, but the native URL attachment was not verified in "
+                "Reminders."
+            ),
+        )
+
+    payload.setdefault("after", {})["url_attachment"] = attachment
+    payload.setdefault("verification", {})["url_attachment"] = {
+        **attach_payload["verification"],
+        "status": attach_payload["status"],
+    }
+    payload.setdefault("recovery", {})["url_attachment"] = attach_payload["recovery"]
+    if payload.get("status") == "unchanged" and attach_payload.get("status") == "verified":
+        payload["status"] = "verified"
+    return payload
+
+
 def invoke_eventkit_mutation(
     tool_name: str,
     operation: str,
@@ -1105,6 +1232,11 @@ def invoke_eventkit_mutation(
             bridge_contract.validate_mutation_receipt(payload, operation)
         except RuntimeError as exc:
             raise EventKitReceiptFailure(str(exc)) from exc
+        visible_url = bridge_arguments.get("url") if tool_name == "create_reminder" else None
+        if tool_name == "update_reminder" and isinstance(bridge_arguments.get("patch"), dict):
+            visible_url = bridge_arguments["patch"].get("url")
+        if isinstance(visible_url, str):
+            payload = ensure_visible_url_attachment(payload, visible_url)
         return payload
 
     try:

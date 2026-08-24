@@ -14,7 +14,7 @@ Use this skill when the user is adding new work to Reminders. Optimize for prese
 1. Normalize the requested title, list, notes, priority, due date, alarms, recurrence, and timezone. Convert relative dates into exact local dates or ISO datetimes before writing.
 2. Read bounded list state first with `list_reminder_lists`. If list choice depends on recent structure, use `fetch_reminders` with explicit `calendar_ids` and a bounded limit.
 3. If the target list is missing or ambiguous, show candidate lists and stop. Do not invent a list unless the user asked to create one.
-4. Call `create_reminder` with the exact `calendar_id`, preserved title, and a fresh idempotency key. Include only fields the user supplied or clearly delegated.
+4. Call `create_reminder` with the exact `calendar_id`, preserved title, and a fresh idempotency key. Include only fields the user supplied or clearly delegated. When a URL is supplied, pass it in the same call; the tool writes the EventKit value and ensures a visible native URL attachment before returning a fully verified receipt.
 5. Encode all-day and timed due values with the typed `due` object. Encode alerts separately in `alarms`; never turn a due date into an alarm unless the user asked to be notified. A timed due value requires an RFC 3339 offset and IANA timezone.
 6. If the create receipt is `verified`, report the exact ID and written fields. If it is `partial_success` or `committed_verification_pending`, surface its verification and recovery objects instead of saying the task is fully done.
 7. Read the exact created ID with `read_reminder` before reporting final success.
@@ -43,7 +43,9 @@ For an all-day due date use `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute a
 ## Attachments During Capture
 
 - For image capture, resolve the exact source file and target reminder, call `list_reminder_attachments` for a fresh `reminder_version`, then pass it as `if_version` to `attach_image_to_reminder` through the attachment maintenance rules.
-- A normal reminder URL can be supplied in the EventKit create. When the user specifically wants a Reminders URL-attachment object, create and read the exact reminder, call `list_reminder_attachments`, pass its fresh `reminder_version` as `if_version` to `attach_url_to_reminder`, and read back attachment evidence.
+- A URL supplied to `create_reminder` is a combined write: EventKit metadata plus a visible native URL attachment. Do not follow a `verified` create with a redundant `attach_url_to_reminder` call.
+- For a newly requested URL on an existing reminder, use `update_reminder` with a non-null `patch.url`; it likewise ensures the visible attachment. Use `attach_url_to_reminder` directly only for an additional URL attachment or to recover from a reported `partial_success`, after obtaining a fresh `reminder_version`.
+- Clearing `patch.url` removes only EventKit URL metadata. Never infer that the user also wants existing URL attachments deleted; attachment deletion remains explicit.
 - Do not claim iPhone image visibility from local rendering. Report `mobile_visible_likely` as sync evidence only.
 
 ## Output Rules
