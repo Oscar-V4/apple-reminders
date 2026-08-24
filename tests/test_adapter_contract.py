@@ -435,6 +435,56 @@ class CleanupTagContractTests(unittest.TestCase):
         self.assertIn("Used", names)
         self.assertIn("Historical", names)
 
+    def test_multi_label_cleanup_uses_a_single_database_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "tags.sqlite"
+            create_tag_store(db)
+            connection = sqlite3.connect(db)
+            try:
+                connection.execute(
+                    "insert into ZREMCDHASHTAGLABEL values (6, 'Unused Two', "
+                    "'unused two', 'ACCOUNT-A', null, 1, 1)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            preview_args = self.make_args(db, prefix="Unused")
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_cleanup_tags(preview_args)
+            preview = output.call_args.args[0]
+            backup_receipt = {
+                "backup": str(Path(temp_dir) / "tag-cleanup.sqlite"),
+                "kind": "sqlite_online",
+                "source_scope": "single_database",
+            }
+
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(
+                    adapter, "create_database_backup", return_value=backup_receipt
+                ) as create_backup,
+                mock.patch.object(adapter, "log_action", return_value=None),
+                mock.patch.object(adapter, "json_out") as output,
+            ):
+                adapter.cmd_cleanup_tags(
+                    self.make_args(
+                        db,
+                        prefix="Unused",
+                        apply=True,
+                        preview_digest=preview["candidate_digest"],
+                    )
+                )
+
+        receipt = output.call_args.args[0]
+        create_backup.assert_called_once_with(db, label="tag-cleanup")
+        self.assertEqual(receipt["recovery"]["backup"], backup_receipt)
+        self.assertEqual(
+            receipt["recovery"]["backup"]["source_scope"], "single_database"
+        )
+
     def test_apply_rejects_changed_candidate_set(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Path(temp_dir) / "tags.sqlite"

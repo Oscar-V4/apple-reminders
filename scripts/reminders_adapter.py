@@ -21,7 +21,6 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import urllib.parse
@@ -39,6 +38,10 @@ from receipt_contract import (  # noqa: E402
     RESULT_RECEIPT_STATUSES,
     STABLE_ERROR_CODES,
     build_operation_receipt,
+)
+from reminders_recovery import (  # noqa: E402
+    create_container_backup,
+    create_sqlite_backup,
 )
 from reminders_contracts import (  # noqa: E402
     REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
@@ -2665,42 +2668,25 @@ def cmd_doctor(_: argparse.Namespace) -> int:
 
 
 def create_store_backup(output: str | None = None) -> dict[str, Any]:
-    if not GROUP.exists():
-        raise AdapterError("Reminders group container does not exist")
-    default_dir = APP_SUPPORT / "backups"
-    ensure_private_dir(default_dir)
-    out = (
-        Path(output).expanduser()
-        if output
-        else default_dir / f"reminders-container-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.tgz"
-    )
-    out = out.resolve()
-    group = GROUP.resolve()
-    if out == group or group in out.parents:
-        raise AdapterError("Backup output must be outside the Reminders group container")
-    ensure_private_dir(out.parent)
-    temp_handle = tempfile.NamedTemporaryFile(
-        prefix=f".{out.name}.",
-        suffix=".tmp",
-        dir=out.parent,
-        delete=False,
-    )
-    temp_path = Path(temp_handle.name)
-    temp_handle.close()
     try:
-        with tarfile.open(temp_path, "w:gz") as tar:
-            tar.add(group, arcname="Container_v1")
-        temp_path.chmod(0o600)
-        os.replace(temp_path, out)
-        out.chmod(0o600)
-    finally:
-        temp_path.unlink(missing_ok=True)
-    return {
-        "backup": str(out),
-        "bytes": out.stat().st_size,
-        "consistency": "best_effort_live_container",
-        "warning": "Reminders may write while this archive is created; verify the backup before relying on it for recovery.",
-    }
+        return create_container_backup(
+            group=GROUP,
+            backup_dir=APP_SUPPORT / "backups",
+            output=Path(output) if output else None,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise AdapterError(str(exc)) from exc
+
+
+def create_database_backup(database: Path, *, label: str) -> dict[str, Any]:
+    try:
+        return create_sqlite_backup(
+            database=database,
+            backup_dir=APP_SUPPORT / "backups",
+            label=label,
+        )
+    except (FileNotFoundError, ValueError, sqlite3.Error) as exc:
+        raise AdapterError(f"Scoped database backup failed: {exc}") from exc
 
 
 def cmd_backup_store(args: argparse.Namespace) -> int:
@@ -3411,7 +3397,7 @@ def cmd_cleanup_tags(args: argparse.Namespace) -> int:
 
         backup = None
         if len(candidates) > 1 and not args.no_backup:
-            backup = create_store_backup()
+            backup = create_database_backup(db, label="tag-cleanup")
 
         con.execute("begin immediate")
         locked_rows, locked_truncated = cleanup_tag_candidates(
@@ -6893,7 +6879,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--emblem")
     p.set_defaults(func=cmd_create_list)
 
-    p = sub.add_parser("create_reminder")
+    p = sub.add_parser(
+        "create_reminder",
+        help="Deprecated direct write; use the MCP create_reminder tool (removal planned for 0.3.0).",
+    )
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--list", required=True)
@@ -6907,7 +6896,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_create_reminder)
 
-    p = sub.add_parser("update_reminder")
+    p = sub.add_parser(
+        "update_reminder",
+        help="Deprecated direct write; use the MCP update_reminder tool (removal planned for 0.3.0).",
+    )
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
@@ -6924,7 +6916,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_update_reminder)
 
-    p = sub.add_parser("complete_reminder")
+    p = sub.add_parser(
+        "complete_reminder",
+        help="Deprecated direct write; use the MCP complete_reminder tool (removal planned for 0.3.0).",
+    )
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
@@ -6933,7 +6928,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_complete_reminder)
 
-    p = sub.add_parser("reopen_reminder")
+    p = sub.add_parser(
+        "reopen_reminder",
+        help="Deprecated direct write; use the MCP reopen_reminder tool (removal planned for 0.3.0).",
+    )
     add_common_db(p)
     p.add_argument("--backend", choices=["db", "applescript"], default="db")
     p.add_argument("--id")
@@ -6942,7 +6940,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--if-version", type=int)
     p.set_defaults(func=cmd_reopen_reminder)
 
-    p = sub.add_parser("delete_reminder")
+    p = sub.add_parser(
+        "delete_reminder",
+        help="Deprecated direct write; use the MCP delete_reminder tool (removal planned for 0.3.0).",
+    )
     add_common_db(p)
     p.add_argument("--backend", choices=["auto", "db", "applescript"], default="auto")
     p.add_argument("--id")

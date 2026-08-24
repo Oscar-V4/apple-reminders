@@ -38,6 +38,7 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/eventkit_bridge_schema.json"),
     Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
+    Path("scripts/reminders_recovery.py"),
     Path("scripts/reminders_contracts.py"),
     Path("scripts/reminders_doctor.py"),
     Path("scripts/reminders_eventkit.m"),

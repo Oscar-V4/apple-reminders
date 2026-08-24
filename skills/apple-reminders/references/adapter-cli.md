@@ -6,7 +6,7 @@ The bundled stdio MCP declared by `.mcp.json` is the normal agent-facing interfa
 
 First-run tools are deliberately separate:
 
-- `reminders_plugin_doctor`: content-free local readiness and schema report; it does not request permission or return reminder/account content.
+- `reminders_plugin_doctor`: content-free local readiness and schema report; summary is the default, while `detail_level=full` preserves the existing troubleshooting report. It does not request permission or return reminder/account content.
 - `get_reminders_capabilities`: EventKit capability and current authorization state.
 - `request_reminders_access`: the only explicit EventKit TCC prompt.
 
@@ -37,7 +37,7 @@ The repository's allowlisted export lives at `minis/apple-reminders/`. Validate 
 Diagnostics and backups:
 
 - `doctor`: inspect Reminders container access, schema, and adapter readiness.
-- `backup_store`: create a local backup before risky repair or bulk write flows.
+- `backup_store`: create a whole-container archive for cross-store recovery work. Managed archives keep at most two/300 MB; explicit output paths are not auto-pruned.
 - `purge_logs`: remove the current redacted action journal and rotated journals.
 
 Cache and read paths:
@@ -59,6 +59,11 @@ Writes:
 - `create_section`
 - `move_to_section`
 - `add_tag`, `remove_tag`, `cleanup_tags`
+
+The direct adapter reminder create/update/complete/reopen/delete commands above
+are deprecated compatibility paths in 0.2.x. Use their typed MCP/EventKit tools
+for normal work. They remain functional until a separately reviewed 0.3.0
+breaking removal.
 
 Attachments:
 
@@ -83,8 +88,8 @@ Attachments:
 - Section creation and section membership moves use the native `remkit_sections.m` save path and verify the relevant CloudKit version. Direct SQLite section writes are diagnostic-only and report `committed_verification_pending`; a local row is not mobile-sync evidence.
 - Use SQLite-backed commands for tags, URL attachments, cache reads, audits, and repair flows because public APIs do not expose those surfaces.
 - URL attachment replace/delete mirrors the native app: retain the attachment cloud-state tombstone, remove the old URL object row, and preserve the selected display order on replacement. Image-object removal remains a soft-delete and never hard-deletes copied files.
-- `cleanup_tags --apply` is an intentional label-row hard-delete maintenance operation. It requires tag/prefix scope plus the exact digest from its preview; candidates are escaped literally, account-aware when requested, locked, revalidated as zero-reference, and read back. Multi-label cleanup takes a container backup by default; a single removed label is treated as recreatable. Local verification does not prove iCloud propagation.
-- `repair_attachments --apply` likewise requires the exact `--preview-digest` from an untruncated dry run and takes a backup by default.
+- `cleanup_tags --apply` is an intentional label-row hard-delete maintenance operation. It requires tag/prefix scope plus the exact digest from its preview; candidates are escaped literally, account-aware when requested, locked, revalidated as zero-reference, and read back. Multi-label cleanup takes a single-database SQLite online backup by default; managed database backups keep at most five/100 MB. A single removed label is treated as recreatable. Local verification does not prove iCloud propagation.
+- `repair_attachments --apply` likewise requires the exact `--preview-digest` from an untruncated dry run and takes a whole-container backup by default. Managed container archives keep at most two/300 MB.
 
 ## MCP Attachment Tools
 

@@ -55,7 +55,8 @@ For image attachments and sections, the verification target is mobile-sync evide
 
 The bundled MCP schema in `schemas/mcp-tools.json` is the user-facing contract. It provides:
 
-- content-free doctor, capability, and explicit permission-request tools
+- content-free doctor with a concise default/full diagnostic mode, capability,
+  and explicit permission-request tools
 - account/list enumeration and semantically bounded reminder fetches
 - opaque cursors bound to an immutable filter fingerprint
 - exact reminder reads and exact-ID mutations
@@ -97,6 +98,16 @@ The lower-level adapter continues to expose stable JSON commands for private ope
 - `replace_attachment`
 - `backup_store`
 - `purge_logs`
+
+Direct adapter `create_reminder`, `update_reminder`, `complete_reminder`,
+`reopen_reminder`, and `delete_reminder` are deprecated compatibility commands
+in 0.2.x. They are not the normal MCP route and remain only to avoid undoing
+existing workflows before a separately reviewed 0.3.0 removal.
+
+Recovery snapshots sit behind the small `reminders_recovery.py` module. Tag
+cleanup uses a single-database SQLite online backup; cross-store attachment
+repair uses a whole-container archive. Strict filename and count/byte policies
+prune only plugin-managed snapshots.
 
 ## Implementation Rule
 

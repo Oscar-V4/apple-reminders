@@ -31,6 +31,18 @@ The MCP `delete_reminder` path uses public EventKit with an exact reminder ID an
 
 `cleanup_tags --apply` remains an intentional unused-label maintenance primitive. It requires a bounded scope and preview digest, escapes wildcard characters, reacquires candidates under a write lock, proves that no assignment rows reference each label, and reports exact deleted labels plus backup/recovery semantics. Ordinary `remove_tag` only soft-deletes assignments.
 
+Multi-label cleanup backs up only the selected SQLite store through SQLite's
+online backup interface. Cross-store attachment repair retains the broader
+container archive. Plugin-managed backups are bounded by kind-specific
+count/byte policies; explicit output paths are never auto-pruned.
+
+## 0.2.x Compatibility Policy
+
+The typed MCP/EventKit tools are the public write seam. Direct adapter public
+write commands remain present but deprecated for the rest of 0.2.x so prior
+working flows are not silently broken. Their removal requires a separately
+reviewed 0.3.0 migration.
+
 ## Evidence Boundary
 
 Static checks and synthetic fixtures establish contract behavior, not real iCloud convergence or device visibility. Public release claims about DB deletion parity, ReminderKit attachment sync, tag propagation, and supported macOS builds require separately approved sacrificial tests.

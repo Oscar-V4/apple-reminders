@@ -859,7 +859,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
     return payload, is_error
 
 
-def invoke_doctor() -> tuple[dict[str, Any], bool]:
+def invoke_doctor(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     path = doctor_path()
     if not path.is_file():
         return (
@@ -874,7 +874,13 @@ def invoke_doctor() -> tuple[dict[str, Any], bool]:
         )
     try:
         completed = subprocess.run(
-            [sys.executable, str(path), "--compact"],
+            [
+                sys.executable,
+                str(path),
+                "--compact",
+                "--detail-level",
+                str(arguments.get("detail_level", "summary")),
+            ],
             cwd=PLUGIN_ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -1346,7 +1352,7 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
         )
     arguments = effective_arguments(tool, supplied)
     if name in DOCTOR_TOOLS:
-        payload, is_error = invoke_doctor()
+        payload, is_error = invoke_doctor(arguments)
         payload = sanitize_payload(payload)
         return tool_result(payload, is_error=is_error)
     if name in EVENTKIT_CONTROL_ROUTES:
@@ -1469,13 +1475,9 @@ def handle_message(message: Any) -> dict[str, Any] | None:
                     "description": "Typed local tools for Apple Reminders.",
                 },
                 "instructions": (
-                    "Start with reminders_plugin_doctor and get_reminders_capabilities. Call "
-                    "request_reminders_access only when the user expects a macOS permission prompt. "
-                    "Use bounded public EventKit reads to discover stable IDs and last_modified values, "
-                    "then use exact IDs and concurrency preconditions for mutations. Private-only tag, "
-                    "section, and attachment tools may sync changes through iCloud. "
-                    "Unused-tag cleanup and attachment repair require an untruncated preview, its exact "
-                    "digest, and the same scope."
+                    "Use bounded reads, exact IDs, and fresh concurrency preconditions. Request "
+                    "Reminders access explicitly only when needed; follow the Apple Reminders skill "
+                    "for private-feature and maintenance safety."
                 ),
             },
         )

@@ -1190,6 +1190,56 @@ def collect_report(
     }
 
 
+def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
+    checks: dict[str, Any] = {}
+    for name, result in report.get("checks", {}).items():
+        if not isinstance(result, dict):
+            continue
+        checks[name] = {
+            key: result[key]
+            for key in ("status", "code", "message")
+            if key in result
+        }
+        if result.get("errors"):
+            checks[name]["error_count"] = len(result["errors"])
+
+    capabilities = dict(report.get("capabilities", {}))
+    command_schema = capabilities.get("command_schema", {})
+    if isinstance(command_schema, dict):
+        supported = sum(
+            isinstance(item, dict) and item.get("supported") is True
+            for item in command_schema.values()
+        )
+        capabilities["command_schema"] = {
+            "supported": supported,
+            "blocked": len(command_schema) - supported,
+            "total": len(command_schema),
+        }
+
+    errors = []
+    for item in report.get("errors", []):
+        if not isinstance(item, dict):
+            continue
+        errors.append(
+            {
+                key: item[key]
+                for key in ("check", "code", "message")
+                if key in item
+            }
+        )
+
+    return {
+        key: report[key]
+        for key in ("schema_version", "doctor", "ok", "status", "summary", "privacy")
+        if key in report
+    } | {
+        "detail_level": "summary",
+        "checks": checks,
+        "capabilities": capabilities,
+        "errors": errors,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Content-free Apple Reminders onboarding and capability gate"
@@ -1202,12 +1252,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compact", action="store_true", help="Emit compact JSON instead of pretty JSON."
     )
+    parser.add_argument(
+        "--detail-level",
+        choices=("summary", "full"),
+        default="summary",
+        help="Emit a concise readiness summary by default, or the full diagnostic report.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = collect_report(syntax_check=not args.skip_helper_syntax_check)
+    full_report = collect_report(syntax_check=not args.skip_helper_syntax_check)
+    report = (
+        summarize_report(full_report)
+        if args.detail_level == "summary"
+        else {**full_report, "detail_level": "full"}
+    )
     json.dump(
         report,
         sys.stdout,
@@ -1216,7 +1277,7 @@ def main(argv: list[str] | None = None) -> int:
         sort_keys=True,
     )
     sys.stdout.write("\n")
-    return 0 if report["ok"] else 1
+    return 0 if full_report["ok"] else 1
 
 
 if __name__ == "__main__":

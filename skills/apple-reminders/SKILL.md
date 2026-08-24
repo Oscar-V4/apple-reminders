@@ -31,7 +31,7 @@ Use the bundled typed MCP tools as the normal operation surface. For private mai
 
 ## Workflow
 
-1. On first use or after an environment change, run `reminders_plugin_doctor` and `get_reminders_capabilities`. Call `request_reminders_access` only when EventKit permission is needed and the user has requested a Reminders operation; it is the explicit TCC-prompting step.
+1. On first use or after an environment change, run `reminders_plugin_doctor` with its default summary and `get_reminders_capabilities`. Request `detail_level=full` only to troubleshoot a warning or blocked capability. Call `request_reminders_access` only when EventKit permission is needed and the user has requested a Reminders operation; it is the explicit TCC-prompting step.
 2. Read the relevant Reminders state first so the request is grounded in actual lists, sections, reminders, and attachments. Prefer `list_reminder_lists`, `fetch_reminders`, and `read_reminder` for public fields.
 3. Normalize relative time language into explicit dates, times, and timezone-aware ranges before reasoning about due dates or alarms. Keep all-day/timed due values and alarm triggers distinct.
 4. Keep reads semantically bounded. Use calendar IDs, the matching incomplete-due/completed-completion range, or a narrower private scope in addition to a limit. Text search or `modified_after` alone is not a native EventKit bound.

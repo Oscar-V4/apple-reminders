@@ -59,12 +59,16 @@ be published. Current code applies bounded size and retention controls; old
 files produced by earlier versions should not be assumed to have the same
 format.
 
-Backups are the most sensitive artifact. They can contain a broad copy of the
-Reminders container, including reminder content and attachment material. They
-remain local until the user moves or uploads them, are retained until removed,
-and are only best-effort snapshots of a live store. Do not attach them to bug
-reports or treat them as guaranteed recovery points without independent
-verification.
+Backups are the most sensitive artifact. A targeted SQLite backup can contain
+all reminder content in one store; a container archive can additionally cover
+multiple stores and attachment material. They remain local until the user
+moves or uploads them. Plugin-managed database backups retain at most five or
+100 MB, and plugin-managed container archives retain at most two or 300 MB;
+older strictly named plugin backups are removed after a new successful backup.
+An explicit user-selected output path is never auto-pruned. Container archives
+are only best-effort snapshots of a live store, while targeted databases use
+SQLite's online backup operation. Do not attach either form to bug reports or
+treat it as a guaranteed recovery point without independent verification.
 
 ## Public and Private macOS Interfaces
 
@@ -121,8 +125,9 @@ other data that could identify the user or their task history.
 - Use bounded previews for destructive or bulk operations.
 - Use the adapter's log-purge command for plugin-owned journals when needed.
 - Delete disposable caches, compiled helpers, capability records, idempotency
-  metadata, or backups when they are no longer needed and no operation is
-  running.
+  metadata, or explicit-path backups when they are no longer needed and no
+  operation is running. Plugin-managed backups also follow the bounded
+  retention policy described above.
 - Revoke Reminders or Automation access in macOS settings to disable the
   associated public integration path.
 

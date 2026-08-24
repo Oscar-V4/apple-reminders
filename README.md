@@ -117,8 +117,10 @@ backup contents; it does not write, launch Reminders, or request permission:
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/reminders_doctor.py --compact
 ```
 
-Read the emitted `privacy`, `checks`, and `capabilities` fields. A static pass
-is a prerequisite, not a guarantee that a future write is semantically safe.
+The default is a concise summary. Add `--detail-level full` only when
+troubleshooting a warning or blocked capability. Read the emitted `privacy`,
+`checks`, and `capabilities` fields. A static pass is a prerequisite, not a
+guarantee that a future write is semantically safe.
 
 ### Data-free performance benchmark
 
@@ -193,6 +195,11 @@ EventKit instead: read the exact reminder first and pass its fresh
 `last_modified` as `expected_last_modified`. The adapter's DB delete remains a
 capability-gated diagnostic CLI path, not an MCP fallback.
 
+Direct adapter `create_reminder`, `update_reminder`, `complete_reminder`,
+`reopen_reminder`, and `delete_reminder` commands remain compatible but are
+deprecated throughout 0.2.x. Normal callers must use the typed MCP/EventKit
+tools. Removal is reserved for a separately reviewed 0.3.0 breaking release.
+
 Unsupported, ambiguous, permission-blocked, schema-unknown, or
 verification-pending requests must be reported as such. The plugin must not
 invent support or silently drop fields.
@@ -205,11 +212,13 @@ Depending on the commands used, the adapter can create data under:
 - `~/Library/Caches/apple-reminders-codex/`
 
 These locations can contain sensitive identifiers, cached titles/list names,
-operation metadata, compiled helpers, capability records, and optional full
-Reminders-container backups. Backups are best-effort snapshots of a live
-container, not guaranteed transactionally consistent recovery points. See
-[PRIVACY.md](PRIVACY.md) before enabling advanced writes or sharing diagnostic
-output.
+operation metadata, compiled helpers, capability records, and optional
+recovery snapshots. Multi-label tag cleanup uses a single-database SQLite
+online backup. Cross-store attachment repair keeps the broader best-effort
+container archive. Managed database backups keep at most five/100 MB; managed
+container archives keep at most two/300 MB. Explicit user-selected backup
+paths are not auto-pruned. See [PRIVACY.md](PRIVACY.md) before enabling
+advanced writes or sharing diagnostic output.
 
 ## OpenMinis Boundary
 

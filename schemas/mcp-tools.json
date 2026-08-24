@@ -7,6 +7,14 @@
       "description": "Run a content-free local readiness and capability diagnosis. It inspects only app/toolchain/file metadata, SQLite schema, anonymous counts, and privacy-safe permission symptoms; it does not read reminder rows or names, launch Reminders, load EventKit or private frameworks, trigger a TCC prompt, or write data.",
       "inputSchema": {
         "type": "object",
+        "properties": {
+          "detail_level": {
+            "type": "string",
+            "enum": ["summary", "full"],
+            "default": "summary",
+            "description": "Use summary for normal readiness checks. Use full only when troubleshooting a warning or blocked capability."
+          }
+        },
         "additionalProperties": false
       },
       "annotations": {
