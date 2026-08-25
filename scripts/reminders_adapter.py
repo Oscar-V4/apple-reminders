@@ -2733,14 +2733,15 @@ def cmd_list_sections(args: argparse.Namespace) -> int:
     db = resolve_database(args.db)
     con = connect(db)
     try:
-        params: list[Any] = []
-        where = ["coalesce(s.ZMARKEDFORDELETION,0)=0"]
-        if args.list:
-            where.append("l.ZNAME=?")
-            params.append(args.list)
+        params: list[Any] = [args.list_id]
+        where = [
+            "coalesce(s.ZMARKEDFORDELETION,0)=0",
+            "l.ZCKIDENTIFIER=?",
+        ]
         rows = con.execute(
             f"""
-            select s.Z_PK,s.ZCKIDENTIFIER,s.ZDISPLAYNAME,s.ZLIST,l.ZNAME as list_name,s.Z_FOK_LIST
+            select s.Z_PK,s.ZCKIDENTIFIER,s.ZDISPLAYNAME,s.ZLIST,
+                   l.ZCKIDENTIFIER as list_id,l.ZNAME as list_name,s.Z_FOK_LIST
             from ZREMCDBASESECTION s
             left join ZREMCDBASELIST l on l.Z_PK=s.ZLIST
             where {" and ".join(where)}
@@ -6804,7 +6805,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list_sections")
     add_common_db(p)
-    p.add_argument("--list")
+    p.add_argument("--list-id", required=True)
     p.add_argument("--limit", type=positive_int, default=100)
     p.set_defaults(func=cmd_list_sections)
 

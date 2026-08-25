@@ -484,8 +484,55 @@ class McpPackagingTests(unittest.TestCase):
             ]["description"],
         )
 
+    def test_section_scope_uses_an_exact_list_identifier(self) -> None:
+        schema = json.loads(TOOLS_SCHEMA.read_text(encoding="utf-8"))
+        sections = next(
+            tool for tool in schema["tools"] if tool["name"] == "list_reminder_sections"
+        )
+
+        properties = sections["inputSchema"]["properties"]
+        self.assertIn("list_id", properties)
+        self.assertNotIn("list_name", properties)
+        self.assertIn("duplicate", sections["description"].casefold())
+
 
 class McpProtocolTests(unittest.TestCase):
+    def test_section_route_passes_the_exact_list_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = Path(tmp) / "mock_adapter.py"
+            mock_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_reminder_sections",
+                            "arguments": {
+                                "list_id": "22222222-2222-4222-8222-222222222222",
+                                "limit": 10,
+                            },
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+            )
+
+        result = responses[1]["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(
+            result["structuredContent"]["argv"],
+            [
+                "list_sections",
+                "--list-id",
+                "22222222-2222-4222-8222-222222222222",
+                "--limit",
+                "10",
+            ],
+        )
+
     def test_backend_path_override_is_inert_without_source_test_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)

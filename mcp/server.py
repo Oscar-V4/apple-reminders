@@ -85,7 +85,7 @@ class ToolRoute:
 ROUTES: dict[str, ToolRoute] = {
     "list_reminder_sections": ToolRoute(
         command="list_sections",
-        options=(("list_name", "--list"), ("limit", "--limit")),
+        options=(("list_id", "--list-id"), ("limit", "--limit")),
         bounded_array="sections",
     ),
     "list_reminder_tags": ToolRoute(
@@ -580,6 +580,7 @@ def _normalize_section(item: Any) -> Any:
     return {
         "id": item.get("ZCKIDENTIFIER"),
         "name": item.get("ZDISPLAYNAME"),
+        "list_id": item.get("list_id"),
         "list_name": item.get("list_name"),
     }
 

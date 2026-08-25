@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -88,6 +89,71 @@ class ScheduleHelperTests(unittest.TestCase):
             reminders_adapter.reminder_url(f"x-apple-reminder://{rid}"),
             "x-apple-reminder://7718459E-2672-4E99-9E6A-B9AA430E570F",
         )
+
+
+class ListSectionScopeTests(unittest.TestCase):
+    def test_duplicate_list_names_are_scoped_by_exact_list_identifier(self) -> None:
+        first_list = "11111111-1111-4111-8111-111111111111"
+        second_list = "22222222-2222-4222-8222-222222222222"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "duplicate-list-names.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    f"""
+                    create table ZREMCDBASELIST (
+                        Z_PK integer primary key,
+                        ZCKIDENTIFIER text,
+                        ZNAME text
+                    );
+                    create table ZREMCDBASESECTION (
+                        Z_PK integer primary key,
+                        ZCKIDENTIFIER text,
+                        ZDISPLAYNAME text,
+                        ZLIST integer,
+                        Z_FOK_LIST integer,
+                        ZMARKEDFORDELETION integer
+                    );
+                    insert into ZREMCDBASELIST values
+                        (1, '{first_list}', 'Inbox'),
+                        (2, '{second_list}', 'Inbox');
+                    insert into ZREMCDBASESECTION values
+                        (11, 'SECTION-PERSONAL', 'Personal', 1, 1024, 0),
+                        (22, 'SECTION-WORK', 'Work', 2, 1024, 0);
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "list_sections",
+                    "--db",
+                    str(database),
+                    "--list-id",
+                    second_list,
+                    "--limit",
+                    "10",
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(len(payload["sections"]), 1)
+        section = payload["sections"][0]
+        self.assertEqual(section["ZCKIDENTIFIER"], "SECTION-WORK")
+        self.assertEqual(section["ZDISPLAYNAME"], "Work")
+        self.assertEqual(section["list_id"], second_list)
+        self.assertEqual(section["list_name"], "Inbox")
 
 
 class AppleScriptSyncTests(unittest.TestCase):
