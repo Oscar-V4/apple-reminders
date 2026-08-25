@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,7 +43,82 @@ PUBLIC_MCP_TOOL_NAMES = [
 ]
 
 
+def installed_mcp_command(plugin_root: Path) -> tuple[str, ...]:
+    payload = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
+    registered = payload["mcpServers"]["apple-reminders-local"]
+    return (registered["command"], *registered["args"])
+
+
 class SourcePackagePolicyTests(unittest.TestCase):
+    def test_extracted_manifest_skips_an_old_python_earlier_in_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            archive = build_source_package.build_package(PLUGIN_ROOT, base / "build")
+            with zipfile.ZipFile(archive) as handle:
+                handle.extractall(base / "extracted")
+            manifest = json.loads(
+                (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+            )
+            plugin_root = base / "extracted" / manifest["name"]
+
+            old_bin = base / "old" / "bin"
+            supported_bin = base / "supported" / "bin"
+            old_bin.mkdir(parents=True)
+            supported_bin.mkdir(parents=True)
+            old_python = old_bin / "python3"
+            old_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1-}\" = \"-c\" ]; then exit 1; fi\n"
+                "exit 97\n",
+                encoding="utf-8",
+            )
+            old_python.chmod(0o755)
+            selected = base / "selected"
+            supported_python = supported_bin / "python3"
+            supported_python.write_text(
+                "#!/bin/sh\n"
+                f"printf selected > {shlex.quote(str(selected))}\n"
+                f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            supported_python.chmod(0o755)
+            requests = [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "launcher-path-test", "version": "1"},
+                    },
+                },
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            ]
+            completed = subprocess.run(
+                installed_mcp_command(plugin_root),
+                cwd=plugin_root,
+                input="".join(json.dumps(request) + "\n" for request in requests),
+                env={
+                    **os.environ,
+                    "PATH": f"{old_bin}:{supported_bin}:/usr/bin:/bin",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(
+                selected.is_file(),
+                "launcher did not select the later supported Python",
+            )
+            responses = [json.loads(line) for line in completed.stdout.splitlines()]
+            self.assertEqual(len(responses[1]["result"]["tools"]), 13)
+
     def test_real_source_package_allowlist_passes(self) -> None:
         result = audit_source_package.audit_source(PLUGIN_ROOT)
         self.assertEqual(result.errors, ())
@@ -119,8 +195,6 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
             )
             plugin_root = base / "extracted" / manifest["name"]
-            mcp = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
-            registered = mcp["mcpServers"]["apple-reminders-local"]
             requests = [
                 {
                     "jsonrpc": "2.0",
@@ -140,7 +214,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
             ]
             completed = subprocess.run(
-                [registered["command"], *registered["args"]],
+                installed_mcp_command(plugin_root),
                 cwd=plugin_root,
                 input="".join(
                     json.dumps(request, separators=(",", ":")) + "\n"
@@ -173,8 +247,6 @@ class SourcePackagePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             installed = Path(temp_dir) / "apple-reminders"
             shutil.copytree(source, installed)
-            mcp = json.loads((installed / ".mcp.json").read_text(encoding="utf-8"))
-            registered = mcp["mcpServers"]["apple-reminders-local"]
             requests = [
                 {
                     "jsonrpc": "2.0",
@@ -189,7 +261,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
             ]
             completed = subprocess.run(
-                [registered["command"], *registered["args"]],
+                installed_mcp_command(installed),
                 cwd=installed,
                 input="".join(
                     json.dumps(request, separators=(",", ":")) + "\n"

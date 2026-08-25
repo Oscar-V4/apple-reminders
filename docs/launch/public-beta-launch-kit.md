@@ -10,6 +10,10 @@ marketplace. It is not an Apple product, an OpenAI product, an OpenAI-endorsed
 plugin, or a current listing in the universal ChatGPT and Codex Plugins
 Directory. The reasons and official routes are documented in the [community
 publishing research](../research/openai-community-publishing-2026-08.md).
+Here, “local-first” describes the plugin-owned MCP and adapters, not the Codex
+service boundary: tool results return to the Codex host process and may be
+processed under the user's Codex product and account terms. Link the [privacy
+boundary](../../PRIVACY.md) whenever the phrase appears in standalone copy.
 
 ## Release placeholders
 
@@ -109,6 +113,8 @@ the tag and release are public.
 > 작업은 EventKit을 우선하고, 섹션·태그·첨부처럼 버전에 민감한 기능은
 > 별도 경계와 읽기 검증을 둡니다. 설치와 첫 사용은 영상에서 1분 안에
 > 확인할 수 있습니다: `<DEMO_URL>`
+> 플러그인 소유 원격 백엔드는 없지만 도구 결과는 Codex로 반환됩니다.
+> 개인정보 경계: `https://github.com/Oscar-V4/apple-reminders/blob/<TAG>/PRIVACY.md`
 >
 > 설치: `codex plugin marketplace add Oscar-V4/apple-reminders --ref <TAG>`
 > 후 `codex plugin add apple-reminders@oscar-v4-reminders`
@@ -134,6 +140,8 @@ Otherwise omit it.
 > work prefers EventKit; version-sensitive sections, tags, and attachments are
 > isolated behind explicit capability and read-back checks. See the 60–90
 > second install and workflow demo: `<DEMO_URL>`
+> There is no plugin-owned remote backend, but tool results return to Codex.
+> Privacy boundary: `https://github.com/Oscar-V4/apple-reminders/blob/<TAG>/PRIVACY.md`
 >
 > Install: `codex plugin marketplace add Oscar-V4/apple-reminders --ref <TAG>`,
 > then `codex plugin add apple-reminders@oscar-v4-reminders`.
@@ -158,10 +166,10 @@ performed visibly in the Reminders app.
 
 | Time | Screen and action | Suggested narration |
 | --- | --- | --- |
-| 0–8 s | Title card: project name, `<TAG>`, “community-built / local-first / public beta.” | “This is a community-built Apple Reminders plugin for Codex, running locally on my Mac.” |
+| 0–8 s | Title card: project name, `<TAG>`, “community-built / local MCP / public beta.” | “The plugin-owned MCP and adapters run on my Mac; their tool results return to Codex.” |
 | 8–18 s | Show the two exact pinned marketplace install commands, then start a new Codex task. | “The release installs from a pinned GitHub repo marketplace tag.” |
 | 18–28 s | Ask: `Codex Demo <UTC timestamp> 목록을 만들어줘.` If macOS asks for Reminders permission, approve only the explicit plugin request. | “First use asks for Reminders access only when the requested operation needs it.” |
-| 28–43 s | Ask: `그 목록에 '오트밀크 사기', '<DEMO_DATE>에 테스트 메모 보내기', '예제 문서 읽기'를 추가하고 마지막 항목 URL은 https://example.com/demo 로 설정해줘.` | “Core capture uses EventKit, and URL work is verified as one composed operation.” |
+| 28–43 s | Ask: `그 목록에 '오트밀크 사기', '<DEMO_DATE>에 테스트 메모 보내기', '예제 문서 읽기'를 추가하고 마지막 항목 URL은 https://example.com/demo 로 설정해줘.` | “Core capture uses EventKit. When the URL Receipt says verified, its final exact read passed; otherwise I show the pending or partial result.” |
 | 43–54 s | Ask: `Codex Demo <UTC timestamp> 목록의 미완료 항목만 보여줘.` | “Reads are bounded and exact list identity is preserved.” |
 | 54–65 s | Ask: `'오트밀크 사기'를 완료하고 다시 읽어서 확인해줘.` | “Changes return a read-back Receipt rather than treating process exit as success.” |
 | 65–78 s | Ask: `Codex Demo <UTC timestamp>의 리마인더를 모두 정확히 삭제하고 결과를 확인해줘.` Show the empty list. | “The demo removes only its synthetic reminders and verifies the result.” |
@@ -180,7 +188,7 @@ setup instructions, and `<COVER_IMAGE_URL>` resolve without authentication.
 Submission does not mean acceptance or endorsement.
 
 - **Project title:** Apple Reminders for Codex
-- **Tagline:** A local-first Codex plugin for safer Apple Reminders workflows on macOS.
+- **Tagline:** Safer Apple Reminders workflows from Codex on macOS.
 - **Displayed author:** `Soo / Oscar-V4 — choose one and make every profile consistent`
 - **Public project URL:** `https://github.com/Oscar-V4/apple-reminders`
 - **Tagged release:** `<RELEASE_URL>`
@@ -205,7 +213,9 @@ Submission does not mean acceptance or endorsement.
   > exposes a bounded 13-tool Interface and withholds broad maintenance and
   > backup operations. It documents permission, local-data, private-interface,
   > concurrency, and verification limits instead of claiming that a process
-  > exit proves an Apple-device sync.
+  > exit proves an Apple-device sync. The plugin-owned MCP has no remote
+  > backend, but its tool results return to Codex and are subject to the user's
+  > Codex product and account terms.
 
 - **How it was built:**
 
@@ -242,7 +252,7 @@ publishes one.
 
 ### Project post: released beta and tester request
 
-Suggested title: **Apple Reminders for Codex `<TAG>` — local-first public beta,
+Suggested title: **Apple Reminders for Codex `<TAG>` — local-MCP public beta,
 looking for Mac testers**
 
 Outline:
@@ -251,7 +261,8 @@ Outline:
    the user's native Reminders without turning the integration into a hosted
    data service.
 2. State the distribution truth: community-built, open source, local stdio MCP,
-   tagged GitHub repo marketplace release; not a universal-directory listing.
+   tool results return to Codex, tagged GitHub repo marketplace release; not a
+   universal-directory listing.
 3. Show three supported goals: bounded briefing, exact capture/update, and
    sections/tags/attachments with explicit capability limits.
 4. Paste the two pinned install commands and the minimum requirements.
@@ -356,7 +367,8 @@ Plugins Directory listing.
 ### Public assets
 
 - [ ] Repository social preview and `<COVER_IMAGE_URL>` use the released name,
-  legible local-first/community wording, and rights-owned artwork.
+  legible community/local-MCP wording, the caption links the Codex result
+  boundary, and all artwork is rights-owned.
 - [ ] `<DEMO_URL>` is captioned, readable without audio, 60–90 seconds, and
   contains no personal reminders, accounts, notifications, paths, or secrets.
 - [ ] One static screenshot shows the exact pinned install commands; one shows
@@ -391,9 +403,9 @@ Plugins Directory listing.
 ### Final human check
 
 - [ ] A person unfamiliar with the repository can answer in two minutes: what
-  it does, how to install it, what permission it needs, what stays local, what
-  uses private interfaces, how writes are verified, how to uninstall it, and
-  where to report a problem.
+  it does, how to install it, what permission it needs, what runs locally, that
+  tool results return to Codex, what uses private interfaces, how writes are
+  verified, how to uninstall it, and where to report a problem.
 - [ ] A reviewer can reproduce the release without the development checkout.
 - [ ] Every public sentence remains true if the project is never featured by
   OpenAI. Recognition should add evidence to the story, not make the story

@@ -6,10 +6,10 @@
 
 set -u
 
-script_directory=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
-plugin_root=$(dirname "$script_directory")
+script_directory=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && pwd)
+plugin_root=$(/usr/bin/dirname "$script_directory")
 server_path="$plugin_root/mcp/server.py"
-path_python=$(command -v python3 2>/dev/null || true)
+fallback_python=
 
 is_supported_python() {
   [ -n "$1" ] && [ -x "$1" ] &&
@@ -17,29 +17,38 @@ is_supported_python() {
       >/dev/null 2>&1
 }
 
-for candidate in \
-  "$path_python" \
-  /opt/homebrew/bin/python3 \
-  /usr/local/bin/python3 \
-  /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
-  /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
-  /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
-  /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-  /Library/Frameworks/Python.framework/Versions/3.11/bin/python3
+candidate_path=${PATH-}
+candidate_path="${candidate_path:+$candidate_path:}/opt/homebrew/bin:/usr/local/bin"
+candidate_path="$candidate_path:/Library/Frameworks/Python.framework/Versions/Current/bin"
+candidate_path="$candidate_path:/Library/Frameworks/Python.framework/Versions/3.14/bin"
+candidate_path="$candidate_path:/Library/Frameworks/Python.framework/Versions/3.13/bin"
+candidate_path="$candidate_path:/Library/Frameworks/Python.framework/Versions/3.12/bin"
+candidate_path="$candidate_path:/Library/Frameworks/Python.framework/Versions/3.11/bin"
+
+original_ifs=$IFS
+IFS=:
+set -f
+for directory in $candidate_path
 do
+  [ -n "$directory" ] || directory=.
+  candidate="$directory/python3"
+  [ -x "$candidate" ] || continue
+  [ -n "$fallback_python" ] || fallback_python=$candidate
   if is_supported_python "$candidate"; then
     PYTHONDONTWRITEBYTECODE=1
     export PYTHONDONTWRITEBYTECODE
     exec "$candidate" "$server_path"
   fi
 done
+set +f
+IFS=$original_ifs
 
 # Preserve the server's structured unsupported-runtime response when an older
 # Python is the only interpreter visible.
-if [ -n "$path_python" ]; then
+if [ -n "$fallback_python" ]; then
   PYTHONDONTWRITEBYTECODE=1
   export PYTHONDONTWRITEBYTECODE
-  exec "$path_python" "$server_path"
+  exec "$fallback_python" "$server_path"
 fi
 
 printf '%s\n' \
