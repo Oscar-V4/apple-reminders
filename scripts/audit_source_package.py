@@ -27,9 +27,13 @@ FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 PACKAGE_ROOT_FILES = {
     Path(".codex-plugin/plugin.json"),
     Path(".mcp.json"),
+    Path("CHANGELOG.md"),
     Path("LICENSE"),
     Path("PRIVACY.md"),
     Path("README.md"),
+    Path("SECURITY.md"),
+    Path("SUPPORT.md"),
+    Path("TERMS.md"),
     Path("assets/icon.png"),
     Path("mcp/server.py"),
     Path("schemas/mcp-tools.json"),

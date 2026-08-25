@@ -30,6 +30,29 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(result.errors, ())
         self.assertGreater(len(result.files), 20)
 
+    def test_public_release_documents_are_packaged_and_manifest_links_match(self) -> None:
+        required = {
+            Path("CHANGELOG.md"),
+            Path("SECURITY.md"),
+            Path("SUPPORT.md"),
+            Path("TERMS.md"),
+        }
+        files, errors = audit_source_package.package_files(ROOT)
+        self.assertEqual(errors, [])
+        self.assertTrue(required.issubset(files))
+        for relative in required:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertTrue(text.strip(), relative)
+            self.assertNotIn("TODO", text)
+
+        manifest = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            manifest["interface"]["termsOfServiceURL"],
+            "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
+        )
+
     def test_forbidden_artifacts_are_classified_by_path(self) -> None:
         cases = {
             Path(".DS_Store"),

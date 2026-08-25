@@ -33,6 +33,7 @@
     ],
     "websiteURL": "https://github.com/Oscar-V4/apple-reminders",
     "privacyPolicyURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
     "defaultPrompt": [
       "Brief, capture, organize, or safely update my Apple Reminders"
     ],

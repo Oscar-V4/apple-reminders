@@ -18,6 +18,26 @@ class PluginValidationTests(unittest.TestCase):
     def test_real_plugin_manifest_mcp_skills_and_evals_validate(self) -> None:
         self.assertEqual(validate_plugin.validate_root(ROOT), [])
 
+    def test_repo_marketplace_exposes_the_root_plugin_with_install_policy(self) -> None:
+        manifest = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        marketplace = json.loads(
+            (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(marketplace["name"], "oscar-v4-reminders")
+        self.assertEqual(marketplace["interface"]["displayName"], "Oscar V4 Reminders")
+        self.assertEqual(len(marketplace["plugins"]), 1)
+        entry = marketplace["plugins"][0]
+        self.assertEqual(entry["name"], manifest["name"])
+        self.assertEqual(entry["source"], {"source": "local", "path": "./"})
+        self.assertEqual(
+            entry["policy"],
+            {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        )
+        self.assertEqual(entry["category"], "Productivity")
+
     def test_manifest_reuses_one_reviewed_brand_asset(self) -> None:
         manifest = json.loads(
             (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
