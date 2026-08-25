@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a reproducible Apple Reminders plugin problem without sharing private Reminder data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Apple Reminders.
+
+        **Privacy first:** do not attach real Reminder titles, notes, URLs, identifiers, screenshots, databases, journals, caches, backups, or local paths. Replace sensitive values with small synthetic examples. Read the [privacy policy](https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md) before submitting.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Installation or first use
+        - Core reads or writes
+        - Native sections or tags
+        - Native image or URL attachments
+        - Diagnostics
+        - Skills or documentation
+        - Packaging or release artifact
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version or commit
+      description: Use the installed version, tag, or exact commit SHA.
+      placeholder: "0.3.0 or abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "14.7"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version used by Codex
+      description: Run `python3 --version` in the environment that launches Codex.
+      placeholder: "Python 3.12.10"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use a disposable list and synthetic Reminder content where possible.
+      placeholder: |
+        1. Install from ...
+        2. Start a new Codex task.
+        3. Ask Codex to ... using synthetic data.
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only a redacted, bounded status or Receipt. Do not paste full Doctor output or private data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional sanitized context
+      description: Optional. Describe whether retrying, a fresh exact read, or restarting Codex changed the result.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and safety confirmation
+      options:
+        - label: I removed real Reminder content, identifiers, URLs, screenshots, databases, logs, backups, and local paths.
+          required: true
+        - label: I searched existing issues and tested the latest available version or commit.
+          required: true
