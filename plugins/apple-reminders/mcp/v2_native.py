@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import re
 import sys
-import threading
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlparse
@@ -38,35 +35,18 @@ from reminders_service import (  # noqa: E402
     MutationOutcome,
     ReferenceRejected,
 )
+if __package__:  # Package import in tests; script-local import in the stdio server.
+    from .v2_contract import (
+        FAILURE_STATUSES,
+        MUTATION_STATUSES,
+        SUCCESS_STATUSES,
+    )
+else:  # pragma: no cover - exercised by the script entry point
+    from v2_contract import FAILURE_STATUSES, MUTATION_STATUSES, SUCCESS_STATUSES
 
 
-SUCCESS_STATUSES = frozenset(
-    {"unchanged", "verified", "committed_verification_pending", "partial_success"}
-)
-FAILURE_STATUSES = frozenset(
-    {"failed_no_mutation", "failed_manual_repair_required"}
-)
-RECEIPT_STATUSES = SUCCESS_STATUSES | FAILURE_STATUSES
 REFERENCE_PATTERN = re.compile(r"^rev1\.[A-Za-z0-9_-]{32,4091}$")
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,256}$")
-HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-DIAGNOSIS_CHECKS = {
-    "core": frozenset({"platform", "reminders_app", "store_access", "command_schema"}),
-    "access": frozenset({"permissions", "account_visibility", "store_access"}),
-    "native_extension": frozenset(
-        {"helper_toolchain", "private_frameworks", "store_access"}
-    ),
-    "sections": frozenset(
-        {"helper_toolchain", "private_frameworks", "command_schema", "store_access"}
-    ),
-    "tags": frozenset({"command_schema", "store_access"}),
-    "attachments": frozenset(
-        {"helper_toolchain", "private_frameworks", "command_schema", "store_access"}
-    ),
-    "packaging": frozenset(
-        {"platform", "helper_toolchain", "local_artifacts", "redaction", "command_schema"}
-    ),
-}
 
 
 class ReferencePort(Protocol):
@@ -105,23 +85,6 @@ class FacadeError(ValueError):
         self.code = code
         self.reason_code = reason_code
         self.retryable = retryable
-
-
-@dataclass(frozen=True)
-class _IdempotentResult:
-    fingerprint: str
-    payload: dict[str, Any]
-
-
-def _stable_hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _trimmed(value: Any, name: str, maximum: int) -> str:
@@ -286,59 +249,6 @@ def _recovery(value: Any) -> dict[str, Any]:
     return result
 
 
-def _list(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, Mapping) or not value:
-        return None
-    raw = dict(value)
-    source_raw = raw.get("source") if isinstance(raw.get("source"), Mapping) else {}
-    source_type = str(source_raw.get("type") or "unknown")
-    if source_type not in {
-        "local",
-        "exchange",
-        "caldav",
-        "mobile_me",
-        "subscribed",
-        "birthdays",
-        "unknown",
-    }:
-        source_type = "unknown"
-    list_type = str(raw.get("type") or "unknown")
-    if list_type not in {
-        "local",
-        "caldav",
-        "exchange",
-        "subscription",
-        "birthday",
-        "unknown",
-    }:
-        list_type = "unknown"
-    return {
-        "id": str(raw.get("id") or raw.get("list_id") or "")[:2048],
-        "title": str(raw.get("title") or raw.get("name") or "")[:512],
-        "type": list_type,
-        "allows_content_modifications": raw.get("allows_content_modifications") is True,
-        "subscribed": raw.get("subscribed") is True,
-        "immutable": raw.get("immutable") is True,
-        "source": {
-            "id": str(source_raw.get("id") or "")[:2048],
-            "title": str(source_raw.get("title") or "")[:512],
-            "type": source_type,
-            "is_delegate": source_raw.get("is_delegate") is True,
-            "reminder_list_count": max(
-                0,
-                min(
-                    int(
-                        source_raw.get("reminder_list_count")
-                        or source_raw.get("reminder_calendar_count")
-                        or 0
-                    ),
-                    10_000,
-                ),
-            ),
-        },
-    }
-
-
 def _section(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -466,27 +376,15 @@ class NativeFacade:
     def __init__(
         self,
         *,
-        eventkit_call: BackendCall,
         adapter_call: BackendCall,
-        doctor_call: Callable[[dict[str, Any]], dict[str, Any]],
-        environment_fingerprint: Callable[[], str],
         references: ReferencePort,
         native_read: NativeRead,
         native_mutation: NativeMutation,
-        max_idempotency_results: int = 256,
     ) -> None:
-        if max_idempotency_results <= 0:
-            raise ValueError("Facade bounds must be positive")
-        self._eventkit_call = eventkit_call
         self._adapter_call = adapter_call
-        self._doctor_call = doctor_call
-        self._environment_fingerprint = environment_fingerprint
         self._references = references
         self._native_read = native_read
         self._native_mutation = native_mutation
-        self._max_idempotency_results = max_idempotency_results
-        self._idempotency: dict[str, _IdempotentResult] = {}
-        self._lock = threading.RLock()
 
     def call(self, name: str, raw_arguments: Any) -> dict[str, Any]:
         arguments: dict[str, Any] = {}
@@ -494,16 +392,12 @@ class NativeFacade:
             arguments = _arguments(raw_arguments)
             if name == "inspect_reminder_native":
                 return self._inspect(arguments)
-            if name == "ensure_reminder_list":
-                return self._ensure_list(arguments)
             if name == "create_reminder_section":
                 return self._create_section(arguments)
             if name == "organize_reminder":
                 return self._native_change(name, arguments)
             if name == "change_reminder_attachment":
                 return self._native_change(name, arguments)
-            if name == "diagnose_reminders":
-                return self._diagnose(arguments)
             raise FacadeError(
                 "invalid_input", "unknown_tool", f"Unknown v2 native tool: {name}"
             )
@@ -555,7 +449,6 @@ class NativeFacade:
             }
         if name in {
             "inspect_reminder_native",
-            "diagnose_reminders",
         }:
             result: dict[str, Any] = {
                 "schema_version": 2,
@@ -576,9 +469,7 @@ class NativeFacade:
             "status": "failed_no_mutation",
             "operation": operation,
             "operation_id": str(uuid.uuid4()),
-            "backend": "eventkit_public_sdk"
-            if name == "ensure_reminder_list"
-            else "native_extension",
+            "backend": "native_extension",
             "target": target,
             "before": None,
             "after": None,
@@ -606,11 +497,6 @@ class NativeFacade:
 
     @staticmethod
     def _target_for_failure(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        if name == "ensure_reminder_list":
-            return {
-                "source_id": arguments.get("source_id"),
-                "list_id": None,
-            }
         if name == "create_reminder_section":
             return {"list_id": arguments.get("list_id"), "section_id": None}
         if name == "organize_reminder":
@@ -624,136 +510,6 @@ class NativeFacade:
             action = arguments.get("action") if isinstance(arguments.get("action"), Mapping) else {}
             return {"reminder_id": "unknown", "attachment_id": action.get("attachment_id")}
         return {}
-
-    def _ensure_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _closed(arguments, {"source_id", "name", "idempotency_key"}, {"source_id", "name", "idempotency_key"})
-        source_id = _trimmed(arguments["source_id"], "source_id", 2048)
-        name = _trimmed(arguments["name"], "name", 512)
-        key = arguments["idempotency_key"]
-        if not isinstance(key, str) or not IDEMPOTENCY_PATTERN.fullmatch(key):
-            raise FacadeError(
-                "invalid_input",
-                "invalid_idempotency_key",
-                "idempotency_key must contain 8-256 safe characters",
-            )
-        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        request_fingerprint = _stable_hash({"source_id": source_id, "name": name})
-        with self._lock:
-            previous = self._idempotency.get(key_hash)
-            if previous is not None:
-                if previous.fingerprint != request_fingerprint:
-                    raise FacadeError(
-                        "invalid_input",
-                        "idempotency_key_conflict",
-                        "The idempotency key was already used for different list input.",
-                    )
-                replay = copy.deepcopy(previous.payload)
-                replay["replayed"] = True
-                return replay
-
-            try:
-                payload = self._eventkit_call(
-                    "ensure_reminder_list", {"source_id": source_id, "name": name}
-                )
-            except Exception:
-                result = self._pending_mutation_result(
-                    "ensure_reminder_list",
-                    backend="eventkit_public_sdk",
-                    target={"source_id": source_id, "list_id": None},
-                    reason_code="eventkit_list_dispatch_failed",
-                    message=(
-                        "The Reminder List may have been created; list the exact source "
-                        "before retrying."
-                    ),
-                    next_tool=None,
-                )
-            else:
-                try:
-                    result = self._list_receipt(payload, source_id=source_id)
-                except Exception:
-                    result = self._pending_mutation_result(
-                        "ensure_reminder_list",
-                        backend="eventkit_public_sdk",
-                        target={"source_id": source_id, "list_id": None},
-                        reason_code="invalid_eventkit_list_receipt",
-                        message=(
-                            "The Reminder List result could not be validated; list the "
-                            "exact source before retrying."
-                        ),
-                        next_tool=None,
-                    )
-            result["replayed"] = False
-            result["idempotency_key_hash"] = key_hash
-            if result["status"] in SUCCESS_STATUSES:
-                while len(self._idempotency) >= self._max_idempotency_results:
-                    self._idempotency.pop(next(iter(self._idempotency)))
-                self._idempotency[key_hash] = _IdempotentResult(
-                    request_fingerprint, copy.deepcopy(result)
-                )
-            return result
-
-    def _list_receipt(self, payload: Any, *, source_id: str) -> dict[str, Any]:
-        if not isinstance(payload, Mapping):
-            raise FacadeError(
-                "schema_mismatch",
-                "invalid_eventkit_receipt",
-                "EventKit returned a non-object list receipt.",
-            )
-        raw = dict(payload)
-        status = raw.get("status")
-        if status not in RECEIPT_STATUSES:
-            raise FacadeError(
-                "schema_mismatch", "invalid_eventkit_status", "EventKit returned an invalid list status."
-            )
-        if raw.get("ok") is not (status in SUCCESS_STATUSES):
-            raise FacadeError(
-                "schema_mismatch",
-                "eventkit_list_status_ok_mismatch",
-                "EventKit list status and ok flag disagree.",
-            )
-        before = _list(raw.get("before"))
-        after = _list(raw.get("after"))
-        target_raw = raw.get("target") if isinstance(raw.get("target"), Mapping) else {}
-        list_id = target_raw.get("list_id") or (after or {}).get("id")
-        if status in {"unchanged", "verified"} and after is None:
-            raise FacadeError(
-                "schema_mismatch",
-                "eventkit_list_after_missing",
-                "A terminal EventKit list receipt requires an exact read-back.",
-            )
-        verification = _verification(raw.get("verification"))
-        recovery = _recovery(raw.get("recovery"))
-        if status in {"unchanged", "verified"}:
-            verification = {
-                "state": "read_back",
-                "write_performed": status == "verified",
-                "final_read": True,
-                "matched": True,
-            }
-        elif status == "failed_no_mutation":
-            verification = {
-                "state": "not_needed",
-                "write_performed": False,
-                "final_read": False,
-            }
-        result: dict[str, Any] = {
-            "schema_version": 2,
-            "ok": status in SUCCESS_STATUSES,
-            "status": status,
-            "operation": "ensure_reminder_list",
-            "operation_id": _operation_id(raw.get("operation_id")),
-            "backend": "eventkit_public_sdk",
-            "target": {
-                "source_id": source_id,
-                "list_id": list_id if isinstance(list_id, str) else None,
-            },
-            "before": before,
-            "after": after,
-            "verification": verification,
-            "recovery": recovery,
-        }
-        self._copy_receipt_extras(raw, result)
-        return result
 
     def _create_section(self, arguments: dict[str, Any]) -> dict[str, Any]:
         _closed(arguments, {"list_id", "name"}, {"list_id", "name"})
@@ -796,7 +552,7 @@ class NativeFacade:
             )
         raw = dict(payload)
         status = raw.get("status")
-        if status not in RECEIPT_STATUSES:
+        if status not in MUTATION_STATUSES:
             raise FacadeError(
                 "schema_mismatch", "invalid_native_status", "The section backend returned an invalid status."
             )
@@ -1429,102 +1185,6 @@ class NativeFacade:
                 if single is not None:
                     result["attachments"] = [single]
         return result
-
-    def _diagnose(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        _closed(arguments, {"scope", "detail_level"}, set())
-        scope = arguments.get("scope", "core")
-        if scope not in {
-            "core",
-            "access",
-            "native_extension",
-            "sections",
-            "tags",
-            "attachments",
-            "packaging",
-        }:
-            raise FacadeError(
-                "invalid_input", "invalid_diagnosis_scope", "Unsupported diagnosis scope."
-            )
-        detail = arguments.get("detail_level", "summary")
-        if detail not in {"summary", "full"}:
-            raise FacadeError(
-                "invalid_input", "invalid_detail_level", "detail_level must be summary or full."
-            )
-        raw = self._doctor_call({"detail_level": detail})
-        if not isinstance(raw, Mapping):
-            self._raise_backend_read(raw, "doctor_failed")
-        privacy = raw.get("privacy") if isinstance(raw.get("privacy"), Mapping) else {}
-        if privacy.get("content_free") is not True:
-            raise FacadeError(
-                "schema_mismatch",
-                "doctor_not_content_free",
-                "The doctor did not satisfy its content-free privacy contract.",
-            )
-        checks_raw = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
-        checks: list[dict[str, Any]] = []
-        selected_names = DIAGNOSIS_CHECKS[str(scope)]
-        for name, candidate in list(checks_raw.items()):
-            if name not in selected_names or len(checks) >= 50:
-                continue
-            if not isinstance(candidate, Mapping):
-                continue
-            status = candidate.get("status")
-            if status not in {"ok", "warning", "blocked", "unknown", "skipped"}:
-                status = "unknown"
-            facts: list[dict[str, Any]] = []
-            if detail == "full" and isinstance(candidate.get("facts"), Mapping):
-                facts = [
-                    {"name": str(fact_name)[:128], "value": fact_value}
-                    for fact_name, fact_value in list(candidate["facts"].items())[:20]
-                    if isinstance(fact_value, (str, int, float, bool)) or fact_value is None
-                ]
-            checks.append(
-                {
-                    "name": str(name)[:128],
-                    "status": status,
-                    "code": re.sub(
-                        r"[^a-z0-9_]+",
-                        "_",
-                        str(candidate.get("code") or "unknown_check").casefold(),
-                    ).strip("_")[:128]
-                    or "unknown_check",
-                    "message": str(candidate.get("message") or "No diagnostic message.")[:2000],
-                    "facts": facts,
-                }
-            )
-        counts = {
-            status: sum(1 for check in checks if check["status"] == status)
-            for status in ("ok", "warning", "blocked", "unknown", "skipped")
-        }
-        overall = (
-            "blocked"
-            if counts["blocked"]
-            else "degraded"
-            if counts["warning"] or counts["unknown"]
-            else "ready"
-        )
-        summary = ", ".join(
-            f"{status}={count}" for status, count in counts.items() if count
-        ) or "No checks were available for the requested diagnostic area."
-        data = {
-            "overall": overall,
-            "scope": scope,
-            "summary": summary[:4000],
-            "environment_fingerprint": self._fingerprint(),
-            "checks": checks,
-            "privacy": {
-                "content_free": True,
-                "reminder_content_read": False,
-                "prompt_triggered": False,
-            },
-        }
-        return self._read_success("diagnose_reminders", data)
-
-    def _fingerprint(self) -> str:
-        value = self._environment_fingerprint()
-        if isinstance(value, str) and HEX_64_PATTERN.fullmatch(value):
-            return value
-        return _stable_hash(str(value))
 
     @staticmethod
     def _read_success(operation: str, data: dict[str, Any]) -> dict[str, Any]:

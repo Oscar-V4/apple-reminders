@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -44,6 +45,10 @@ from reminders_service import (  # noqa: E402
     SetCompletionAction,
     Snapshot,
 )
+if __package__:  # Package import in tests; script-local import in the stdio server.
+    from .v2_contract import MUTATION_STATUSES, SUCCESS_STATUSES
+else:  # pragma: no cover - exercised by the script entry point
+    from v2_contract import MUTATION_STATUSES, SUCCESS_STATUSES
 
 
 PUBLIC_ERROR_CODES = frozenset(
@@ -109,6 +114,7 @@ FETCH_CURSOR_FIELDS = (
     "limit",
     "sort",
 )
+IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,256}$")
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,12 @@ class EventKitReply:
 
     payload: Mapping[str, Any]
     is_error: bool = False
+
+
+@dataclass(frozen=True)
+class _IdempotentResult:
+    fingerprint: str
+    payload: dict[str, Any]
 
 
 class EventKitPort(Protocol):
@@ -178,21 +190,66 @@ def _deep_dict(value: Any) -> dict[str, Any]:
     return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else {}
 
 
+def _trimmed_string(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise FacadeInputError(f"{name} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise FacadeInputError(f"{name} must not be empty")
+    if len(normalized) > maximum:
+        raise FacadeInputError(f"{name} exceeds its {maximum}-character limit")
+    return normalized
+
+
 def _public_source(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return copy.deepcopy(value)
-    source = _deep_dict(value)
-    if "reminder_calendar_count" in source:
-        source["reminder_list_count"] = source.pop("reminder_calendar_count")
-    return source
+    raw = dict(value)
+    source_type = str(raw.get("type") or "unknown")
+    if source_type not in {
+        "local",
+        "exchange",
+        "caldav",
+        "mobile_me",
+        "subscribed",
+        "birthdays",
+        "unknown",
+    }:
+        source_type = "unknown"
+    raw_count = raw.get("reminder_list_count", raw.get("reminder_calendar_count", 0))
+    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
+    return {
+        "id": str(raw.get("id") or "")[:2048],
+        "title": str(raw.get("title") or "")[:512],
+        "type": source_type,
+        "is_delegate": raw.get("is_delegate") is True,
+        "reminder_list_count": max(0, min(count, 10_000)),
+    }
 
 
 def _public_list(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return copy.deepcopy(value)
-    item = _deep_dict(value)
-    item["source"] = _public_source(item.get("source"))
-    return item
+    raw = dict(value)
+    list_type = str(raw.get("type") or "unknown")
+    if list_type not in {
+        "local",
+        "caldav",
+        "exchange",
+        "subscription",
+        "birthday",
+        "unknown",
+    }:
+        list_type = "unknown"
+    return {
+        "id": str(raw.get("id") or raw.get("list_id") or "")[:2048],
+        "title": str(raw.get("title") or raw.get("name") or "")[:512],
+        "type": list_type,
+        "allows_content_modifications": raw.get("allows_content_modifications") is True,
+        "subscribed": raw.get("subscribed") is True,
+        "immutable": raw.get("immutable") is True,
+        "source": _public_source(raw.get("source")),
+    }
 
 
 def _public_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -735,9 +792,15 @@ class V2CoreFacade:
         operation_id_source: Callable[[], str] = lambda: str(uuid.uuid4()),
         reference_ttl_seconds: float = 300.0,
         max_active_references: int = 1024,
+        max_idempotency_results: int = 256,
     ) -> None:
+        if max_idempotency_results <= 0:
+            raise ValueError("Facade bounds must be positive")
         self._eventkit = eventkit
         self._operation_id_source = operation_id_source
+        self._max_idempotency_results = max_idempotency_results
+        self._idempotency: dict[str, _IdempotentResult] = {}
+        self._idempotency_lock = threading.RLock()
         self._adapter = EventKitCoreAdapter(
             eventkit,
             operation_id_source=operation_id_source,
@@ -768,6 +831,7 @@ class V2CoreFacade:
             "create_reminder": self.create_reminder,
             "change_reminder": self.change_reminder,
             "delete_reminder": self.delete_reminder,
+            "ensure_reminder_list": self.ensure_reminder_list,
         }
         try:
             route = routes[tool_name]
@@ -828,6 +892,185 @@ class V2CoreFacade:
                 "prompted_explicitly": True,
             },
         }
+
+    def ensure_reminder_list(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        if set(arguments) != {"source_id", "name", "idempotency_key"}:
+            return self._mutation_failure(
+                "ensure_reminder_list",
+                target={"source_id": arguments.get("source_id"), "list_id": None},
+                code="invalid_input",
+                reason_code="invalid_ensure_list_fields",
+                message="ensure_reminder_list requires source_id, name, and idempotency_key.",
+                retryable=False,
+            )
+        try:
+            source_id = _trimmed_string(arguments["source_id"], "source_id", 2048)
+            name = _trimmed_string(arguments["name"], "name", 512)
+        except FacadeInputError as exc:
+            return self._mutation_failure(
+                "ensure_reminder_list",
+                target={"source_id": arguments.get("source_id"), "list_id": None},
+                code="invalid_input",
+                reason_code="invalid_list_identity",
+                message=str(exc),
+                retryable=False,
+            )
+        key = arguments["idempotency_key"]
+        if not isinstance(key, str) or not IDEMPOTENCY_PATTERN.fullmatch(key):
+            return self._mutation_failure(
+                "ensure_reminder_list",
+                target={"source_id": source_id, "list_id": None},
+                code="invalid_input",
+                reason_code="invalid_idempotency_key",
+                message="idempotency_key must contain 8-256 safe characters.",
+                retryable=False,
+            )
+        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        request_fingerprint = hashlib.sha256(
+            json.dumps(
+                {"source_id": source_id, "name": name},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        with self._idempotency_lock:
+            previous = self._idempotency.get(key_hash)
+            if previous is not None:
+                if previous.fingerprint != request_fingerprint:
+                    return self._mutation_failure(
+                        "ensure_reminder_list",
+                        target={"source_id": source_id, "list_id": None},
+                        code="invalid_input",
+                        reason_code="idempotency_key_conflict",
+                        message="The idempotency key was already used for different list input.",
+                        retryable=False,
+                    )
+                replay = copy.deepcopy(previous.payload)
+                replay["replayed"] = True
+                return replay
+
+            try:
+                reply = self._eventkit.invoke(
+                    "ensure_reminder_list",
+                    {"source_id": source_id, "name": name},
+                    mutation=True,
+                )
+            except Exception:
+                result = self._pending_list_result(
+                    source_id,
+                    reason_code="eventkit_list_dispatch_failed",
+                    message=(
+                        "The Reminder List may have been created; list the exact "
+                        "source before retrying."
+                    ),
+                )
+            else:
+                result = self._project_list_receipt(
+                    reply,
+                    source_id=source_id,
+                    expected_name=name,
+                )
+            result["replayed"] = False
+            result["idempotency_key_hash"] = key_hash
+            if result["status"] in SUCCESS_STATUSES:
+                while len(self._idempotency) >= self._max_idempotency_results:
+                    self._idempotency.pop(next(iter(self._idempotency)))
+                self._idempotency[key_hash] = _IdempotentResult(
+                    request_fingerprint,
+                    copy.deepcopy(result),
+                )
+            return result
+
+    def _project_list_receipt(
+        self,
+        reply: EventKitReply,
+        *,
+        source_id: str,
+        expected_name: str,
+    ) -> dict[str, Any]:
+        payload = _deep_dict(reply.payload)
+        status = payload.get("status")
+        if (
+            status not in MUTATION_STATUSES
+            or payload.get("ok") is not (status in SUCCESS_STATUSES)
+            or (
+                reply.is_error
+                and status
+                not in {"failed_no_mutation", "failed_manual_repair_required"}
+            )
+        ):
+            return self._pending_list_result(
+                source_id,
+                reason_code="invalid_eventkit_list_receipt",
+                message=(
+                    "The Reminder List result could not be validated; list the "
+                    "exact source before retrying."
+                ),
+            )
+        before = _public_list(payload.get("before"))
+        after = _public_list(payload.get("after"))
+        target_raw = payload.get("target") if isinstance(payload.get("target"), Mapping) else {}
+        list_id = target_raw.get("list_id") or (
+            after.get("id") if isinstance(after, Mapping) else None
+        )
+        if status in {"unchanged", "verified"}:
+            after_source = after.get("source") if isinstance(after, Mapping) else None
+            if (
+                not isinstance(after, Mapping)
+                or after.get("id") != list_id
+                or after.get("title") != expected_name
+                or not isinstance(after_source, Mapping)
+                or after_source.get("id") != source_id
+            ):
+                return self._pending_list_result(
+                    source_id,
+                    reason_code="invalid_eventkit_list_receipt",
+                    message=(
+                        "The exact Reminder List read-back did not match the requested "
+                        "source and name; list the source before retrying."
+                    ),
+                )
+        result = self._project_mutation_receipt(
+            payload,
+            operation="ensure_reminder_list",
+            target={
+                "source_id": source_id,
+                "list_id": list_id if isinstance(list_id, str) else None,
+            },
+            before=before,
+            after=after,
+            backend="eventkit_public_sdk",
+        )
+        if status in {"unchanged", "verified"}:
+            result["verification"] = {
+                "state": "read_back",
+                "write_performed": status == "verified",
+                "final_read": True,
+                "matched": True,
+            }
+        elif status == "failed_no_mutation":
+            result["verification"] = {
+                "state": "not_needed",
+                "write_performed": False,
+                "final_read": False,
+            }
+        return result
+
+    def _pending_list_result(
+        self,
+        source_id: str,
+        *,
+        reason_code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        result = self._unknown_mutation_result(
+            "ensure_reminder_list",
+            target={"source_id": source_id, "list_id": None},
+            reason_code=reason_code,
+            message=message,
+        )
+        result.pop("next_action", None)
+        return result
 
     def list_reminder_lists(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         limit = int(arguments.get("limit", 100))

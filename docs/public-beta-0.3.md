@@ -130,7 +130,11 @@ Replace shallow route tests once the same behavior is protected at a new Interfa
 - The repo marketplace points to the canonical `plugins/apple-reminders` runtime subtree; a marketplace install does not copy repository tests, development docs, workflows, screenshots, or `dist`.
 - Every behavior change starts with a failing Interface-level test and reaches green before the next slice.
 - The full deterministic suite passes on the documented Python and macOS matrix.
-- A live disposable workflow covers list/read/create/patch/complete/reopen/delete, URL, image, section, and concurrency rejection with cleanup.
+- A live disposable workflow covers list/create idempotent replay, a bounded
+  fetch, parallel exact reads followed by stale-revision rejection,
+  patch/complete/reopen/delete, URL, image, section, sync evidence, and exact
+  cleanup. Tag regression remains covered by isolated tests and one-off live
+  evidence; the repeatable harness does not create persistent tag tombstones.
 - The clean packaged artifact initializes and lists the expected tools without using repository-relative development files.
 - Skill evals cover direct, indirect, incomplete, should-not-activate, and destructive edge prompts.
 - README includes install, first permission, first prompts, upgrade, disable, uninstall, local-data cleanup, and troubleshooting.

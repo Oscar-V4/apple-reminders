@@ -241,6 +241,32 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
 
 Timing is end-to-end subprocess wall time and is not a cross-machine score.
 
+### Opt-in live validation
+
+Maintainers can run one destructive-but-disposable end-to-end smoke test after
+the data-free suite passes. From a repository checkout, first use
+`list_reminder_lists` to choose the exact `source.id` of a writable account. The
+maintainer harness is not included in the runtime ZIP. It creates one uniquely
+named synthetic list, exercises Core and Native Extension flows through the
+installable runtime's stdio MCP server, verifies list/create idempotent replay,
+a five-item bounded fetch, actual stale-revision rejection from parallel exact
+reads, URL and image visibility plus sync evidence, section placement,
+completion/reopen, and exact deletion. It finally deletes that exact list by
+matching both its name and AppleScript identity.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/live_smoke.py \
+  --confirm-live-reminders \
+  --source-id '<exact-source-id>'
+```
+
+This command changes live Reminders data and must never run in CI. Its output is
+redacted to step, status, and latency. If exact cleanup cannot be proven, it
+prints only the reserved synthetic list name that must be inspected manually;
+do not retry blindly. Reminders may retain the deleted synthetic content in
+**Recently Deleted**; the harness deliberately does not empty that recoverable
+system area.
+
 ## Deterministic source package
 
 The allowlisted release ZIP includes runtime files only. It excludes tests,
@@ -270,8 +296,20 @@ Internal or development operations can create support data under:
 These locations may contain sensitive identifiers, cached metadata, operation
 records, compiled helpers, capability records, or recovery snapshots. Backup,
 restore, repair, and log-purge operations are not public 0.3 tools; no automatic
-restore is promised. See [PRIVACY.md](PRIVACY.md) before inspecting, sharing, or
-removing support data.
+restore is promised. See [PRIVACY.md](PRIVACY.md#user-control) before inspecting,
+sharing, or removing support data.
+
+To remove local support data safely, first remove or stop the plugin, start a
+new Codex task, and confirm that no Reminders operation is running. In Finder,
+use **Go → Go to Folder…** to inspect each exact path above, then move only the
+`apple-reminders-codex` folder at those two locations to Trash. Do not remove a
+parent `Application Support` or `Caches` directory. This clears local caches,
+compiled helpers, journals, idempotency metadata, and any plugin-managed backup
+files that still exist; it does not undo Reminders or iCloud changes. Empty
+Trash only after deciding that any old recovery artifacts are no longer needed.
+For a full uninstall, also revoke Reminders and Automation access in **System
+Settings → Privacy & Security**, and separately inspect any custom external
+backup directory that you explicitly configured.
 
 ## License and contributions
 

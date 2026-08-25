@@ -8,7 +8,6 @@ bounded/redacted outputs, JSON-RPC framing, and subprocess isolation.
 
 from __future__ import annotations
 
-import copy
 import datetime as dt
 import hashlib
 import importlib.util
@@ -34,8 +33,6 @@ if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
 
 from receipt_contract import (  # noqa: E402
-    FAILURE_RECEIPT_STATUSES,
-    SUCCESS_RECEIPT_STATUSES,
     adapter_receipt_error,
 )
 from v2_contract import (  # noqa: E402
@@ -230,56 +227,69 @@ def load_tools(path: Path = TOOLS_SCHEMA_PATH) -> list[dict[str, Any]]:
 
 TOOLS = load_tools()
 TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
-RECEIPT_STATUSES = set(SUCCESS_RECEIPT_STATUSES)
-FAILED_RECEIPT_STATUSES = set(FAILURE_RECEIPT_STATUSES)
 RECENT_CALLS: deque[float] = deque()
 SESSION_INITIALIZED = False
 _ADAPTER_MODULE: Any | None = None
 _EVENTKIT_BRIDGE_MODULE: Any | None = None
 _V2_CORE_FACADE: Any | None = None
 _V2_NATIVE_FACADE: Any | None = None
-_V2_TYPES_LOADED = False
+_V2_DIAGNOSTICS_FACADE: Any | None = None
+_V2_CORE_TYPES_LOADED = False
+_V2_NATIVE_TYPES_LOADED = False
+_V2_DIAGNOSTICS_TYPES_LOADED = False
 
 
-def _ensure_v2_types() -> None:
-    """Load write-path facades only when the first tool is called."""
+def _ensure_v2_core_types() -> None:
+    """Load the Core Module only when a Core tool is first called."""
 
-    global _V2_TYPES_LOADED
-    if _V2_TYPES_LOADED:
+    global _V2_CORE_TYPES_LOADED
+    if _V2_CORE_TYPES_LOADED:
         return
-    from reminders_service import (  # noqa: PLC0415
-        MutationOutcome as _MutationOutcome,
-        ReferenceRejected as _ReferenceRejected,
-    )
     from v2_core import (  # noqa: PLC0415
-        EventKitReply as _EventKitReply,
         V2CoreFacade as _V2CoreFacade,
     )
-    from v2_native import NativeFacade as _NativeFacade  # noqa: PLC0415
+    from v2_core_backend import CoreBackend as _CoreBackend  # noqa: PLC0415
 
     globals().update(
         {
-            "MutationOutcome": _MutationOutcome,
-            "ReferenceRejected": _ReferenceRejected,
-            "EventKitReply": _EventKitReply,
             "V2CoreFacade": _V2CoreFacade,
-            "NativeFacade": _NativeFacade,
+            "CoreBackend": _CoreBackend,
         }
     )
-    _V2_TYPES_LOADED = True
+    _V2_CORE_TYPES_LOADED = True
+
+
+def _ensure_v2_native_types() -> None:
+    """Load the Native Extension Module only for a native tool call."""
+
+    global _V2_NATIVE_TYPES_LOADED
+    if _V2_NATIVE_TYPES_LOADED:
+        return
+    from v2_native import NativeFacade as _NativeFacade  # noqa: PLC0415
+    from v2_native_backend import NativeBackend as _NativeBackend  # noqa: PLC0415
+
+    globals().update(
+        {
+            "NativeFacade": _NativeFacade,
+            "NativeBackend": _NativeBackend,
+        }
+    )
+    _V2_NATIVE_TYPES_LOADED = True
+
+
+def _ensure_v2_diagnostics_types() -> None:
+    """Load the content-free Diagnostics Module only on demand."""
+
+    global _V2_DIAGNOSTICS_TYPES_LOADED
+    if _V2_DIAGNOSTICS_TYPES_LOADED:
+        return
+    from v2_diagnostics import DiagnosticsFacade as _DiagnosticsFacade  # noqa: PLC0415
+
+    globals()["DiagnosticsFacade"] = _DiagnosticsFacade
+    _V2_DIAGNOSTICS_TYPES_LOADED = True
 
 
 class ToolInputError(ValueError):
-    pass
-
-
-class EventKitBridgeFailure(RuntimeError):
-    def __init__(self, payload: dict[str, Any]) -> None:
-        super().__init__("EventKit bridge operation failed")
-        self.payload = payload
-
-
-class EventKitReceiptFailure(RuntimeError):
     pass
 
 
@@ -878,450 +888,6 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
     return payload, is_error
 
 
-def _mutation_reminder_id(payload: dict[str, Any]) -> str | None:
-    for container_name in ("target", "after"):
-        container = payload.get(container_name)
-        if not isinstance(container, dict):
-            continue
-        for key in ("reminder_id", "id", "external_id"):
-            value = container.get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
-
-
-def _url_attachment_partial_receipt(
-    payload: dict[str, Any],
-    *,
-    code: str,
-    message: str,
-) -> dict[str, Any]:
-    initial_status = payload.get("status")
-    existing_verification = payload.get("verification")
-    eventkit_write_committed = initial_status == "verified" or (
-        isinstance(existing_verification, dict)
-        and existing_verification.get("write_performed") is True
-    )
-    payload["ok"] = True
-    payload["status"] = "partial_success"
-    payload.setdefault("warnings", []).append(
-        {
-            "code": code,
-            "message": message,
-        }
-    )
-    verification = payload.setdefault("verification", {})
-    verification.update(
-        {
-            "state": "partial",
-            "write_performed": True if eventkit_write_committed else None,
-            "final_read": False,
-        }
-    )
-    verification["url_attachment"] = {
-        "state": "failed",
-        "status": "failed_manual_repair_required",
-        "attachment_active": False,
-        "error_code": code,
-    }
-    recovery = payload.setdefault("recovery", {})
-    recovery.update(
-        {
-            "semantics": "repair_visible_url_after_fresh_read",
-            "automatic_retry_safe": False,
-        }
-    )
-    recovery["url_attachment"] = {
-        "semantics": "call_attach_url_to_reminder_after_fresh_attachment_read",
-        "automatic_retry_safe": False,
-    }
-    payload["error"] = {
-        "code": "sync_pending",
-        "reason_code": code,
-        "message": message,
-        "retryable": True,
-    }
-    return payload
-
-
-def _is_rfc3339_timestamp(value: Any) -> bool:
-    if not isinstance(value, str) or not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})",
-        value,
-    ):
-        return False
-    try:
-        dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return True
-
-
-def _url_final_read_pending(
-    payload: dict[str, Any],
-    *,
-    reminder_id: str,
-    attachment: dict[str, Any] | None,
-    reason_code: str,
-) -> dict[str, Any]:
-    message = (
-        "The EventKit write and native URL attachment step completed, but the final "
-        "exact EventKit read was not safe to use. Read the reminder again before the "
-        "next guarded write."
-    )
-    safe_after: dict[str, Any] = {"id": reminder_id}
-    if attachment is not None:
-        safe_after["url_attachment"] = attachment
-    payload["after"] = safe_after
-    payload.setdefault("warnings", []).append(
-        {"code": "eventkit_final_read_pending", "message": message}
-    )
-    verification = payload.setdefault("verification", {})
-    verification["eventkit_final_read"] = {
-        "state": "pending",
-        "reason_code": reason_code,
-        "last_modified_safe_for_precondition": False,
-    }
-    payload.setdefault("recovery", {})["eventkit_final_read"] = {
-        "semantics": "read_reminder_before_next_write",
-        "automatic_retry_safe": False,
-    }
-    if payload.get("status") == "partial_success":
-        verification["state"] = "partial"
-        verification["final_read"] = False
-        verification["matched"] = None
-        return payload
-    payload["ok"] = True
-    payload["status"] = "committed_verification_pending"
-    verification["state"] = "pending"
-    payload["error"] = {
-        "code": "sync_pending",
-        "reason_code": reason_code,
-        "message": message,
-    }
-    return payload
-
-
-def ensure_visible_url_attachment(
-    payload: dict[str, Any],
-    url: str,
-) -> dict[str, Any]:
-    if payload.get("status") not in {"verified", "unchanged"}:
-        return payload
-    reminder_id = _mutation_reminder_id(payload)
-    if reminder_id is None:
-        return _url_attachment_partial_receipt(
-            payload,
-            code="native_url_attachment_target_missing",
-            message=(
-                "The EventKit write succeeded, but its reminder identifier was unavailable for "
-                "the visible URL attachment step."
-            ),
-        )
-
-    initial_eventkit_status = str(payload["status"])
-    attachment: dict[str, Any] | None = None
-    attachment_status: str | None = None
-    list_arguments = {"reminder_id": reminder_id, "limit": 1}
-    list_payload, list_is_error = invoke_adapter(
-        build_adapter_argv("list_reminder_attachments", list_arguments)
-    )
-    reminder_version = list_payload.get("reminder_version")
-    if (
-        list_is_error
-        or not isinstance(reminder_version, int)
-        or isinstance(reminder_version, bool)
-        or reminder_version < 0
-    ):
-        error = list_payload.get("error") if isinstance(list_payload.get("error"), dict) else {}
-        _url_attachment_partial_receipt(
-            payload,
-            code=str(error.get("code") or "native_url_attachment_precondition_failed"),
-            message=(
-                "The EventKit write succeeded, but the plugin could not obtain a fresh reminder "
-                "version for the visible URL attachment."
-            ),
-        )
-    else:
-        attach_arguments = {
-            "reminder_id": reminder_id,
-            "url": url,
-            "if_version": reminder_version,
-        }
-        attach_payload, attach_is_error = invoke_adapter(
-            build_adapter_argv("attach_url_to_reminder", attach_arguments)
-        )
-        receipt_error = (
-            validate_adapter_receipt(attach_payload, expected_operation="attach_url")
-            if not attach_is_error
-            else None
-        )
-        candidate_attachment = (
-            attach_payload.get("after", {}).get("attachment")
-            if isinstance(attach_payload.get("after"), dict)
-            else None
-        )
-        attachment_active = (
-            attach_payload.get("verification", {}).get("attachment_active") is True
-            if isinstance(attach_payload.get("verification"), dict)
-            else False
-        )
-        attachment_receipt_complete = attach_payload.get("status") in {
-            "verified",
-            "unchanged",
-        }
-        attachment_matches = (
-            isinstance(candidate_attachment, dict)
-            and candidate_attachment.get("url") == url
-        )
-        if (
-            attach_is_error
-            or receipt_error
-            or not attachment_receipt_complete
-            or not attachment_active
-            or not attachment_matches
-        ):
-            error = (
-                attach_payload.get("error")
-                if isinstance(attach_payload.get("error"), dict)
-                else {}
-            )
-            _url_attachment_partial_receipt(
-                payload,
-                code=str(
-                    error.get("code")
-                    or (
-                        "invalid_adapter_receipt"
-                        if receipt_error
-                        else "native_url_attachment_failed"
-                    )
-                ),
-                message=(
-                    "The EventKit write succeeded, but the native URL attachment was not "
-                    "verified in Reminders."
-                ),
-            )
-        else:
-            attachment = candidate_attachment
-            attachment_status = str(attach_payload["status"])
-            payload.setdefault("verification", {})["url_attachment"] = {
-                **attach_payload["verification"],
-                "status": attachment_status,
-            }
-            payload.setdefault("recovery", {})["url_attachment"] = attach_payload[
-                "recovery"
-            ]
-
-    final_payload, final_is_error = invoke_eventkit_bridge(
-        "read_reminder",
-        {"reminder_id": reminder_id},
-    )
-    final_data = final_payload.get("data")
-    final_reminder = (
-        final_data.get("reminder")
-        if isinstance(final_data, dict) and isinstance(final_data.get("reminder"), dict)
-        else None
-    )
-    final_error = (
-        final_payload.get("error")
-        if isinstance(final_payload.get("error"), dict)
-        else {}
-    )
-    reason_code: str | None = None
-    if final_is_error:
-        reason_code = str(
-            final_error.get("reason_code")
-            or final_error.get("code")
-            or "eventkit_final_read_failed"
-        )
-    elif final_payload.get("status") != "verified" or final_reminder is None:
-        reason_code = "eventkit_final_read_unverified"
-    elif _mutation_reminder_id({"after": final_reminder}) != reminder_id:
-        reason_code = "eventkit_final_read_target_mismatch"
-    elif final_reminder.get("url") != url:
-        reason_code = "eventkit_final_read_url_mismatch"
-    elif not _is_rfc3339_timestamp(final_reminder.get("last_modified")):
-        reason_code = "eventkit_final_last_modified_invalid"
-    if reason_code is not None:
-        return _url_final_read_pending(
-            payload,
-            reminder_id=reminder_id,
-            attachment=attachment,
-            reason_code=reason_code,
-        )
-
-    final_after = dict(final_reminder)
-    if attachment is not None:
-        final_after["url_attachment"] = attachment
-    payload["after"] = final_after
-    payload.setdefault("verification", {})["eventkit_final_read"] = {
-        "state": "read_back",
-        "reminder_id": reminder_id,
-        "last_modified_safe_for_precondition": True,
-    }
-    payload.setdefault("recovery", {})["eventkit_final_read"] = {
-        "semantics": "not_applicable",
-        "automatic_retry_safe": True,
-    }
-    if payload.get("status") == "partial_success":
-        verification = payload.setdefault("verification", {})
-        verification["state"] = "partial"
-        verification["final_read"] = True
-        verification["matched"] = True
-        return payload
-    payload["status"] = (
-        "unchanged"
-        if initial_eventkit_status == "unchanged" and attachment_status == "unchanged"
-        else "verified"
-    )
-    return payload
-
-
-def invoke_eventkit_mutation(
-    tool_name: str,
-    operation: str,
-    arguments: dict[str, Any],
-) -> tuple[dict[str, Any], bool]:
-    bridge_arguments = dict(arguments)
-    idempotency_key = bridge_arguments.pop("idempotency_key", None)
-    bridge_contract = bundled_eventkit_bridge_module()
-
-    def execute_once() -> dict[str, Any]:
-        payload, is_error = invoke_eventkit_bridge(operation, bridge_arguments)
-        if is_error:
-            raise EventKitBridgeFailure(payload)
-        try:
-            bridge_contract.validate_mutation_receipt(payload, operation)
-        except RuntimeError as exc:
-            raise EventKitReceiptFailure(str(exc)) from exc
-        visible_url = bridge_arguments.get("url") if tool_name == "create_reminder" else None
-        if tool_name == "update_reminder" and isinstance(bridge_arguments.get("patch"), dict):
-            visible_url = bridge_arguments["patch"].get("url")
-        if isinstance(visible_url, str):
-            payload = ensure_visible_url_attachment(payload, visible_url)
-        return payload
-
-    try:
-        if tool_name == "create_reminder":
-            adapter = bundled_adapter_module()
-            request = {"schema_version": 1, "operation": operation, **bridge_arguments}
-            payload = adapter.execute_idempotent(
-                operation="eventkit_create_reminder",
-                key=idempotency_key,
-                input_payload=request,
-                callback=execute_once,
-            )
-            if payload.get("replayed") is True and payload.get("status") == "committed_verification_pending":
-                payload["warnings"] = [
-                    {
-                        "code": "sync_pending",
-                        "message": "This replayed creation receipt is still awaiting verification.",
-                    }
-                ]
-                pending_error = payload.get("error")
-                if not isinstance(pending_error, dict):
-                    pending_error = {}
-                pending_error["code"] = "sync_pending"
-                pending_error["message"] = (
-                    "The original creation committed but verification remains pending."
-                )
-                payload["error"] = pending_error
-        else:
-            payload = execute_once()
-    except EventKitBridgeFailure as exc:
-        return exc.payload, True
-    except EventKitReceiptFailure as exc:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "invalid_eventkit_receipt",
-                    "message": str(exc),
-                },
-            },
-            True,
-        )
-    except Exception as exc:
-        adapter_error = getattr(bundled_adapter_module(), "AdapterError", ())
-        if adapter_error and isinstance(exc, adapter_error):
-            return (
-                {
-                    "ok": False,
-                    "status": "failed_no_mutation",
-                    "operation": operation,
-                    "error": {
-                        "code": exc.code,
-                        "message": str(exc),
-                        "details": exc.details,
-                    },
-                },
-                True,
-            )
-        raise
-    return payload, payload.get("ok") is not True
-
-
-class _ServerEventKitPort:
-    """Production v2 Core port over the existing guarded EventKit launcher."""
-
-    _MUTATION_TOOL_NAMES = {
-        "create_reminder": "create_reminder",
-        "update_reminder": "update_reminder",
-        "complete_reminder": "complete_reminder",
-        "reopen_reminder": "reopen_reminder",
-        "move_reminder": "move_reminder_to_list",
-        "delete_reminder": "delete_reminder",
-    }
-
-    def invoke(
-        self,
-        operation: str,
-        arguments: Mapping[str, Any],
-        *,
-        mutation: bool,
-    ) -> EventKitReply:
-        _ensure_v2_types()
-        supplied = copy.deepcopy(dict(arguments))
-        if mutation:
-            tool_name = self._MUTATION_TOOL_NAMES.get(operation)
-            if tool_name is None:
-                raise RuntimeError(f"Unsupported v2 EventKit mutation: {operation}")
-            payload, is_error = invoke_eventkit_mutation(
-                tool_name,
-                operation,
-                supplied,
-            )
-        else:
-            payload, is_error = invoke_eventkit_bridge(operation, supplied)
-        return EventKitReply(payload=payload, is_error=is_error)
-
-
-def _v2_eventkit_call(operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    payload, _ = invoke_eventkit_mutation(
-        operation,
-        operation,
-        copy.deepcopy(arguments),
-    )
-    return payload
-
-
-def _v2_adapter_call(command: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    public_route = {
-        "list_sections": "list_reminder_sections",
-        "list_tags": "list_reminder_tags",
-        "create_section": "create_reminder_section",
-    }.get(command)
-    if public_route is None:
-        raise RuntimeError(f"Unsupported v2 adapter read: {command}")
-    route_arguments = {
-        key: value
-        for key, value in arguments.items()
-        if value is not None
-    }
-    payload, _ = invoke_adapter(build_adapter_argv(public_route, route_arguments))
-    return payload
-
-
 def _v2_doctor_call(arguments: dict[str, Any]) -> dict[str, Any]:
     payload, _ = invoke_doctor(arguments)
     return payload
@@ -1341,354 +907,50 @@ def _v2_environment_fingerprint() -> str:
     return hashlib.sha256("\n".join(facts).encode("utf-8")).hexdigest()
 
 
-def _v2_revalidate_guard(guard: Guard) -> dict[str, Any]:
-    _ensure_v2_types()
-    payload, is_error = invoke_eventkit_bridge(
-        "read_reminder",
-        {"reminder_id": guard.reminder_id},
-    )
-    data = payload.get("data")
-    reminder = data.get("reminder") if isinstance(data, dict) else None
-    if is_error or payload.get("status") != "verified" or not isinstance(reminder, dict):
-        raise ReferenceRejected(
-            "concurrent_modification",
-            "The exact Reminder could not be revalidated before native access",
-        )
-    if reminder.get("id") != guard.reminder_id:
-        raise ReferenceRejected(
-            "invalid_reference",
-            "The native guard resolved to a different Reminder",
-        )
-    store_part = reminder.get("source_id") or reminder.get("list_id") or reminder.get(
-        "calendar_id"
-    )
-    store_identity = f"eventkit:{store_part}" if isinstance(store_part, str) else None
-    if (
-        store_identity != guard.store_identity
-        or reminder.get("last_modified") != guard.public_concurrency_value
-    ):
-        raise ReferenceRejected(
-            "concurrent_modification",
-            "The Reminder changed before native access",
-        )
-    return reminder
-
-
-def _v2_private_read_reminder(reminder_id: str) -> dict[str, Any]:
-    payload, is_error = invoke_adapter(["read_reminder", "--id", reminder_id])
-    reminder = payload.get("reminder")
-    if is_error or not isinstance(reminder, dict):
-        raise RuntimeError("The private Reminder read failed")
-    identities = [
-        reminder[name]
-        for name in ("id", "identifier")
-        if reminder.get(name) is not None
-    ]
-    if not identities or any(identity != reminder_id for identity in identities):
-        raise RuntimeError("The private Reminder read returned a different identity")
-    return reminder
-
-
-def _v2_private_attachments(
-    reminder_id: str,
-    *,
-    limit: int,
-    attachment_type: str | None = None,
-) -> dict[str, Any]:
-    arguments: dict[str, Any] = {"reminder_id": reminder_id, "limit": limit}
-    if attachment_type is not None:
-        arguments["attachment_type"] = attachment_type
-    payload, is_error = invoke_adapter(
-        build_adapter_argv("list_reminder_attachments", arguments)
-    )
-    if is_error or payload.get("reminder_id") != reminder_id:
-        raise RuntimeError("The private attachment read failed")
-    return payload
-
-
-def _v2_native_read(guard: Guard, arguments: dict[str, Any]) -> dict[str, Any]:
-    _v2_revalidate_guard(guard)
-    include = set(arguments.get("include") or [])
-    result: dict[str, Any] = {"reminder_id": guard.reminder_id}
-    if include & {"section", "tags", "sync"}:
-        reminder = _v2_private_read_reminder(guard.reminder_id)
-        result.update(copy.deepcopy(reminder))
-        result["reminder_id"] = guard.reminder_id
-        if "sync" in include and "sync" not in result:
-            result["sync"] = {
-                key: reminder.get(key)
-                for key in (
-                    "fields_available",
-                    "mobile_visible_likely",
-                    "has_server_record",
-                    "in_cloud",
-                    "current_local_version",
-                    "latest_synced_version",
-                )
-                if key in reminder
-            }
-    if "attachments" in include:
-        attachments = _v2_private_attachments(
-            guard.reminder_id,
-            limit=int(arguments.get("limit", 100)),
-            attachment_type=arguments.get("attachment_type"),
-        )
-        result["attachment_items"] = copy.deepcopy(
-            attachments.get("attachments", [])
-        )
-        result["truncated"] = attachments.get("truncated") is True
-    return result
-
-
-def _v2_native_failure_outcome(
-    guard: Guard,
-    command: str,
-    *,
-    code: str,
-    message: str,
-) -> MutationOutcome:
-    _ensure_v2_types()
-    return MutationOutcome(
-        receipt={
-            "ok": False,
-            "status": "failed_no_mutation",
-            "operation": command,
-            "operation_id": str(uuid.uuid4()),
-            "backend": "native_extension",
-            "target": {"reminder_id": guard.reminder_id},
-            "before": {},
-            "after": {},
-            "verification": {
-                "state": "not_needed",
-                "write_performed": False,
-                "final_read": False,
-            },
-            "recovery": {
-                "semantics": "not_applicable",
-                "automatic_retry_safe": True,
-            },
-            "error": {
-                "code": code,
-                "reason_code": code,
-                "message": message,
-                "retryable": code in {"concurrent_modification", "sync_pending"},
-            },
-        },
-        mutation_state="not_mutated",
-    )
-
-
-def _v2_native_pending_outcome(
-    guard: Guard,
-    command: str,
-    *,
-    reason_code: str,
-    message: str,
-) -> MutationOutcome:
-    _ensure_v2_types()
-    return MutationOutcome(
-        receipt={
-            "ok": True,
-            "status": "committed_verification_pending",
-            "operation": command,
-            "operation_id": str(uuid.uuid4()),
-            "backend": "native_extension",
-            "target": {"reminder_id": guard.reminder_id},
-            "before": {},
-            "after": {},
-            "verification": {
-                "state": "pending",
-                "write_performed": None,
-                "final_read": False,
-            },
-            "recovery": {
-                "semantics": "read_before_retry",
-                "automatic_retry_safe": False,
-            },
-            "warnings": [
-                {
-                    "code": "verification_pending",
-                    "message": "The native process may have committed; read before retrying.",
-                }
-            ],
-            "error": {
-                "code": "sync_pending",
-                "reason_code": reason_code,
-                "message": message,
-                "retryable": True,
-            },
-        },
-        mutation_state="unknown",
-    )
-
-
-def _v2_native_route(
-    command: str,
-    guard: Guard,
-    arguments: dict[str, Any],
-    reminder_version: int,
-) -> tuple[str, dict[str, Any]]:
-    base = {
-        "reminder_id": guard.reminder_id,
-        "if_version": reminder_version,
-    }
-    if command == "move_to_section":
-        return "move_reminder_to_section", {**base, "section_id": arguments["section_id"]}
-    if command in {"add_tag", "remove_tag"}:
-        tool_name = "add_reminder_tag" if command == "add_tag" else "remove_reminder_tag"
-        return tool_name, {**base, "tag": arguments["tag"]}
-    if command == "attach_image":
-        return "attach_image_to_reminder", {
-            **base,
-            "image_path": arguments["image_path"],
-            "idempotency_key": arguments["idempotency_key"],
-        }
-    if command == "attach_url":
-        return "attach_url_to_reminder", {**base, "url": arguments["url"]}
-    if command in {"replace_image", "replace_url"}:
-        routed = {
-            **base,
-            "attachment_id": arguments["attachment_id"],
-            "idempotency_key": arguments["idempotency_key"],
-        }
-        if command == "replace_image":
-            routed["image_path"] = arguments["image_path"]
-        else:
-            routed["url"] = arguments["url"]
-        return "replace_reminder_attachment", routed
-    if command == "delete_attachment":
-        return "delete_reminder_attachment", {
-            **base,
-            "attachment_id": arguments["attachment_id"],
-        }
-    raise RuntimeError(f"Unsupported v2 native mutation: {command}")
-
-
-def _v2_native_mutation(
-    guard: Guard,
-    command: str,
-    arguments: dict[str, Any],
-) -> MutationOutcome:
-    _ensure_v2_types()
-    try:
-        _v2_revalidate_guard(guard)
-        private_state = _v2_private_attachments(guard.reminder_id, limit=1)
-    except ReferenceRejected as exc:
-        return _v2_native_failure_outcome(
-            guard,
-            command,
-            code="concurrent_modification",
-            message=str(exc),
-        )
-    except Exception as exc:
-        return _v2_native_failure_outcome(
-            guard,
-            command,
-            code="sync_pending",
-            message=f"The private revision could not be read ({type(exc).__name__}).",
-        )
-    reminder_version = private_state.get("reminder_version")
-    if (
-        not isinstance(reminder_version, int)
-        or isinstance(reminder_version, bool)
-        or reminder_version < 0
-    ):
-        return _v2_native_failure_outcome(
-            guard,
-            command,
-            code="schema_mismatch",
-            message="The private Reminder revision was unavailable.",
-        )
-
-    tool_name, routed_arguments = _v2_native_route(
-        command,
-        guard,
-        arguments,
-        reminder_version,
-    )
-    payload, is_error = invoke_adapter(build_adapter_argv(tool_name, routed_arguments))
-    expected_operation = ROUTES[tool_name].command
-    status = payload.get("status")
-    if status not in RECEIPT_STATUSES | FAILED_RECEIPT_STATUSES:
-        return _v2_native_pending_outcome(
-            guard,
-            command,
-            reason_code="invalid_native_mutation_receipt",
-            message="The native mutation result could not be validated.",
-        )
-    receipt_error = validate_adapter_receipt(
-        payload,
-        expected_operation=expected_operation,
-    )
-    if receipt_error:
-        return _v2_native_pending_outcome(
-            guard,
-            command,
-            reason_code="invalid_native_mutation_receipt",
-            message=receipt_error,
-        )
-    if is_error and status not in {
-        "failed_no_mutation",
-        "failed_manual_repair_required",
-    }:
-        return _v2_native_pending_outcome(
-            guard,
-            command,
-            reason_code="native_mutation_failed_after_dispatch",
-            message="The native mutation may have partially committed.",
-        )
-
-    if status in {"verified", "unchanged"}:
-        try:
-            if command in {"move_to_section", "add_tag", "remove_tag"}:
-                final_state = _v2_private_read_reminder(guard.reminder_id)
-                payload["after"] = final_state
-            else:
-                final_state = _v2_private_attachments(guard.reminder_id, limit=200)
-                payload["after"] = {
-                    "reminder": {"id": guard.reminder_id},
-                    "attachments": final_state.get("attachments", []),
-                }
-        except Exception:
-            if status == "verified":
-                return _v2_native_pending_outcome(
-                    guard,
-                    command,
-                    reason_code="native_final_read_failed",
-                    message="The native write committed, but its final state could not be read.",
-                )
-
-    if status in {"unchanged", "failed_no_mutation"}:
-        mutation_state = "not_mutated"
-    elif status in {"verified", "partial_success"}:
-        mutation_state = "committed"
-    else:
-        mutation_state = "unknown"
-    return MutationOutcome(receipt=payload, mutation_state=mutation_state)
-
-
 def _v2_core_facade() -> V2CoreFacade:
     global _V2_CORE_FACADE
-    _ensure_v2_types()
+    _ensure_v2_core_types()
     if _V2_CORE_FACADE is None:
-        _V2_CORE_FACADE = V2CoreFacade(_ServerEventKitPort())
+        backend = CoreBackend(
+            bridge_call=invoke_eventkit_bridge,
+            adapter_call=invoke_adapter,
+            build_adapter_argv=build_adapter_argv,
+            adapter_module=bundled_adapter_module,
+            bridge_module=bundled_eventkit_bridge_module,
+            receipt_validator=validate_adapter_receipt,
+        )
+        _V2_CORE_FACADE = V2CoreFacade(backend)
     return _V2_CORE_FACADE
 
 
 def _v2_native_facade() -> NativeFacade:
     global _V2_NATIVE_FACADE
-    _ensure_v2_types()
+    _ensure_v2_native_types()
     if _V2_NATIVE_FACADE is None:
+        backend = NativeBackend(
+            bridge_call=invoke_eventkit_bridge,
+            adapter_call=invoke_adapter,
+            build_adapter_argv=build_adapter_argv,
+            receipt_validator=validate_adapter_receipt,
+        )
         _V2_NATIVE_FACADE = NativeFacade(
-            eventkit_call=_v2_eventkit_call,
-            adapter_call=_v2_adapter_call,
-            doctor_call=_v2_doctor_call,
-            environment_fingerprint=_v2_environment_fingerprint,
+            adapter_call=backend.adapter_call,
             references=_v2_core_facade().reference_port,
-            native_read=_v2_native_read,
-            native_mutation=_v2_native_mutation,
+            native_read=backend.read,
+            native_mutation=backend.mutate,
         )
     return _V2_NATIVE_FACADE
+
+
+def _v2_diagnostics_facade() -> DiagnosticsFacade:
+    global _V2_DIAGNOSTICS_FACADE
+    _ensure_v2_diagnostics_types()
+    if _V2_DIAGNOSTICS_FACADE is None:
+        _V2_DIAGNOSTICS_FACADE = DiagnosticsFacade(
+            doctor_call=_v2_doctor_call,
+            environment_fingerprint=_v2_environment_fingerprint,
+        )
+    return _V2_DIAGNOSTICS_FACADE
 
 
 def validate_adapter_receipt(
@@ -1754,8 +1016,18 @@ _V2_CORE_TOOLS = frozenset(
         "create_reminder",
         "change_reminder",
         "delete_reminder",
+        "ensure_reminder_list",
     }
 )
+_V2_NATIVE_TOOLS = frozenset(
+    {
+        "inspect_reminder_native",
+        "create_reminder_section",
+        "organize_reminder",
+        "change_reminder_attachment",
+    }
+)
+_V2_DIAGNOSTIC_TOOLS = frozenset({"diagnose_reminders"})
 
 
 def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
@@ -1976,11 +1248,14 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
             )
         else:
             try:
-                facade = (
-                    _v2_core_facade()
-                    if name in _V2_CORE_TOOLS
-                    else _v2_native_facade()
-                )
+                if name in _V2_CORE_TOOLS:
+                    facade = _v2_core_facade()
+                elif name in _V2_NATIVE_TOOLS:
+                    facade = _v2_native_facade()
+                elif name in _V2_DIAGNOSTIC_TOOLS:
+                    facade = _v2_diagnostics_facade()
+                else:
+                    raise RuntimeError(f"Public tool has no facade owner: {name}")
                 payload = facade.call(name, arguments)
                 mutation_state = (
                     _v2_mutation_state(payload)
@@ -2136,13 +1411,16 @@ def send(message: dict[str, Any]) -> None:
 
 def main(*, backend_paths: BackendPaths | None = None) -> int:
     global _ACTIVE_BACKEND_PATHS, _V2_CORE_FACADE, _V2_NATIVE_FACADE
+    global _V2_DIAGNOSTICS_FACADE
 
     previous_backend_paths = _ACTIVE_BACKEND_PATHS
     previous_core_facade = _V2_CORE_FACADE
     previous_native_facade = _V2_NATIVE_FACADE
+    previous_diagnostics_facade = _V2_DIAGNOSTICS_FACADE
     _ACTIVE_BACKEND_PATHS = backend_paths or DEFAULT_BACKEND_PATHS
     _V2_CORE_FACADE = None
     _V2_NATIVE_FACADE = None
+    _V2_DIAGNOSTICS_FACADE = None
     try:
         for raw_line in sys.stdin:
             if len(raw_line.encode("utf-8", errors="replace")) > MAX_MCP_MESSAGE_BYTES:
@@ -2179,6 +1457,7 @@ def main(*, backend_paths: BackendPaths | None = None) -> int:
         _ACTIVE_BACKEND_PATHS = previous_backend_paths
         _V2_CORE_FACADE = previous_core_facade
         _V2_NATIVE_FACADE = previous_native_facade
+        _V2_DIAGNOSTICS_FACADE = previous_diagnostics_facade
 
 
 if __name__ == "__main__":

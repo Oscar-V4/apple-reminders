@@ -14,6 +14,9 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Made bounded Core work the first-use path. `diagnose_reminders` is a targeted,
   content-free follow-up after a relevant failure rather than an onboarding
   preflight.
+- Matched runtime ownership to the public 8/4/1 split: list creation now belongs
+  to Core, diagnosis is independent of Native Extension, and production backend
+  implementations are isolated behind lazy composition.
 - Centralized public result and Receipt validation while keeping compact
   input-only MCP tool discovery.
 - Replaced environment-selected backend test paths with an explicitly injected
@@ -21,6 +24,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   resolves bundled backends.
 - Added public support, security, privacy, terms, install, temporary-disable,
   uninstall, and troubleshooting documentation.
+- Added a separately gated, redacted live smoke harness that uses one exact
+  disposable list, verifies bounded reads, idempotent replay, actual stale
+  revision rejection, and native visibility evidence, and always attempts
+  identity-checked cleanup.
 
 ### Preserved
 

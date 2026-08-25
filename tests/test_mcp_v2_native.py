@@ -26,18 +26,12 @@ from reminders_service import (  # noqa: E402
 )
 
 
-FINGERPRINT = "a" * 64
 OPERATION_ID = "12345678-1234-4234-9234-1234567890ab"
 
 
 class Backend:
     def __init__(self) -> None:
-        self.eventkit_calls: list[tuple[str, dict[str, Any]]] = []
         self.adapter_calls: list[tuple[str, dict[str, Any]]] = []
-        self.doctor_calls: list[dict[str, Any]] = []
-        self.environment = FINGERPRINT
-        self.eventkit_error: Exception | None = None
-        self.eventkit_payload: dict[str, Any] | None = None
         self.adapter_errors: dict[str, Exception] = {}
         self.preview_payloads: dict[str, dict[str, Any]] = {}
         self.apply_payloads: dict[str, dict[str, Any]] = {}
@@ -47,48 +41,6 @@ class Backend:
         self.native_mutation_payloads: dict[str, Any] = {}
         self.native_mutation_errors: dict[str, Exception] = {}
 
-    def eventkit(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        self.eventkit_calls.append((operation, deepcopy(arguments)))
-        if self.eventkit_error is not None:
-            raise self.eventkit_error
-        if self.eventkit_payload is not None:
-            return deepcopy(self.eventkit_payload)
-        assert operation == "ensure_reminder_list"
-        return {
-            "ok": True,
-            "status": "verified",
-            "operation": operation,
-            "operation_id": OPERATION_ID,
-            "backend": "eventkit_public_sdk",
-            "target": {"source_id": arguments["source_id"], "list_id": "LIST-1"},
-            "before": {},
-            "after": {
-                "id": "LIST-1",
-                "title": arguments["name"],
-                "type": "caldav",
-                "allows_content_modifications": True,
-                "subscribed": False,
-                "immutable": False,
-                "source": {
-                    "id": arguments["source_id"],
-                    "title": "iCloud",
-                    "type": "caldav",
-                    "is_delegate": False,
-                    "reminder_calendar_count": 3,
-                },
-            },
-            "verification": {
-                "state": "read_back",
-                "write_performed": True,
-                "final_read": True,
-                "matched": True,
-            },
-            "recovery": {
-                "semantics": "delete_list_in_reminders",
-                "automatic_retry_safe": True,
-            },
-        }
-
     def adapter(self, command: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.adapter_calls.append((command, deepcopy(arguments)))
         if command in self.adapter_errors:
@@ -96,34 +48,6 @@ class Backend:
         if arguments.get("apply"):
             return deepcopy(self.apply_payloads[command])
         return deepcopy(self.preview_payloads[command])
-
-    def doctor(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        self.doctor_calls.append(deepcopy(arguments))
-        return {
-            "ok": True,
-            "status": "degraded",
-            "summary": {"ok": 2, "warning": 1, "blocked": 0, "unknown": 0},
-            "checks": {
-                "platform": {
-                    "status": "ok",
-                    "code": "macos_detected",
-                    "message": "macOS was detected.",
-                },
-                "private_frameworks": {
-                    "status": "warning",
-                    "code": "private_framework_unavailable",
-                    "message": "A runtime probe is required.",
-                },
-            },
-            "privacy": {
-                "content_free": True,
-                "permission_prompt_attempted": False,
-                "reminder_rows_read": False,
-            },
-        }
-
-    def fingerprint(self) -> str:
-        return self.environment
 
     def native_read(self, guard: Guard, arguments: dict[str, Any]) -> dict[str, Any]:
         self.native_reads.append((guard, deepcopy(arguments)))
@@ -202,188 +126,11 @@ class NativeFacadeTests(unittest.TestCase):
         references: References | None = None,
     ) -> NativeFacade:
         return NativeFacade(
-            eventkit_call=backend.eventkit,
             adapter_call=backend.adapter,
-            doctor_call=backend.doctor,
-            environment_fingerprint=backend.fingerprint,
             references=references or References(),
             native_read=backend.native_read,
             native_mutation=backend.native_mutation,
         )
-
-    def test_ensure_list_uses_exact_source_and_replays_idempotently(self) -> None:
-        backend = Backend()
-        facade = self.make_facade(backend)
-        arguments = {
-            "source_id": "SOURCE-1",
-            "name": "  Work  ",
-            "idempotency_key": "ensure:work:1",
-        }
-
-        first = facade.call("ensure_reminder_list", arguments)
-        second = facade.call("ensure_reminder_list", arguments)
-
-        self.assertEqual(
-            backend.eventkit_calls,
-            [("ensure_reminder_list", {"source_id": "SOURCE-1", "name": "Work"})],
-        )
-        self.assertEqual(first["target"], {"source_id": "SOURCE-1", "list_id": "LIST-1"})
-        self.assertEqual(first["after"]["id"], "LIST-1")
-        self.assertNotIn("color", first["after"])
-        self.assertNotIn("emblem", first["after"])
-        self.assertEqual(first["after"]["source"]["reminder_list_count"], 3)
-        self.assertNotIn("calendar", str(first).casefold())
-        self.assertFalse(first["replayed"])
-        self.assertTrue(second["replayed"])
-        self.assertEqual(first["operation_id"], second["operation_id"])
-        self.assertEqual(len(first["idempotency_key_hash"]), 64)
-        self.assertNotIn("ensure:work:1", str(first))
-        validate_public_result("ensure_reminder_list", first, "committed")
-        validate_public_result("ensure_reminder_list", second, "committed")
-
-    def test_idempotency_key_cannot_be_reused_for_a_different_list(self) -> None:
-        backend = Backend()
-        facade = self.make_facade(backend)
-        facade.call(
-            "ensure_reminder_list",
-            {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": "same:key"},
-        )
-
-        result = facade.call(
-            "ensure_reminder_list",
-            {"source_id": "SOURCE-1", "name": "Home", "idempotency_key": "same:key"},
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "failed_no_mutation")
-        self.assertEqual(result["error"]["reason_code"], "idempotency_key_conflict")
-        self.assertEqual(len(backend.eventkit_calls), 1)
-
-    def test_ensure_list_dispatch_exception_is_pending_and_replays_without_redispatch(self) -> None:
-        backend = Backend()
-        backend.eventkit_error = RuntimeError("native helper disappeared")
-        facade = self.make_facade(backend)
-        arguments = {
-            "source_id": "SOURCE-1",
-            "name": "Work",
-            "idempotency_key": "ensure:work:unknown",
-        }
-
-        first = facade.call("ensure_reminder_list", arguments)
-        second = facade.call("ensure_reminder_list", arguments)
-
-        self.assertEqual(len(backend.eventkit_calls), 1)
-        self.assertEqual(first["status"], "committed_verification_pending")
-        self.assertFalse(first["replayed"])
-        self.assertTrue(second["replayed"])
-        self.assertEqual(first["operation_id"], second["operation_id"])
-        self.assertEqual(first["error"]["code"], "sync_pending")
-        self.assertEqual(first["warnings"][0]["code"], "verification_pending")
-        self.assertNotIn("next_action", first)
-        validate_public_result("ensure_reminder_list", first, "unknown")
-        validate_public_result("ensure_reminder_list", second, "unknown")
-
-    def test_ensure_list_malformed_post_dispatch_reply_is_not_false_no_mutation(self) -> None:
-        backend = Backend()
-        backend.eventkit_payload = {"ok": True, "unexpected": "shape"}
-        facade = self.make_facade(backend)
-
-        result = facade.call(
-            "ensure_reminder_list",
-            {
-                "source_id": "SOURCE-1",
-                "name": "Work",
-                "idempotency_key": "ensure:work:malformed",
-            },
-        )
-
-        self.assertEqual(result["status"], "committed_verification_pending")
-        self.assertEqual(result["error"]["reason_code"], "invalid_eventkit_list_receipt")
-
-    def test_diagnosis_normalizes_content_free_doctor_and_never_prompts(self) -> None:
-        backend = Backend()
-        facade = self.make_facade(backend)
-
-        result = facade.call(
-            "diagnose_reminders", {"scope": "native_extension", "detail_level": "summary"}
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "verified")
-        self.assertEqual(result["data"]["overall"], "degraded")
-        self.assertEqual(result["data"]["environment_fingerprint"], FINGERPRINT)
-        self.assertEqual(
-            result["data"]["privacy"],
-            {
-                "content_free": True,
-                "reminder_content_read": False,
-                "prompt_triggered": False,
-            },
-        )
-        self.assertEqual(backend.doctor_calls, [{"detail_level": "summary"}])
-
-    def test_blocked_doctor_report_is_still_a_successful_diagnostic_read(self) -> None:
-        backend = Backend()
-
-        def blocked_doctor(arguments: dict[str, Any]) -> dict[str, Any]:
-            backend.doctor_calls.append(deepcopy(arguments))
-            return {
-                "ok": False,
-                "status": "blocked",
-                "checks": {
-                    "store_access": {
-                        "status": "blocked",
-                        "code": "store_unavailable",
-                        "message": "The Reminders store is unavailable.",
-                    }
-                },
-                "privacy": {
-                    "content_free": True,
-                    "permission_prompt_attempted": False,
-                    "reminder_rows_read": False,
-                },
-            }
-
-        facade = NativeFacade(
-            eventkit_call=backend.eventkit,
-            adapter_call=backend.adapter,
-            doctor_call=blocked_doctor,
-            environment_fingerprint=backend.fingerprint,
-            references=References(),
-            native_read=backend.native_read,
-            native_mutation=backend.native_mutation,
-        )
-
-        result = facade.call(
-            "diagnose_reminders", {"scope": "core", "detail_level": "summary"}
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "verified")
-        self.assertEqual(result["data"]["overall"], "blocked")
-
-    def test_diagnosis_runs_once_then_reports_only_the_requested_area(self) -> None:
-        backend = Backend()
-        facade = self.make_facade(backend)
-
-        result = facade.call("diagnose_reminders", {"scope": "core"})
-
-        self.assertEqual(backend.doctor_calls, [{"detail_level": "summary"}])
-        self.assertEqual([check["name"] for check in result["data"]["checks"]], ["platform"])
-        self.assertEqual(result["data"]["overall"], "ready")
-        self.assertNotIn("private_frameworks", str(result))
-
-    def test_withheld_maintenance_scopes_are_not_public_diagnosis_scopes(self) -> None:
-        for scope in ("maintenance", "snapshots"):
-            with self.subTest(scope=scope):
-                backend = Backend()
-                result = self.make_facade(backend).call(
-                    "diagnose_reminders", {"scope": scope}
-                )
-
-                self.assertFalse(result["ok"])
-                self.assertEqual(result["error"]["reason_code"], "invalid_diagnosis_scope")
-                self.assertEqual(backend.doctor_calls, [])
 
     def test_create_section_preserves_exact_list_id_and_receipt(self) -> None:
         backend = Backend()

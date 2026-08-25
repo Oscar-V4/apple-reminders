@@ -13,6 +13,7 @@ PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from mcp.v2_core import EventKitReply, V2CoreFacade
+from mcp.v2_contract import validate_public_result
 
 
 class DeterministicTokens:
@@ -315,6 +316,172 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["operation"], "request_reminders_access")
         self.assertEqual(result["data"]["authorization"], "full_access")
+
+    def test_ensure_list_uses_exact_source_and_replays_idempotently(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "ensure_reminder_list",
+            {
+                "schema_version": 1,
+                "ok": True,
+                "status": "verified",
+                "operation": "ensure_reminder_list",
+                "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                "backend": "eventkit_public_sdk",
+                "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
+                "before": None,
+                "after": {
+                    "id": "LIST-1",
+                    "title": "Work",
+                    "color": "#ff0000",
+                    "emblem": "private-symbol",
+                    "private_backend_field": "must-not-escape",
+                    "type": "caldav",
+                    "allows_content_modifications": True,
+                    "subscribed": False,
+                    "immutable": False,
+                    "source": {
+                        "id": "SOURCE-1",
+                        "title": "iCloud",
+                        "type": "caldav",
+                        "is_delegate": False,
+                        "reminder_calendar_count": 3,
+                        "private_source_field": "must-not-escape",
+                    },
+                },
+                "verification": {
+                    "state": "read_back",
+                    "write_performed": True,
+                    "final_read": True,
+                    "matched": True,
+                },
+                "recovery": {
+                    "semantics": "delete_list_in_reminders",
+                    "automatic_retry_safe": True,
+                },
+            },
+            mutation=True,
+        )
+        subject = facade(eventkit)
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "  Work  ",
+            "idempotency_key": "ensure:work:1",
+        }
+
+        first = subject.ensure_reminder_list(arguments)
+        second = subject.ensure_reminder_list(arguments)
+
+        self.assertEqual(
+            eventkit.calls,
+            [
+                (
+                    "ensure_reminder_list",
+                    {"source_id": "SOURCE-1", "name": "Work"},
+                    True,
+                )
+            ],
+        )
+        self.assertEqual(first["target"], {"source_id": "SOURCE-1", "list_id": "LIST-1"})
+        self.assertEqual(first["after"]["source"]["reminder_list_count"], 3)
+        self.assertNotIn("color", first["after"])
+        self.assertNotIn("emblem", first["after"])
+        self.assertNotIn("private_backend_field", first["after"])
+        self.assertNotIn("private_source_field", first["after"]["source"])
+        self.assertFalse(first["replayed"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(first["operation_id"], second["operation_id"])
+        self.assertEqual(len(first["idempotency_key_hash"]), 64)
+        validate_public_result("ensure_reminder_list", first, "committed")
+        validate_public_result("ensure_reminder_list", second, "committed")
+
+    def test_ensure_list_idempotency_key_rejects_different_input(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "ensure_reminder_list",
+            {
+                "ok": True,
+                "status": "verified",
+                "operation": "ensure_reminder_list",
+                "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                "backend": "eventkit_public_sdk",
+                "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
+                "before": None,
+                "after": {
+                    "id": "LIST-1",
+                    "title": "Work",
+                    "type": "caldav",
+                    "allows_content_modifications": True,
+                    "subscribed": False,
+                    "immutable": False,
+                    "source": {"id": "SOURCE-1", "type": "caldav"},
+                },
+                "verification": {"state": "read_back", "write_performed": True},
+                "recovery": {"semantics": "delete_list_in_reminders"},
+            },
+            mutation=True,
+        )
+        subject = facade(eventkit)
+        subject.ensure_reminder_list(
+            {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": "same:key"}
+        )
+
+        result = subject.ensure_reminder_list(
+            {"source_id": "SOURCE-1", "name": "Home", "idempotency_key": "same:key"}
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["reason_code"], "idempotency_key_conflict")
+        self.assertEqual(len(eventkit.calls), 1)
+
+    def test_ensure_list_dispatch_exception_is_pending_and_replays_without_redispatch(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.fail(
+            "ensure_reminder_list",
+            RuntimeError("bridge disappeared after dispatch"),
+            mutation=True,
+        )
+        subject = facade(eventkit)
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:work:unknown",
+        }
+
+        first = subject.ensure_reminder_list(arguments)
+        second = subject.ensure_reminder_list(arguments)
+
+        self.assertEqual(len(eventkit.calls), 1)
+        self.assertEqual(first["status"], "committed_verification_pending")
+        self.assertFalse(first["replayed"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(first["operation_id"], second["operation_id"])
+        self.assertEqual(first["error"]["code"], "sync_pending")
+        self.assertEqual(first["warnings"][0]["code"], "verification_pending")
+        self.assertNotIn("next_action", first)
+        validate_public_result("ensure_reminder_list", first, "unknown")
+        validate_public_result("ensure_reminder_list", second, "unknown")
+
+    def test_ensure_list_malformed_post_dispatch_reply_is_pending(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "ensure_reminder_list",
+            {"ok": True, "unexpected": "shape"},
+            mutation=True,
+        )
+
+        result = facade(eventkit).ensure_reminder_list(
+            {
+                "source_id": "SOURCE-1",
+                "name": "Work",
+                "idempotency_key": "ensure:work:malformed",
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["reason_code"], "invalid_eventkit_list_receipt")
+        validate_public_result("ensure_reminder_list", result, "unknown")
 
     def test_create_translates_list_id_and_returns_one_final_reference(self) -> None:
         eventkit = FakeEventKit()

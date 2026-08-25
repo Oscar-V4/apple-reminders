@@ -42,7 +42,15 @@ CORE_TOOLS = {
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "ensure_reminder_list",
 }
+NATIVE_TOOLS = {
+    "inspect_reminder_native",
+    "create_reminder_section",
+    "organize_reminder",
+    "change_reminder_attachment",
+}
+DIAGNOSTIC_TOOLS = {"diagnose_reminders"}
 REFERENCE_MUTATIONS = {
     "create_reminder",
     "change_reminder",
@@ -198,14 +206,24 @@ print(json.dumps({
     "privacy": {
         "content_free": True,
         "reminder_rows_read": False,
+        "reminder_titles_read": False,
+        "list_section_tag_names_read": False,
+        "journal_cache_backup_contents_read": False,
         "permission_prompt_attempted": False,
-        "write_attempted": False
+        "write_attempted": False,
+        "application_launched": False,
+        "private_framework_loaded": False
     },
     "checks": {
         "permissions": {
             "status": "blocked",
             "code": "permission_denied",
-            "message": "Reminders access has not been granted."
+            "message": "Reminders access has not been granted.",
+            "details": {
+                "authorization": "denied",
+                "prompt_attempted": False,
+                "nested_private_state": {"must": "not escape"}
+            }
         }
     }
 }))
@@ -424,7 +442,14 @@ server.handle_message({
     'params': {},
 })
 print(json.dumps(sorted(
-    name for name in ('v2_core', 'v2_native', 'reminders_service')
+    name for name in (
+        'v2_core',
+        'v2_core_backend',
+        'v2_native',
+        'v2_native_backend',
+        'v2_diagnostics',
+        'reminders_service',
+    )
     if name in sys.modules
 )))
 """
@@ -451,10 +476,12 @@ class McpProtocolTests(unittest.TestCase):
         self.previous_session = server.SESSION_INITIALIZED
         self.previous_core = server._V2_CORE_FACADE
         self.previous_native = server._V2_NATIVE_FACADE
+        self.previous_diagnostics = getattr(server, "_V2_DIAGNOSTICS_FACADE", None)
         self.previous_paths = server._ACTIVE_BACKEND_PATHS
         server.SESSION_INITIALIZED = False
         server._V2_CORE_FACADE = None
         server._V2_NATIVE_FACADE = None
+        server._V2_DIAGNOSTICS_FACADE = None
         server._ACTIVE_BACKEND_PATHS = server.DEFAULT_BACKEND_PATHS
         server.RECENT_CALLS.clear()
 
@@ -462,6 +489,7 @@ class McpProtocolTests(unittest.TestCase):
         self.server.SESSION_INITIALIZED = self.previous_session
         self.server._V2_CORE_FACADE = self.previous_core
         self.server._V2_NATIVE_FACADE = self.previous_native
+        self.server._V2_DIAGNOSTICS_FACADE = self.previous_diagnostics
         self.server._ACTIVE_BACKEND_PATHS = self.previous_paths
         self.server.RECENT_CALLS.clear()
 
@@ -616,8 +644,10 @@ class McpProtocolTests(unittest.TestCase):
     def test_all_13_tools_dispatch_to_their_v2_facades(self) -> None:
         core = RecordingFacade()
         native = RecordingFacade()
+        diagnostics = RecordingFacade()
         self.server._V2_CORE_FACADE = core
         self.server._V2_NATIVE_FACADE = native
+        self.server._V2_DIAGNOSTICS_FACADE = diagnostics
 
         for name in sorted(PUBLIC_TOOLS):
             with self.subTest(tool=name):
@@ -633,9 +663,16 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual({name for name, _ in core.calls}, CORE_TOOLS)
         self.assertEqual(
             {name for name, _ in native.calls},
-            PUBLIC_TOOLS - CORE_TOOLS,
+            NATIVE_TOOLS,
         )
-        self.assertEqual(len(core.calls) + len(native.calls), 13)
+        self.assertEqual(
+            {name for name, _ in diagnostics.calls},
+            DIAGNOSTIC_TOOLS,
+        )
+        self.assertEqual(
+            len(core.calls) + len(native.calls) + len(diagnostics.calls),
+            13,
+        )
 
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
         notes = "n" * 70_000
@@ -749,6 +786,48 @@ class McpProtocolTests(unittest.TestCase):
             ["--compact", "--detail-level", "summary"],
         )
 
+    def test_full_doctor_details_cross_stdio_as_bounded_scalar_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            doctor = Path(temporary) / "mock_doctor.py"
+            mock_doctor(doctor)
+
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "diagnose_reminders",
+                            "arguments": {
+                                "scope": "access",
+                                "detail_level": "full",
+                            },
+                        },
+                    },
+                ],
+                doctor_path=doctor,
+            )
+            doctor_argv = json.loads(
+                doctor.with_suffix(".argv").read_text(encoding="utf-8")
+            )
+
+        diagnosed = responses[1]["result"]
+        self.assertFalse(diagnosed["isError"], diagnosed)
+        facts = diagnosed["structuredContent"]["data"]["checks"][0]["facts"]
+        self.assertEqual(
+            facts,
+            [
+                {"name": "authorization", "value": "denied"},
+                {"name": "prompt_attempted", "value": False},
+            ],
+        )
+        self.assertEqual(
+            doctor_argv,
+            ["--compact", "--detail-level", "full"],
+        )
+
     def test_production_paths_ignore_legacy_environment_overrides(self) -> None:
         legacy = {
             "APPLE_REMINDERS_ADAPTER_PATH": "/tmp/not-the-adapter",
@@ -770,387 +849,6 @@ class McpProtocolTests(unittest.TestCase):
                 self.server.doctor_path(),
                 self.server.DEFAULT_DOCTOR_PATH,
             )
-
-
-class McpProductionPortTests(unittest.TestCase):
-    def test_hybrid_url_attachment_failure_reaches_public_partial_receipt(self) -> None:
-        from mcp import server
-        from mcp.v2_core import EventKitReply, V2CoreFacade
-
-        url = "https://example.com/spec"
-        eventkit_receipt = {
-            "schema_version": 1,
-            "ok": True,
-            "status": "verified",
-            "operation": "create_reminder",
-            "operation_id": "22222222-2222-4222-8222-222222222222",
-            "backend": "eventkit_public_sdk",
-            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
-            "before": None,
-            "after": {
-                "id": REMINDER_ID,
-                "title": "Open spec",
-                "url": url,
-                "calendar_id": "LIST-1",
-                "last_modified": "2026-08-25T01:00:00.000Z",
-            },
-            "verification": {
-                "state": "read_back",
-                "write_performed": True,
-                "final_read": True,
-                "matched": True,
-            },
-            "recovery": {
-                "semantics": "eventkit_native_api",
-                "automatic_retry_safe": False,
-            },
-        }
-        adapter_replies = [
-            (
-                {
-                    "ok": True,
-                    "reminder_id": REMINDER_ID,
-                    "reminder_version": 7,
-                    "attachments": [],
-                },
-                False,
-            ),
-            (
-                {
-                    "ok": False,
-                    "status": "failed_no_mutation",
-                    "error": {
-                        "code": "native_url_attachment_failed",
-                        "message": "The native URL attachment was not saved.",
-                    },
-                },
-                True,
-            ),
-        ]
-        final_read = {
-            "schema_version": 1,
-            "ok": True,
-            "status": "verified",
-            "operation": "read_reminder",
-            "data": {
-                "reminder": {
-                    "id": REMINDER_ID,
-                    "title": "Open spec",
-                    "url": url,
-                    "calendar_id": "LIST-1",
-                    "last_modified": "2026-08-25T01:00:01.000Z",
-                }
-            },
-        }
-
-        with (
-            mock.patch.object(server, "invoke_adapter", side_effect=adapter_replies),
-            mock.patch.object(
-                server,
-                "invoke_eventkit_bridge",
-                return_value=(final_read, False),
-            ),
-        ):
-            combined = server.ensure_visible_url_attachment(eventkit_receipt, url)
-
-        class OneReplyPort:
-            def invoke(
-                self,
-                operation: str,
-                arguments: Mapping[str, Any],
-                *,
-                mutation: bool,
-            ) -> EventKitReply:
-                if operation != "create_reminder" or mutation is not True:
-                    raise AssertionError((operation, arguments, mutation))
-                return EventKitReply(payload=copy.deepcopy(combined), is_error=False)
-
-        server._V2_CORE_FACADE = V2CoreFacade(OneReplyPort())
-        result = server.call_tool(
-            "create_reminder",
-            {
-                "list_id": "LIST-1",
-                "title": "Open spec",
-                "url": url,
-                "idempotency_key": "hybrid-url-failure-0001",
-            },
-        )
-
-        payload = result["structuredContent"]
-        self.assertEqual(payload["status"], "partial_success", payload)
-        self.assertEqual(
-            payload["error"]["reason_code"],
-            "native_url_attachment_failed",
-        )
-        self.assertFalse(payload["recovery"]["automatic_retry_safe"])
-        self.assertEqual(payload["verification"]["state"], "partial")
-        self.assertTrue(payload["verification"]["final_read"])
-
-    def test_eventkit_port_maps_read_and_mutation_without_rewriting_arguments(self) -> None:
-        from mcp import server
-
-        port = server._ServerEventKitPort()
-        read_payload = {
-            "schema_version": 1,
-            "operation": "list_calendars",
-            "status": "verified",
-            "ok": True,
-            "data": {"items": []},
-        }
-        mutation_payload = {
-            "schema_version": 1,
-            "operation": "update_reminder",
-            "status": "verified",
-            "ok": True,
-        }
-        read_arguments = {"source_id": "SOURCE-1", "writable_only": True}
-        mutation_arguments = {
-            "reminder_id": REMINDER_ID,
-            "expected_last_modified": "2026-08-25T00:00:00Z",
-            "patch": {"title": "Changed"},
-        }
-
-        with mock.patch.object(
-            server,
-            "invoke_eventkit_bridge",
-            return_value=(read_payload, False),
-        ) as read_call:
-            reply = port.invoke("list_calendars", read_arguments, mutation=False)
-        self.assertEqual(reply.payload, read_payload)
-        self.assertFalse(reply.is_error)
-        read_call.assert_called_once_with("list_calendars", read_arguments)
-
-        with mock.patch.object(
-            server,
-            "invoke_eventkit_mutation",
-            return_value=(mutation_payload, False),
-        ) as mutation_call:
-            reply = port.invoke("update_reminder", mutation_arguments, mutation=True)
-        self.assertEqual(reply.payload, mutation_payload)
-        self.assertFalse(reply.is_error)
-        mutation_call.assert_called_once_with(
-            "update_reminder",
-            "update_reminder",
-            mutation_arguments,
-        )
-
-    def test_eventkit_fetch_preserves_v2_facade_nonzero_offset(self) -> None:
-        from mcp import server
-
-        with tempfile.TemporaryDirectory() as temporary:
-            eventkit = Path(temporary) / "mock_eventkit.py"
-            mock_eventkit_bridge(eventkit)
-            paths = server.BackendPaths(
-                adapter=server.DEFAULT_ADAPTER_PATH,
-                eventkit_bridge=eventkit,
-                doctor=server.DEFAULT_DOCTOR_PATH,
-            )
-            arguments = {
-                "calendar_ids": ["LIST-1"],
-                "status": "incomplete",
-                "limit": 10,
-                "sort": "due",
-                "offset": 37,
-            }
-
-            with mock.patch.object(server, "_ACTIVE_BACKEND_PATHS", paths):
-                reply = server._ServerEventKitPort().invoke(
-                    "fetch_reminders",
-                    arguments,
-                    mutation=False,
-                )
-            request = json.loads(
-                eventkit.with_suffix(".requests").read_text(encoding="utf-8")
-            )
-
-        self.assertFalse(reply.is_error, reply.payload)
-        self.assertEqual(request["offset"], 37)
-        self.assertEqual(reply.payload["data"]["offset"], 37)
-
-    def test_tag_adapter_port_preserves_exact_account_scope(self) -> None:
-        from mcp import server
-
-        with mock.patch.object(
-            server,
-            "invoke_adapter",
-            return_value=({"ok": True, "tags": []}, False),
-        ) as adapter_call:
-            server._v2_adapter_call(
-                "list_tags",
-                {"account_id": "ACCOUNT-1", "query": "next", "limit": 25},
-            )
-
-        self.assertEqual(
-            adapter_call.call_args.args[0],
-            [
-                "list_tags",
-                "--account-id",
-                "ACCOUNT-1",
-                "--query",
-                "next",
-                "--limit",
-                "25",
-            ],
-        )
-
-    def test_native_mutation_uses_fresh_private_revision_and_exact_reminder_id(self) -> None:
-        from mcp import server
-        from reminders_service import Guard
-
-        guard = Guard(
-            reminder_id=REMINDER_ID,
-            store_identity="eventkit:SOURCE-1",
-            public_concurrency_value="2026-08-25T00:00:00Z",
-        )
-        adapter_receipt = {
-            "ok": True,
-            "status": "verified",
-            "operation": "attach_url",
-            "operation_id": "22222222-2222-4222-8222-222222222222",
-            "backend": "sqlite_private",
-            "target": {"reminder_id": REMINDER_ID},
-            "before": {},
-            "after": {},
-            "verification": {"state": "read_back"},
-            "recovery": {"semantics": "delete_attachment"},
-        }
-
-        with (
-            mock.patch.object(server, "_v2_revalidate_guard", return_value={}),
-            mock.patch.object(
-                server,
-                "_v2_private_attachments",
-                side_effect=[
-                    {"reminder_version": 12, "attachments": []},
-                    {
-                        "reminder_version": 13,
-                        "attachments": [
-                            {
-                                "id": "ATTACHMENT-1",
-                                "type": "url",
-                                "url": "https://example.com/item",
-                            }
-                        ],
-                    },
-                ],
-            ) as attachment_reads,
-            mock.patch.object(
-                server,
-                "invoke_adapter",
-                return_value=(adapter_receipt, False),
-            ) as adapter_call,
-        ):
-            outcome = server._v2_native_mutation(
-                guard,
-                "attach_url",
-                {"url": "https://example.com/item"},
-            )
-
-        self.assertEqual(outcome.mutation_state, "committed")
-        self.assertEqual(attachment_reads.call_count, 2)
-        self.assertEqual(
-            adapter_call.call_args.args[0],
-            [
-                "attach_url",
-                "--id",
-                REMINDER_ID,
-                "--url",
-                "https://example.com/item",
-                "--if-version",
-                "12",
-            ],
-        )
-        self.assertEqual(
-            outcome.receipt["after"]["reminder"]["id"],
-            REMINDER_ID,
-        )
-
-    def test_private_reads_reject_missing_or_conflicting_exact_identity(self) -> None:
-        from mcp import server
-
-        for payload in (
-            {"ok": True, "reminder": {"id": "OTHER"}},
-            {"ok": True, "reminder": {"title": "Identity omitted"}},
-        ):
-            with self.subTest(payload=payload), mock.patch.object(
-                server,
-                "invoke_adapter",
-                return_value=(payload, False),
-            ):
-                with self.assertRaises(RuntimeError):
-                    server._v2_private_read_reminder(REMINDER_ID)
-
-        for payload in (
-            {"ok": True, "attachments": [], "reminder_version": 1},
-            {
-                "ok": True,
-                "reminder_id": "OTHER",
-                "attachments": [],
-                "reminder_version": 1,
-            },
-        ):
-            with self.subTest(payload=payload), mock.patch.object(
-                server,
-                "invoke_adapter",
-                return_value=(payload, False),
-            ):
-                with self.assertRaises(RuntimeError):
-                    server._v2_private_attachments(REMINDER_ID, limit=1)
-
-    def test_failed_manual_native_receipt_is_not_downgraded_to_pending(self) -> None:
-        from mcp import server
-        from reminders_service import Guard
-
-        guard = Guard(
-            reminder_id=REMINDER_ID,
-            store_identity="eventkit:SOURCE-1",
-            public_concurrency_value="2026-08-25T00:00:00Z",
-        )
-        receipt = {
-            "ok": False,
-            "status": "failed_manual_repair_required",
-            "operation": "attach_url",
-            "operation_id": "22222222-2222-4222-8222-222222222222",
-            "backend": "sqlite_private",
-            "target": {"reminder_id": REMINDER_ID},
-            "before": {},
-            "after": {},
-            "verification": {"state": "partial", "write_performed": True},
-            "recovery": {
-                "semantics": "manual_repair_required",
-                "automatic_retry_safe": False,
-            },
-            "error": {
-                "code": "unexpected_error",
-                "message": "Compensation did not complete.",
-            },
-        }
-
-        with (
-            mock.patch.object(server, "_v2_revalidate_guard", return_value={}),
-            mock.patch.object(
-                server,
-                "_v2_private_attachments",
-                return_value={
-                    "reminder_id": REMINDER_ID,
-                    "reminder_version": 12,
-                    "attachments": [],
-                },
-            ),
-            mock.patch.object(
-                server,
-                "invoke_adapter",
-                return_value=(receipt, True),
-            ),
-        ):
-            outcome = server._v2_native_mutation(
-                guard,
-                "attach_url",
-                {"url": "https://example.com/item"},
-            )
-
-        self.assertEqual(outcome.receipt["status"], "failed_manual_repair_required")
-        self.assertEqual(outcome.mutation_state, "unknown")
 
 
 if __name__ == "__main__":

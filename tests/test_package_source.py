@@ -100,7 +100,10 @@ class SourcePackagePolicyTests(unittest.TestCase):
             {
                 Path("mcp/v2_contract.py"),
                 Path("mcp/v2_core.py"),
+                Path("mcp/v2_core_backend.py"),
+                Path("mcp/v2_diagnostics.py"),
                 Path("mcp/v2_native.py"),
+                Path("mcp/v2_native_backend.py"),
                 Path("scripts/reminders_image_input.py"),
                 Path("scripts/reminders_service.py"),
             }.issubset(files)
