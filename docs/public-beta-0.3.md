@@ -42,7 +42,12 @@ The tool count is a reviewable release Interface, not the product goal. A future
 
 - Skills attempt the requested bounded Core read or change without Doctor or capability preflight.
 - A permission-required result returns one `next_action`; access is requested only then, followed by one retry.
-- An environment failure may point to `diagnose_reminders`. Native Extension failure does not block Core.
+- A helper-build environment failure points to content-free packaging diagnosis
+  and the command-line-tools installer instead of a blind retry. Native
+  Extension failure does not block otherwise available Core behavior.
+- The local MCP launcher finds a supported Python in the Codex process `PATH`
+  or standard Homebrew/python.org paths without sourcing shell startup files;
+  an older-only environment preserves the structured no-write runtime failure.
 - `list_reminder_lists` includes the account identity needed to distinguish duplicate names; a display name is never identity.
 
 ### Exact references and revisions
@@ -136,6 +141,8 @@ Replace shallow route tests once the same behavior is protected at a new Interfa
   cleanup. Tag regression remains covered by isolated tests and one-off live
   evidence; the repeatable harness does not create persistent tag tombstones.
 - The clean packaged artifact initializes and lists the expected tools without using repository-relative development files.
+- The packaged manifest starts successfully with a minimal GUI-style `PATH`
+  when a supported Python exists in a standard install location.
 - Skill evals cover direct, indirect, incomplete, should-not-activate, and destructive edge prompts.
 - README includes install, first permission, first prompts, upgrade, disable, uninstall, local-data cleanup, and troubleshooting.
 - Repository marketplace metadata, manifest, CHANGELOG, support/security/privacy/terms, tag, ZIP, checksum, and release version agree.

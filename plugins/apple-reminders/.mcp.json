@@ -13,9 +13,9 @@
         }
       ],
       "cwd": ".",
-      "command": "python3",
+      "command": "/bin/sh",
       "args": [
-        "./mcp/server.py"
+        "./scripts/launch_mcp.sh"
       ]
     }
   }

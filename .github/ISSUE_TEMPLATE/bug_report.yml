@@ -46,9 +46,9 @@ body:
   - type: input
     id: python-version
     attributes:
-      label: Python version used by Codex
-      description: Run `python3 --version` in the environment that launches Codex.
-      placeholder: "Python 3.12.10"
+      label: Python version and installation source
+      description: Report the version selected by the plugin or its content-free packaging diagnosis, plus Homebrew, python.org, or another source. A terminal PATH can differ from a Finder-launched Codex PATH.
+      placeholder: "Python 3.12.10 from Homebrew"
     validations:
       required: true
 

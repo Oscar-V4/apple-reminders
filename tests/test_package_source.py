@@ -119,6 +119,8 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
             )
             plugin_root = base / "extracted" / manifest["name"]
+            mcp = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
+            registered = mcp["mcpServers"]["apple-reminders-local"]
             requests = [
                 {
                     "jsonrpc": "2.0",
@@ -138,7 +140,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
             ]
             completed = subprocess.run(
-                [sys.executable, "./mcp/server.py"],
+                [registered["command"], *registered["args"]],
                 cwd=plugin_root,
                 input="".join(
                     json.dumps(request, separators=(",", ":")) + "\n"
@@ -171,6 +173,8 @@ class SourcePackagePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             installed = Path(temp_dir) / "apple-reminders"
             shutil.copytree(source, installed)
+            mcp = json.loads((installed / ".mcp.json").read_text(encoding="utf-8"))
+            registered = mcp["mcpServers"]["apple-reminders-local"]
             requests = [
                 {
                     "jsonrpc": "2.0",
@@ -185,7 +189,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
             ]
             completed = subprocess.run(
-                [sys.executable, "./mcp/server.py"],
+                [registered["command"], *registered["args"]],
                 cwd=installed,
                 input="".join(
                     json.dumps(request, separators=(",", ":")) + "\n"

@@ -44,7 +44,7 @@ class PluginValidationTests(unittest.TestCase):
 
     def test_readme_has_a_doctor_free_install_upgrade_and_uninstall_path(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        quick_start = readme.split("## Quick Start", 1)[1].split("## Release Status", 1)[0]
+        quick_start = readme.split("## Quick Start", 1)[1].split("## First permission", 1)[0]
 
         self.assertIn(
             "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0",

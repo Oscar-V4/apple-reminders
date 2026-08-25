@@ -430,6 +430,7 @@ def _next_action(
     operation: str | None = None,
 ) -> dict[str, Any] | None:
     code = error.get("code")
+    reason = error.get("reason_code")
     if code == "permission_denied":
         return {
             "kind": "request_access",
@@ -450,6 +451,17 @@ def _next_action(
                 "Fetch the target list and resolve whether the create committed before retrying."
                 if operation == "create_reminder"
                 else "Read the exact Reminder again before attempting another change."
+            ),
+        }
+    if reason == "native_helper_build_failed":
+        return {
+            "kind": "diagnose",
+            "tool": "diagnose_reminders",
+            "retry_original_once": False,
+            "message": (
+                "Run diagnose_reminders with scope=packaging. If the compiler "
+                "is missing, run `xcode-select --install`, finish installation, "
+                "restart Codex, and then retry the original operation."
             ),
         }
     return None

@@ -1,13 +1,75 @@
 # Apple Reminders Codex Plugin
 
-Apple Reminders is a local macOS Codex plugin being prepared for its first 0.3
-public beta. It bundles task-oriented skills and a local stdio MCP server for
-reading and changing the current user's Apple Reminders data.
+[![CI](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml)
 
-This is not an Apple-supported integration or an App Store component. Core
-operations prefer EventKit. Sections, tags, and native image/URL attachments
-use version-sensitive Apple interfaces behind narrower capability and
-read-back gates.
+Plan, capture, organize, and safely update Apple Reminders from Codex on your
+Mac. The plugin can brief due work, add reminders to an exact list, and make
+guarded changes with explicit read-back results.
+
+Try prompts such as:
+
+- `오늘 마감이거나 기한이 지난 리마인더를 보여줘.`
+- `쇼핑 목록에 우유 사기를 추가해줘.`
+- `이 리마인더를 완료하고 다시 읽어서 확인해줘.`
+
+This repository is a release candidate for its first 0.3 public beta; the tag
+does not exist yet. The MCP and adapters run locally, but results are returned
+to Codex as described in [PRIVACY.md](PRIVACY.md). This is an independent
+community project, not an Apple or OpenAI product or endorsed integration.
+
+## Requirements
+
+- macOS 14 or newer with Apple Reminders available for the current user.
+- Python 3.11 or newer.
+- Xcode command-line tools while native helpers are distributed as source.
+- Reminders permission for Core operations.
+
+The local MCP launcher checks the Codex process `PATH` first, then the standard
+Homebrew and python.org installation paths. This keeps a Finder-launched Codex
+from missing an already installed supported Python without sourcing shell
+startup files.
+
+Native Extension support cannot be inferred from the macOS version alone. A
+specific Native operation can be unavailable while Core operations continue to
+work.
+
+## 60-second preflight
+
+Before the first install, confirm the two source-runtime prerequisites:
+
+```bash
+python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+xcode-select -p
+```
+
+If the second command fails, run `xcode-select --install`, finish the macOS
+installer, and restart Codex. The plugin will also route a helper-build failure
+to content-free packaging diagnosis instead of asking for a blind retry.
+
+## Quick Start
+
+The commands below target the future tagged 0.3.0 repo-marketplace release.
+Until that tag exists, treat this repository as development source rather than
+a finished installer.
+
+```bash
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
+codex plugin add apple-reminders@oscar-v4-reminders
+```
+
+Start a new Codex task so that it loads the installed skills and tools, then try:
+
+```text
+오늘 할 일 보여줘.
+쇼핑 목록에 우유 사기를 추가해줘.
+```
+
+## First permission
+
+When an operation needs Reminders permission, the plugin reports that need and
+offers the explicit `request_reminders_access` step. macOS may then display a
+permission prompt for the app running Codex. Normal first use does not require
+Doctor or private-interface setup.
 
 ## Public Interface
 
@@ -29,42 +91,6 @@ compatibility, but skills and public MCP callers must not route to them.
 The repository also contains a reduced OpenMinis export under
 `minis/apple-reminders/`. It is not part of the installable macOS plugin and
 does not contain the private adapters.
-
-## Requirements
-
-- macOS 14 or newer with Apple Reminders available for the current user.
-- Python 3.11 or newer.
-- Xcode command-line tools while native helpers are distributed as source.
-- Reminders permission for Core operations.
-
-Native Extension support cannot be inferred from the macOS version alone. A
-specific Native operation can be unavailable while Core operations continue to
-work.
-
-## Quick Start
-
-The commands below target the future tagged 0.3.0 repo-marketplace release.
-Until that tag exists, treat this repository as development source rather than
-a finished installer.
-
-```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
-codex plugin add apple-reminders@oscar-v4-reminders
-```
-
-Start a new Codex task so that it loads the installed skills and tools, then try:
-
-```text
-오늘 할 일 보여줘.
-쇼핑 목록에 우유 사기를 추가해줘.
-```
-
-## Release Status
-
-When an operation needs Reminders permission, the plugin reports that need and
-offers the explicit `request_reminders_access` step. macOS may then display a
-permission prompt for the app running Codex. Normal first use does not require
-Doctor or private-interface setup.
 
 ## What is preserved from real use
 
@@ -132,9 +158,11 @@ contents, journals, caches, or backup contents.
 
 Common cases:
 
-- **Unsupported Python runtime:** run `python3 --version` in the environment
-  that launches Codex. Ensure it resolves to Python 3.11 or newer, then restart
-  Codex before retrying; the plugin rejects the call before any Reminder write.
+- **Unsupported Python runtime:** install Python 3.11 or newer in a standard
+  Homebrew or python.org location, then restart Codex. The launcher also accepts
+  a supported `python3` already present in the Codex process `PATH`; if only an
+  older interpreter is available, the plugin rejects the call before any
+  Reminder write.
 - **Permission required:** allow the explicit `request_reminders_access` step,
   review the macOS prompt, then retry once.
 - **Reference stale or consumed:** call `read_reminder` again and retry with the
@@ -144,6 +172,10 @@ Common cases:
 - **Native Extension unavailable:** run targeted diagnosis for the failed
   capability. Continue using Core operations; do not infer that all Reminders
   access is blocked.
+- **Native helper build failed:** run `diagnose_reminders` with
+  `scope=packaging`. If it reports a missing compiler, run
+  `xcode-select --install`, finish installation, restart Codex, and retry the
+  original operation.
 - **Missing private-framework path:** this is inconclusive on systems where dyld
   can load a framework from the shared cache. A runtime probe and the operation's
   read-back decide availability.

@@ -25,7 +25,10 @@ other devices or shared-list participants.
 
 ## Execution and Network Boundaries
 
-- `.mcp.json` launches `mcp/server.py` as a local stdio subprocess.
+- `.mcp.json` launches a local shell shim that selects a supported Python from
+  the process `PATH` or fixed local install paths, then replaces itself with
+  `mcp/server.py` as a local stdio subprocess. The shim does not deliberately
+  source user shell startup files.
 - The MCP server invokes bundled local adapters; packaged runtime ignores
   backend path overrides and does not call a plugin-owned web service.
 - EventKit and AppleScript operations communicate with macOS system services or

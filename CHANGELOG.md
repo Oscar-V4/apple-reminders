@@ -28,6 +28,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   disposable list, verifies bounded reads, idempotent replay, actual stale
   revision rejection, and native visibility evidence, and always attempts
   identity-checked cleanup.
+- Added a small local MCP launcher that finds supported Homebrew or python.org
+  Python installations even when the Codex app starts with a minimal GUI
+  `PATH`, while preserving the existing safe unsupported-runtime response.
+- Added an actionable helper-build recovery path from Core failures to
+  content-free packaging diagnosis and the macOS command-line-tools installer.
 
 ### Preserved
 

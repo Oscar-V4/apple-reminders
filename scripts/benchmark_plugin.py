@@ -303,7 +303,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
         cases = [
             CommandCase(
                 "mcp_initialize_tools_list",
-                (PYTHON, str(root / "mcp" / "server.py")),
+                ("/bin/sh", str(root / "scripts" / "launch_mcp.sh")),
                 stdin=mcp_stdin,
                 output_contract="mcp_success",
             ),
@@ -315,7 +315,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
             ),
             CommandCase(
                 "mcp_doctor_route",
-                (PYTHON, str(root / "mcp" / "server.py")),
+                ("/bin/sh", str(root / "scripts" / "launch_mcp.sh")),
                 stdin=doctor_stdin,
                 environment={"HOME": home},
                 output_contract="mcp_success",

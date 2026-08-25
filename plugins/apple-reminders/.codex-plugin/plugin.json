@@ -1,7 +1,7 @@
 {
   "name": "apple-reminders",
   "version": "0.3.0",
-  "description": "Manage Apple Reminders through a local MCP and macOS adapters with explicit verification and private-API trust boundaries.",
+  "description": "Plan, capture, organize, and safely update Apple Reminders from Codex on macOS.",
   "author": {
     "name": "Soo",
     "url": "https://github.com/Oscar-V4"
@@ -23,8 +23,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders",
-    "shortDescription": "Manage reminders with explicit local trust boundaries",
-    "longDescription": "Inspect and change Apple Reminders through a local stdio MCP. Public macOS APIs are preferred; advanced fields use version-sensitive private interfaces and report verification limits explicitly.",
+    "shortDescription": "Plan and safely update Apple Reminders from Codex",
+    "longDescription": "Review upcoming work, capture reminders, and safely organize or update Apple Reminders through a local MCP. There is no plugin-owned remote backend; tool results return to Codex. Advanced fields use version-sensitive macOS interfaces with explicit verification limits.",
     "developerName": "Soo",
     "category": "Productivity",
     "capabilities": [
@@ -35,7 +35,9 @@
     "privacyPolicyURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md",
     "termsOfServiceURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
     "defaultPrompt": [
-      "Brief, capture, organize, or safely update my Apple Reminders"
+      "Show my Apple Reminders due today and overdue",
+      "Add a reminder to my Shopping list",
+      "Help me organize an Apple Reminder safely"
     ],
     "brandColor": "#007AFF",
     "composerIcon": "./assets/icon.png",

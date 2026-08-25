@@ -70,7 +70,7 @@ class BenchmarkCliContractTests(unittest.TestCase):
 
         self.assertEqual(
             case.command,
-            (benchmark_plugin.PYTHON, str(PLUGIN_ROOT / "mcp" / "server.py")),
+            ("/bin/sh", str(PLUGIN_ROOT / "scripts" / "launch_mcp.sh")),
         )
         self.assertEqual([request["method"] for request in requests], ["initialize", "tools/list"])
 
@@ -114,7 +114,7 @@ class BenchmarkCliContractTests(unittest.TestCase):
 
         self.assertEqual(
             case.command,
-            (benchmark_plugin.PYTHON, str(PLUGIN_ROOT / "mcp" / "server.py")),
+            ("/bin/sh", str(PLUGIN_ROOT / "scripts" / "launch_mcp.sh")),
         )
         self.assertEqual([request["method"] for request in requests], ["initialize", "tools/call"])
         self.assertEqual(requests[-1]["params"]["name"], "diagnose_reminders")
@@ -162,7 +162,9 @@ class BenchmarkCliContractTests(unittest.TestCase):
             for call in run.mock_calls
             if call.args
         ]
-        self.assertTrue(any(str(alternate / "mcp" / "server.py") in command for command in commands))
+        self.assertTrue(
+            any(str(alternate / "scripts" / "launch_mcp.sh") in command for command in commands)
+        )
 
     def test_payload_records_percentiles_safety_and_package_bytes(self) -> None:
         with (

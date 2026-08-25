@@ -167,6 +167,35 @@ def facade(eventkit: FakeEventKit) -> V2CoreFacade:
 
 
 class V2CoreFacadeTests(unittest.TestCase):
+    def test_missing_native_build_prerequisite_has_an_actionable_recovery_path(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "list_calendars",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "list_calendars",
+                "error": {
+                    "code": "unexpected_error",
+                    "reason_code": "native_helper_build_failed",
+                    "message": "EventKit helper could not be prepared (RuntimeError)",
+                    "retryable": False,
+                },
+            },
+            is_error=True,
+        )
+
+        result = facade(eventkit).list_reminder_lists({})
+
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["next_action"]["kind"], "diagnose")
+        self.assertEqual(result["next_action"]["tool"], "diagnose_reminders")
+        self.assertFalse(result["next_action"]["retry_original_once"])
+        self.assertIn("scope=packaging", result["next_action"]["message"])
+        self.assertIn("xcode-select --install", result["next_action"]["message"])
+        validate_public_result("list_reminder_lists", result)
+
     def test_exact_read_maps_backend_not_found_category_to_public_not_found(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue(
