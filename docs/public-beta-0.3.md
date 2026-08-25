@@ -134,6 +134,7 @@ Replace shallow route tests once the same behavior is protected at a new Interfa
 
 ## Required evidence
 
+- The repo marketplace points to the canonical `plugins/apple-reminders` runtime subtree; a marketplace install does not copy repository tests, development docs, workflows, screenshots, or `dist`.
 - Every behavior change starts with a failing Interface-level test and reaches green before the next slice.
 - The full deterministic suite passes on the documented Python and macOS matrix.
 - A live disposable workflow covers list/read/create/patch/complete/reopen/delete, URL, image, section, and concurrency rejection with cleanup.
