@@ -205,6 +205,7 @@ class PurposeSkillLayerTests(unittest.TestCase):
         self.assertIn("Floating time [Inbox] id: floating - 2026-08-05", proc.stdout)
 
     def test_new_skills_have_complete_metadata_and_evals(self) -> None:
+        observed_categories: set[str] = set()
         for name in SKILL_NAMES:
             with self.subTest(skill=name):
                 skill_dir = ROOT / "skills" / name
@@ -217,11 +218,33 @@ class PurposeSkillLayerTests(unittest.TestCase):
                 evals = json.loads((skill_dir / "evals/evals.json").read_text(encoding="utf-8"))
                 self.assertEqual(evals["skill_name"], name)
                 self.assertGreaterEqual(len(evals["evals"]), 2)
+                categories = {case.get("category") for case in evals["evals"]}
+                self.assertIn("direct", categories)
+                self.assertIn("should_not_activate", categories)
+                observed_categories.update(category for category in categories if category)
+
+        self.assertTrue(
+            {"direct", "indirect", "incomplete", "should_not_activate", "unsupported_edge"}
+            .issubset(observed_categories)
+        )
 
     def test_main_skill_routes_to_purpose_specific_skills(self) -> None:
         skill_text = (ROOT / "skills/apple-reminders/SKILL.md").read_text(encoding="utf-8")
         for name in SKILL_NAMES:
             self.assertIn(f"${name}", skill_text)
+
+    def test_primary_skill_starts_with_core_and_diagnoses_only_after_failure(self) -> None:
+        skill_text = (ROOT / "skills/apple-reminders/SKILL.md").read_text(encoding="utf-8")
+        workflow = skill_text.split("## Workflow", 1)[1].split("## Daily Brief Defaults", 1)[0]
+
+        core_instruction = "Start with the requested bounded Core read or change"
+        diagnosis_instruction = "run targeted diagnostics only for an environment or Native Extension failure"
+        self.assertIn(core_instruction, workflow)
+        self.assertIn("Do not run Doctor or a capability preflight before a normal operation", workflow)
+        self.assertIn("request Reminders access and retry the original operation once", workflow)
+        self.assertIn(diagnosis_instruction, workflow)
+        self.assertLess(workflow.index(core_instruction), workflow.index(diagnosis_instruction))
+        self.assertNotIn("On first use or after an environment change, run", workflow)
 
 
 if __name__ == "__main__":

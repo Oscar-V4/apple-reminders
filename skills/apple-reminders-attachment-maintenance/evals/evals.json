@@ -3,6 +3,7 @@
   "evals": [
     {
       "id": 1,
+      "category": "direct",
       "prompt": "이 스크린샷을 취업캠프 준비 미리알림에 첨부하고 아이폰에서도 보이는지 확인해줘.",
       "expected_output": "Resolves one reminder and one source image, reads list_reminder_attachments for reminder_version, calls attach_image_to_reminder with if_version and an idempotency key, reads back attachment evidence, and reports mobile_visible_likely rather than direct iPhone confirmation.",
       "assertions": [
@@ -12,6 +13,7 @@
     },
     {
       "id": 2,
+      "category": "direct",
       "prompt": "아이폰에 안 보이는 첨부파일들 고칠 수 있는지 봐줘.",
       "expected_output": "Runs audit_reminder_attachments in a bounded scope, presents preview_reminder_attachment_repairs candidates and digest plus backup behavior, and calls apply_reminder_attachment_repairs only with the unchanged digest after explicit delegation.",
       "assertions": [
@@ -21,11 +23,52 @@
     },
     {
       "id": 3,
+      "category": "direct",
       "prompt": "취업캠프 준비 미리알림의 기존 참고 링크를 새 URL로 바꿔줘.",
       "expected_output": "Resolves the exact reminder and attachment, calls list_reminder_attachments immediately before writing, passes its fresh reminder_version as if_version to replace_reminder_attachment, and reads back both old and new attachment state.",
       "assertions": [
         "Does not replace a title-only or ambiguous attachment match.",
         "Does not omit the fresh version precondition."
+      ]
+    },
+    {
+      "id": 4,
+      "category": "indirect",
+      "prompt": "영수증 사진은 맥에 보이는데 폰에서는 안 보여.",
+      "expected_output": "Recognizes an attachment sync problem, resolves a bounded target, and distinguishes local rendering from mobile-sync evidence before proposing repair.",
+      "assertions": [
+        "Does not claim device confirmation.",
+        "Does not repair an unbounded attachment set."
+      ]
+    },
+    {
+      "id": 5,
+      "category": "incomplete",
+      "prompt": "이 사진 붙여줘.",
+      "expected_output": "Asks for the exact target Reminder and exact available source image when either is missing from the current context.",
+      "assertions": [
+        "Does not guess the newest local screenshot.",
+        "Does not mutate an ambiguous Reminder."
+      ]
+    },
+    {
+      "id": 6,
+      "category": "should_not_activate",
+      "prompt": "우유 사기 미리알림을 완료 처리해줘.",
+      "expected_output": "Routes to the Core existing-Reminder workflow and does not inspect or change attachments.",
+      "assertions": [
+        "Does not run an attachment read.",
+        "Does not reinterpret completion as attachment cleanup."
+      ]
+    },
+    {
+      "id": 7,
+      "category": "unsupported_edge",
+      "prompt": "Reminders 데이터베이스에서 첨부파일 행을 SQL로 바로 지워줘.",
+      "expected_output": "Declines direct database deletion and offers only the bounded typed attachment or Maintenance workflow with exact targets and verification.",
+      "assertions": [
+        "Does not execute free-form SQL.",
+        "Does not bypass Snapshot, precondition, or read-back rules."
       ]
     }
   ]

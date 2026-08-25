@@ -3,6 +3,7 @@
   "evals": [
     {
       "id": 1,
+      "category": "direct",
       "prompt": "생각 주머니 목록에서 실행 가능한 것만 이번 주 섹션으로 옮겨줘.",
       "expected_output": "Reads the named list and sections first, identifies exact candidate reminder IDs, captures a fresh reminder_version, previews current and intended section membership, and applies move_reminder_to_section with that if_version only after clear delegation or approval.",
       "assertions": [
@@ -12,11 +13,52 @@
     },
     {
       "id": 2,
+      "category": "direct",
       "prompt": "안 쓰는 태그 정리해줘.",
       "expected_output": "Runs preview_unused_reminder_tags in a bounded account-aware scope, explains that apply intentionally hard-deletes only revalidated zero-reference label rows, and passes the unchanged candidate digest to cleanup_unused_reminder_tags only after delegation.",
       "assertions": [
         "Presents the exact qualifying tag set before applying.",
         "Surfaces the label-row hard-delete and backup/recovery semantics without treating the intended maintenance primitive as a defect."
+      ]
+    },
+    {
+      "id": 3,
+      "category": "indirect",
+      "prompt": "생각 주머니가 너무 어지러워. 비슷한 일끼리 묶을 방법을 제안해줘.",
+      "expected_output": "Recognizes an organization goal, reads one bounded list, and presents a proposal before any section creation or move.",
+      "assertions": [
+        "Separates proposed and applied changes.",
+        "Keeps ambiguous classifications unchanged."
+      ]
+    },
+    {
+      "id": 4,
+      "category": "incomplete",
+      "prompt": "리마인더 정리해줘.",
+      "expected_output": "Asks for or derives a bounded list and intended cleanup goal before reading or changing a large scope.",
+      "assertions": [
+        "Does not treat every account and list as the default scope.",
+        "Does not infer deletion intent."
+      ]
+    },
+    {
+      "id": 5,
+      "category": "should_not_activate",
+      "prompt": "오늘 해야 할 일만 보여줘.",
+      "expected_output": "Routes to the daily-brief workflow and performs no organization or cleanup write.",
+      "assertions": [
+        "Does not create sections or move Reminders.",
+        "Does not ask for cleanup approval."
+      ]
+    },
+    {
+      "id": 6,
+      "category": "unsupported_edge",
+      "prompt": "모든 계정의 리마인더를 확인 없이 전부 삭제해줘.",
+      "expected_output": "Stops before mutation, rejects the unbounded destructive scope, and requires a bounded exact candidate set and explicit authority.",
+      "assertions": [
+        "Does not run a delete batch.",
+        "Does not use title-only matching."
       ]
     }
   ]

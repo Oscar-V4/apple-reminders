@@ -9,7 +9,7 @@ description: Manage native Apple Reminders data from Codex. Use when the user wa
 
 Use this skill to turn Apple Reminders state into grounded task briefs, capture plans, organization proposals, and safe reminder updates. Keep answers tied to actual list names, section names, reminder titles, dates, notes, tags, URLs, completion state, and attachment evidence.
 
-Use the bundled typed MCP tools as the normal operation surface. For private maintenance details, backend policy, or a missing MCP tool, read [references/adapter-cli.md](references/adapter-cli.md). The adapter is a local macOS implementation detail for this personal plugin, not the OpenMinis contribution surface. Do not copy this local skill into MinisSkills; use the separately allowlisted `minis/apple-reminders/` export, which targets only Minis' built-in command surface.
+Use the bundled typed MCP tools as the normal operation surface. Read [references/adapter-cli.md](references/adapter-cli.md) only to understand an implementation boundary or troubleshoot a targeted Maintenance failure. A missing MCP tool is an unsupported public operation, not permission to fall back to a deprecated CLI write. The adapter is a local macOS implementation detail for this plugin, not the OpenMinis contribution surface. Do not copy this local skill into MinisSkills; use the separately allowlisted `minis/apple-reminders/` export, which targets only Minis' built-in command surface.
 
 ## Purpose-Specific Routing
 
@@ -31,7 +31,7 @@ Use the bundled typed MCP tools as the normal operation surface. For private mai
 
 ## Workflow
 
-1. On first use or after an environment change, run `reminders_plugin_doctor` with its default summary and `get_reminders_capabilities`. Request `detail_level=full` only to troubleshoot a warning or blocked capability. Call `request_reminders_access` only when EventKit permission is needed and the user has requested a Reminders operation; it is the explicit TCC-prompting step.
+1. Start with the requested bounded Core read or change. Do not run Doctor or a capability preflight before a normal operation. When the Core result reports that EventKit permission is required with no mutation, request Reminders access and retry the original operation once. Stop after a denial instead of prompting repeatedly. After any other failure, run targeted diagnostics only for an environment or Native Extension failure; use summary detail first and request full detail only when the summary identifies a specific problem area.
 2. Read the relevant Reminders state first so the request is grounded in actual lists, sections, reminders, and attachments. Prefer `list_reminder_lists`, `fetch_reminders`, and `read_reminder` for public fields.
 3. Normalize relative time language into explicit dates, times, and timezone-aware ranges before reasoning about due dates or alarms. Keep all-day/timed due values and alarm triggers distinct.
 4. Keep reads semantically bounded. Use calendar IDs, the matching incomplete-due/completed-completion range, or a narrower private scope in addition to a limit. Text search or `modified_after` alone is not a native EventKit bound.
@@ -92,7 +92,7 @@ Use the bundled typed MCP tools as the normal operation surface. For private mai
 
 ## Adapter Command Surface
 
-Use the bundled MCP tools for reads, create/update/complete/reopen/delete, list/section moves, tags, attachments, repair, diagnostics, permission handling, and native UI handoff. Read [references/adapter-cli.md](references/adapter-cli.md) only for the private implementation boundary or an advanced maintenance flow that is not exposed as a tool.
+Use the bundled MCP tools for reads, changes, organization, attachments, Maintenance, diagnostics, and permission handling. Read [references/adapter-cli.md](references/adapter-cli.md) only for the private implementation boundary or targeted troubleshooting. Never substitute an unexposed adapter write for a missing public tool.
 
 ## Example Requests
 
