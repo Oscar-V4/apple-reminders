@@ -54,11 +54,16 @@ class SourcePackagePolicyTests(unittest.TestCase):
             "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
         )
 
-    def test_core_module_is_in_the_runtime_package(self) -> None:
+    def test_public_runtime_modules_are_in_the_package(self) -> None:
         files, errors = audit_source_package.package_files(ROOT)
 
         self.assertEqual(errors, [])
-        self.assertIn(Path("scripts/reminders_service.py"), files)
+        self.assertTrue(
+            {
+                Path("scripts/reminders_image_input.py"),
+                Path("scripts/reminders_service.py"),
+            }.issubset(files)
+        )
 
     def test_forbidden_artifacts_are_classified_by_path(self) -> None:
         cases = {

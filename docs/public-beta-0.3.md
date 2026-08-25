@@ -49,7 +49,7 @@ The tool count is a reviewable release Interface, not the product goal. A future
 
 ### Exact references and revisions
 
-- Exact reads return an opaque Reminder reference containing stable identity, store identity, and a fresh Revision.
+- Exact reads return one opaque Reminder reference token that internally binds stable identity, store identity, expiry, and a fresh Revision; callers cannot mix those parts.
 - Existing-Reminder changes accept that reference instead of exposing a choice between EventKit `last_modified` and private `reminder_version`.
 - A stale Revision returns `concurrent_modification` with no mutation.
 - Page reads are semantically bounded and their cursors are bound to the original filter fingerprint.
@@ -76,7 +76,7 @@ The tool count is a reviewable release Interface, not the product goal. A future
 - Section queries and changes use exact list identity. Duplicate list names cannot broaden scope.
 - `organize_reminder` covers section moves and tag add/remove through closed actions.
 - `change_reminder_attachment` covers image/URL attach, replace, and delete through closed actions.
-- Image inputs must be absolute regular non-symlink files within documented byte, pixel, and format limits.
+- Image inputs must be absolute regular non-symlink files decoded as PNG or JPEG, at most 25 MiB, at most 16,384 pixels per dimension, and at most 40,000,000 total pixels.
 - ReminderKit image and section saves retain their CloudKit/mobile-sync evidence. Evidence is not described as direct iPhone observation.
 - Flag mutation is not promised until a typed, exact-ID, read-back-verified Interface exists.
 - `show_reminder` is absent until exact UI selection can be observed; opening the app alone is not `verified`.
