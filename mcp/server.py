@@ -13,7 +13,6 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
-import os
 import re
 import subprocess
 import sys
@@ -52,8 +51,21 @@ TOOLS_SCHEMA_PATH = PLUGIN_ROOT / "schemas" / "mcp-tools.json"
 DEFAULT_ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 DEFAULT_EVENTKIT_BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
 DEFAULT_DOCTOR_PATH = PLUGIN_ROOT / "scripts" / "reminders_doctor.py"
-SOURCE_TEST_GATE = PLUGIN_ROOT / "tests" / "test_mcp_server.py"
-TEST_MODE_ENV = "APPLE_REMINDERS_MCP_TEST_MODE"
+
+
+@dataclass(frozen=True)
+class BackendPaths:
+    adapter: Path
+    eventkit_bridge: Path
+    doctor: Path
+
+
+DEFAULT_BACKEND_PATHS = BackendPaths(
+    adapter=DEFAULT_ADAPTER_PATH,
+    eventkit_bridge=DEFAULT_EVENTKIT_BRIDGE_PATH,
+    doctor=DEFAULT_DOCTOR_PATH,
+)
+_ACTIVE_BACKEND_PATHS = DEFAULT_BACKEND_PATHS
 
 ADAPTER_TIMEOUT_SECONDS = 45
 EVENTKIT_BRIDGE_TIMEOUT_SECONDS = 60
@@ -663,30 +675,16 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def _backend_path(default: Path, override_env: str) -> Path:
-    # Release archives intentionally omit tests/, so packaged runtime cannot
-    # redirect a reviewed backend through process environment. Source-level
-    # integration tests opt in explicitly and keep their substitutes local to
-    # the disposable test checkout.
-    if os.environ.get(TEST_MODE_ENV) != "1" or not SOURCE_TEST_GATE.is_file():
-        return default
-    configured = os.environ.get(override_env)
-    return Path(configured).expanduser().resolve() if configured else default
-
-
 def adapter_path() -> Path:
-    return _backend_path(DEFAULT_ADAPTER_PATH, "APPLE_REMINDERS_ADAPTER_PATH")
+    return _ACTIVE_BACKEND_PATHS.adapter
 
 
 def eventkit_bridge_path() -> Path:
-    return _backend_path(
-        DEFAULT_EVENTKIT_BRIDGE_PATH,
-        "APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH",
-    )
+    return _ACTIVE_BACKEND_PATHS.eventkit_bridge
 
 
 def doctor_path() -> Path:
-    return _backend_path(DEFAULT_DOCTOR_PATH, "APPLE_REMINDERS_DOCTOR_PATH")
+    return _ACTIVE_BACKEND_PATHS.doctor
 
 
 def _load_local_module(name: str, path: Path) -> Any:
@@ -1658,28 +1656,45 @@ def send(message: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def main() -> int:
-    for raw_line in sys.stdin:
-        if len(raw_line.encode("utf-8", errors="replace")) > MAX_MCP_MESSAGE_BYTES:
-            send(jsonrpc_error(None, JSONRPC_INVALID_REQUEST, "JSON-RPC message exceeds the size limit"))
-            continue
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            send(jsonrpc_error(None, JSONRPC_PARSE_ERROR, "Parse error"))
-            continue
-        try:
-            response = handle_message(message)
-        except Exception as exc:  # keep protocol stdout valid even on an internal defect
-            request_id = message.get("id") if isinstance(message, dict) else None
-            print(f"{SERVER_NAME}: {type(exc).__name__}", file=sys.stderr)
-            response = jsonrpc_error(request_id, JSONRPC_INTERNAL_ERROR, "Internal server error")
-        if response is not None:
-            send(response)
-    return 0
+def main(*, backend_paths: BackendPaths | None = None) -> int:
+    global _ACTIVE_BACKEND_PATHS
+
+    previous_backend_paths = _ACTIVE_BACKEND_PATHS
+    _ACTIVE_BACKEND_PATHS = backend_paths or DEFAULT_BACKEND_PATHS
+    try:
+        for raw_line in sys.stdin:
+            if len(raw_line.encode("utf-8", errors="replace")) > MAX_MCP_MESSAGE_BYTES:
+                send(
+                    jsonrpc_error(
+                        None,
+                        JSONRPC_INVALID_REQUEST,
+                        "JSON-RPC message exceeds the size limit",
+                    )
+                )
+                continue
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                send(jsonrpc_error(None, JSONRPC_PARSE_ERROR, "Parse error"))
+                continue
+            try:
+                response = handle_message(message)
+            except Exception as exc:  # keep protocol stdout valid even on an internal defect
+                request_id = message.get("id") if isinstance(message, dict) else None
+                print(f"{SERVER_NAME}: {type(exc).__name__}", file=sys.stderr)
+                response = jsonrpc_error(
+                    request_id,
+                    JSONRPC_INTERNAL_ERROR,
+                    "Internal server error",
+                )
+            if response is not None:
+                send(response)
+        return 0
+    finally:
+        _ACTIVE_BACKEND_PATHS = previous_backend_paths
 
 
 if __name__ == "__main__":

@@ -12,9 +12,16 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "mcp" / "server.py"
+SERVER_HARNESS = ROOT / "tests" / "mcp_server_harness.py"
 CONFIG = ROOT / ".mcp.json"
 TOOLS_SCHEMA = ROOT / "schemas" / "mcp-tools.json"
 REMINDER_ID = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+
+TEST_BACKEND_ENVIRONMENTS = {
+    "adapter": "APPLE_REMINDERS_TEST_HARNESS_ADAPTER_PATH",
+    "eventkit_bridge": "APPLE_REMINDERS_TEST_HARNESS_EVENTKIT_BRIDGE_PATH",
+    "doctor": "APPLE_REMINDERS_TEST_HARNESS_DOCTOR_PATH",
+}
 
 
 def run_server(
@@ -28,20 +35,21 @@ def run_server(
 ) -> list[dict[str, Any]]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    if adapter_path is not None:
-        env["APPLE_REMINDERS_ADAPTER_PATH"] = str(adapter_path)
-    if eventkit_bridge_path is not None:
-        env["APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH"] = str(eventkit_bridge_path)
-    if doctor_path is not None:
-        env["APPLE_REMINDERS_DOCTOR_PATH"] = str(doctor_path)
+    for environment_name in TEST_BACKEND_ENVIRONMENTS.values():
+        env.pop(environment_name, None)
     if enable_test_backends:
-        env["APPLE_REMINDERS_MCP_TEST_MODE"] = "1"
-    else:
-        env.pop("APPLE_REMINDERS_MCP_TEST_MODE", None)
+        if adapter_path is not None:
+            env[TEST_BACKEND_ENVIRONMENTS["adapter"]] = str(adapter_path)
+        if eventkit_bridge_path is not None:
+            env[TEST_BACKEND_ENVIRONMENTS["eventkit_bridge"]] = str(
+                eventkit_bridge_path
+            )
+        if doctor_path is not None:
+            env[TEST_BACKEND_ENVIRONMENTS["doctor"]] = str(doctor_path)
     if home_path is not None:
         env["HOME"] = str(home_path)
     completed = subprocess.run(
-        [sys.executable, str(SERVER)],
+        [sys.executable, str(SERVER_HARNESS)],
         cwd=ROOT,
         env=env,
         input="".join(json.dumps(message) + "\n" for message in messages),
@@ -550,6 +558,54 @@ class McpPackagingTests(unittest.TestCase):
 
 
 class McpProtocolTests(unittest.TestCase):
+    def test_production_server_ignores_backend_environment_even_in_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            adapter = temp_root / "mock_adapter.py"
+            marker = adapter.with_suffix(".called")
+            mock_adapter(adapter)
+            isolated_home = temp_root / "isolated-home"
+            isolated_home.mkdir()
+            env = {
+                **os.environ,
+                "APPLE_REMINDERS_ADAPTER_PATH": str(adapter),
+                "APPLE_REMINDERS_EVENTKIT_BRIDGE_PATH": str(
+                    temp_root / "mock_eventkit.py"
+                ),
+                "APPLE_REMINDERS_DOCTOR_PATH": str(temp_root / "mock_doctor.py"),
+                "APPLE_REMINDERS_MCP_TEST_MODE": "1",
+                "HOME": str(isolated_home),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            messages = [
+                initialize(),
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "list_reminder_sections",
+                        "arguments": {
+                            "list_id": "22222222-2222-4222-8222-222222222222",
+                            "limit": 1,
+                        },
+                    },
+                },
+            ]
+            completed = subprocess.run(
+                [sys.executable, str(SERVER)],
+                cwd=ROOT,
+                env=env,
+                input="".join(json.dumps(message) + "\n" for message in messages),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(marker.exists())
+
     def test_section_route_passes_the_exact_list_identifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             adapter = Path(tmp) / "mock_adapter.py"
@@ -586,12 +642,14 @@ class McpProtocolTests(unittest.TestCase):
             ],
         )
 
-    def test_backend_path_override_is_inert_without_source_test_mode(self) -> None:
+    def test_harness_uses_bundled_backends_when_test_injection_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)
             adapter = temp_root / "mock_adapter.py"
             marker = adapter.with_suffix(".called")
             mock_adapter(adapter)
+            isolated_home = temp_root / "isolated-home"
+            isolated_home.mkdir()
             responses = run_server(
                 [
                     initialize(),
@@ -601,17 +659,19 @@ class McpProtocolTests(unittest.TestCase):
                         "method": "tools/call",
                         "params": {
                             "name": "list_reminder_sections",
-                            "arguments": {"limit": 1},
+                            "arguments": {
+                                "list_id": "22222222-2222-4222-8222-222222222222",
+                                "limit": 1,
+                            },
                         },
                     },
                 ],
                 adapter_path=adapter,
-                home_path=temp_root / "isolated-home",
+                home_path=isolated_home,
                 enable_test_backends=False,
             )
-
-        self.assertFalse(marker.exists())
-        self.assertTrue(responses[1]["result"]["isError"])
+            self.assertFalse(marker.exists())
+            self.assertTrue(responses[1]["result"]["isError"])
 
     def test_notification_shaped_tool_call_cannot_execute_a_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
