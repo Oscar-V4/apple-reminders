@@ -28,7 +28,7 @@ The dependency-light shape is therefore:
    - Uses EventKit for accounts, lists, bounded reminder reads, create/update, complete/reopen, list-to-list moves, and deletion.
    - Represents due dates, alarms, and recurrence as separate typed fields and preserves untouched fields on patches.
    - Requires `expected_last_modified` for existing-reminder writes, including deletion, and performs read-back verification.
-   - A non-null URL create/update is completed by the MCP's verified private URL-attachment step so the user-facing link is visible in Reminders; partial completion is reported instead of hidden behind EventKit success.
+   - A non-null URL create/update is completed by the MCP's verified private URL-attachment step so the user-facing link is visible in Reminders, followed by a final exact EventKit read that supplies the next safe `last_modified` precondition. If that read cannot complete, verification remains pending instead of being reported as verified.
 4. Private adapter core
    - A local CLI/library performs JSON-in/JSON-out operations for Reminders-only surfaces that EventKit cannot express.
    - Uses private ReminderKit for image attachments and list-section saves because mobile visibility requires native Reminders/CloudKit transactions.
@@ -69,7 +69,7 @@ The lower-level adapter continues to expose stable JSON commands for private ope
 - `doctor`
 - `snapshot`
 - `list_lists`
-- `list_sections`
+- `list_sections --list-id <exact-list-id>`
 - `search_reminders`
 - `read_reminder`
 - `list_tags`

@@ -11,7 +11,7 @@ Use this skill when the user's goal is to improve reminder structure or reduce c
 
 ## Workflow
 
-1. Define the scope: list, section, search text, tag, date window, completed state, or maximum item count. If absent, enumerate lists and begin with `fetch_reminders` over one explicit `calendar_id`, limited to 100.
+1. Define the scope: list, section, search text, tag, date window, completed state, or maximum item count. If absent, enumerate lists and begin with `fetch_reminders` over one explicit `calendar_id`, limited to 100. Resolve section scope with `list_reminder_sections` and that exact list ID; never use a list name as the selector because names can repeat across accounts.
 2. Read current state before proposing changes. Use exact IDs, list/calendar IDs, section names, due dates, `last_modified`, completion state, and tag names from tool output.
 3. Group candidates by operational intent: move, create section, complete, delete, tag change, or leave untouched.
 4. For each proposed write, show current state and intended state. Include the exact command family, but do not run it until the affected set is clear.

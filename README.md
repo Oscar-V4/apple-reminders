@@ -139,7 +139,10 @@ device/UI observation.
 Do not assume Native Extension support solely from the OS version. When a
 specific operation reports an environment or native-capability failure, run
 targeted summary diagnosis and treat an unknown schema, missing permission, or
-failed runtime probe as limited to the affected capability.
+failed runtime probe as limited to the affected capability. Missing canonical
+ReminderKit files alone are inconclusive because dyld may load them from the
+shared cache; the Doctor reports a runtime-probe requirement rather than a
+false block when the helper toolchain is otherwise ready.
 
 ## Local Validation
 
@@ -242,9 +245,9 @@ The MCP tool contract lives in `schemas/mcp-tools.json`; the adapter CLI is
 `scripts/reminders_adapter.py`. Inspect the current schema or run `--help`
 instead of relying on an old command list. Broadly, the implementation covers:
 
-- bounded account/list/section/reminder/tag and attachment reads;
+- bounded account/list/section/reminder/tag and attachment reads, with section scope selected by exact list ID rather than a potentially duplicated name;
 - exact-ID EventKit reminder create/update/complete/reopen/move/delete operations;
-- hybrid URL create/update that preserves EventKit metadata and verifies the matching user-visible native URL attachment before reporting full success;
+- hybrid URL create/update that preserves EventKit metadata, verifies the matching user-visible native URL attachment, and performs a final exact EventKit read so the returned `last_modified` is safe for the next guarded write;
 - list creation by exact name with optional color and emblem, native ReminderKit
   section creation/membership with CloudKit version read-back, plus tag operations;
 - first-class MCP tools for URL/image attachment, exact attachment replacement

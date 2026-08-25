@@ -233,7 +233,17 @@ print(json.dumps(payload))
     )
 
 
-def mock_eventkit_bridge(path: Path) -> None:
+def mock_eventkit_bridge(path: Path, *, final_read_mode: str = "success") -> None:
+    if final_read_mode not in {
+        "success",
+        "failure",
+        "wrong_id",
+        "missing_last_modified",
+        "invalid_last_modified",
+        "url_mismatch",
+    }:
+        raise ValueError(final_read_mode)
+    path.with_suffix(".mode").write_text(final_read_mode, encoding="utf-8")
     path.write_text(
         """from __future__ import annotations
 import json
@@ -248,6 +258,8 @@ request_log = Path(__file__).with_suffix(".requests")
 previous_requests = request_log.read_text(encoding="utf-8") if request_log.exists() else ""
 request_log.write_text(previous_requests + json.dumps(request) + "\\n", encoding="utf-8")
 operation = request["operation"]
+mode = Path(__file__).with_suffix(".mode").read_text(encoding="utf-8")
+state_path = Path(__file__).with_suffix(".state")
 if operation == "list_accounts":
     data = {"items": [
         {"id": "ACCOUNT-A", "title": "iCloud"},
@@ -277,8 +289,44 @@ elif operation == "fetch_reminders":
         "next_offset": next_offset,
     }
 elif operation == "read_reminder":
-    data = {"reminder": {"id": request["reminder_id"], "title": "Exact"}}
+    if mode == "failure":
+        print(json.dumps({
+            "schema_version": 1,
+            "operation": operation,
+            "status": "failed_no_mutation",
+            "ok": False,
+            "error": {
+                "code": "permission_denied",
+                "message": "Synthetic final read failure.",
+            },
+        }))
+        raise SystemExit(0)
+    state = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if state_path.exists()
+        else {"url": None}
+    )
+    reminder = {
+        "id": "WRONG-REMINDER" if mode == "wrong_id" else request["reminder_id"],
+        "title": "Final exact projection",
+        "url": "https://example.com/wrong" if mode == "url_mismatch" else state["url"],
+    }
+    if mode != "missing_last_modified":
+        reminder["last_modified"] = (
+            "not-a-timestamp"
+            if mode == "invalid_last_modified"
+            else "2026-08-25T00:00:01.000Z"
+        )
+    data = {"reminder": reminder}
 elif operation in {"create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "move_reminder", "delete_reminder"}:
+    reminder_id = request.get("reminder_id", "REMINDER-CREATED")
+    visible_url = request.get("url")
+    if operation == "update_reminder":
+        visible_url = request.get("patch", {}).get("url")
+    state_path.write_text(
+        json.dumps({"id": reminder_id, "url": visible_url}),
+        encoding="utf-8",
+    )
     payload = {
         "schema_version": 1,
         "operation": operation,
@@ -286,8 +334,13 @@ elif operation in {"create_reminder", "update_reminder", "complete_reminder", "r
         "backend": "eventkit_public_sdk",
         "status": "verified",
         "ok": True,
-        "target": {"reminder_id": request.get("reminder_id", "REMINDER-CREATED")},
-        "after": {"id": request.get("reminder_id", "REMINDER-CREATED")},
+        "target": {"reminder_id": reminder_id},
+        "after": {
+            "id": reminder_id,
+            "title": "Pre-final projection",
+            "url": visible_url,
+            "last_modified": "2026-08-25T00:00:00.000Z",
+        },
         "verification": {"state": "read_back"},
         "recovery": {"semantics": "eventkit"},
     }
@@ -1163,6 +1216,12 @@ class McpProtocolTests(unittest.TestCase):
                 if request_log.exists()
                 else []
             )
+            bridge_requests = [
+                json.loads(line)
+                for line in bridge.with_suffix(".requests")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
 
         result = responses[1]["result"]
         payload = result["structuredContent"]
@@ -1171,7 +1230,17 @@ class McpProtocolTests(unittest.TestCase):
         self.assertIn("url_attachment", payload["after"])
         self.assertEqual(payload["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
         self.assertEqual(payload["after"]["url_attachment"]["url"], url)
+        self.assertEqual(payload["after"]["title"], "Final exact projection")
+        self.assertEqual(
+            payload["after"]["last_modified"],
+            "2026-08-25T00:00:01.000Z",
+        )
         self.assertTrue(payload["verification"]["url_attachment"]["attachment_active"])
+        self.assertTrue(
+            payload["verification"]["eventkit_final_read"][
+                "last_modified_safe_for_precondition"
+            ]
+        )
         replay = responses[2]["result"]["structuredContent"]
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
@@ -1190,6 +1259,10 @@ class McpProtocolTests(unittest.TestCase):
                     "12",
                 ],
             ],
+        )
+        self.assertEqual(
+            [request["operation"] for request in bridge_requests],
+            ["create_reminder", "read_reminder"],
         )
 
     def test_update_with_url_verifies_a_native_reminders_attachment(self) -> None:
@@ -1226,6 +1299,12 @@ class McpProtocolTests(unittest.TestCase):
                 if request_log.exists()
                 else []
             )
+            bridge_requests = [
+                json.loads(line)
+                for line in bridge.with_suffix(".requests")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
 
         result = responses[1]["result"]
         payload = result["structuredContent"]
@@ -1234,6 +1313,11 @@ class McpProtocolTests(unittest.TestCase):
         self.assertIn("url_attachment", payload["after"])
         self.assertEqual(payload["after"]["url_attachment"]["id"], "URL-ATTACHMENT")
         self.assertEqual(payload["after"]["url_attachment"]["url"], url)
+        self.assertEqual(payload["after"]["title"], "Final exact projection")
+        self.assertEqual(
+            payload["after"]["last_modified"],
+            "2026-08-25T00:00:01.000Z",
+        )
         self.assertTrue(payload["verification"]["url_attachment"]["attachment_active"])
         self.assertEqual(
             adapter_requests,
@@ -1250,6 +1334,170 @@ class McpProtocolTests(unittest.TestCase):
                 ],
             ],
         )
+        self.assertEqual(
+            [request["operation"] for request in bridge_requests],
+            ["update_reminder", "read_reminder"],
+        )
+
+    def test_url_final_read_failures_return_a_valid_pending_receipt(self) -> None:
+        url = "https://example.com/results"
+        for mode in (
+            "failure",
+            "wrong_id",
+            "missing_last_modified",
+            "invalid_last_modified",
+            "url_mismatch",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                temp_root = Path(tmp)
+                bridge = temp_root / "mock_eventkit.py"
+                adapter = temp_root / "mock_adapter.py"
+                mock_eventkit_bridge(bridge, final_read_mode=mode)
+                mock_visible_url_adapter(adapter)
+                responses = run_server(
+                    [
+                        initialize(),
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "update_reminder",
+                                "arguments": {
+                                    "reminder_id": "REMINDER-1",
+                                    "expected_last_modified": "2026-08-06T00:00:00Z",
+                                    "patch": {"url": url},
+                                },
+                            },
+                        },
+                    ],
+                    adapter_path=adapter,
+                    eventkit_bridge_path=bridge,
+                )
+                bridge_requests = [
+                    json.loads(line)
+                    for line in bridge.with_suffix(".requests")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
+
+            result = responses[1]["result"]
+            payload = result["structuredContent"]
+            self.assertFalse(result["isError"], result)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "committed_verification_pending")
+            self.assertEqual(payload["verification"]["state"], "pending")
+            self.assertFalse(
+                payload["verification"]["eventkit_final_read"][
+                    "last_modified_safe_for_precondition"
+                ]
+            )
+            self.assertEqual(payload["error"]["code"], "sync_pending")
+            self.assertEqual(
+                set(payload["after"]),
+                {"id", "url_attachment"},
+            )
+            self.assertEqual(
+                [request["operation"] for request in bridge_requests],
+                ["update_reminder", "read_reminder"],
+            )
+
+    def test_attachment_and_final_read_failures_keep_partial_success_priority(self) -> None:
+        url = "https://example.com/results"
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "mock_eventkit.py"
+            adapter = temp_root / "mock_adapter.py"
+            mock_eventkit_bridge(bridge, final_read_mode="failure")
+            mock_failing_visible_url_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "update_reminder",
+                            "arguments": {
+                                "reminder_id": "REMINDER-1",
+                                "expected_last_modified": "2026-08-06T00:00:00Z",
+                                "patch": {"url": url},
+                            },
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+            )
+
+        result = responses[1]["result"]
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(payload["status"], "partial_success")
+        self.assertEqual(payload["verification"]["state"], "partial")
+        self.assertEqual(payload["verification"]["url_attachment"]["state"], "failed")
+        self.assertFalse(
+            payload["verification"]["eventkit_final_read"][
+                "last_modified_safe_for_precondition"
+            ]
+        )
+        self.assertEqual(payload["after"], {"id": "REMINDER-1"})
+        self.assertEqual(
+            [warning["code"] for warning in payload["warnings"][-2:]],
+            ["schema_mismatch", "eventkit_final_read_pending"],
+        )
+
+    def test_eventkit_pending_skips_attachment_and_final_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            bridge = temp_root / "pending_eventkit.py"
+            adapter = temp_root / "mock_adapter.py"
+            bridge.write_text(
+                """import json
+import sys
+from pathlib import Path
+
+json.load(sys.stdin)
+marker = Path(__file__).with_suffix('.called')
+marker.write_text((marker.read_text() if marker.exists() else '') + 'called\\n')
+print('not-json')
+""",
+                encoding="utf-8",
+            )
+            mock_visible_url_adapter(adapter)
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "create_reminder",
+                            "arguments": {
+                                "calendar_id": "LIST-A",
+                                "title": "Pending URL",
+                                "url": "https://example.com/results",
+                                "idempotency_key": "eventkit:create:pending-url:2026",
+                            },
+                        },
+                    },
+                ],
+                adapter_path=adapter,
+                eventkit_bridge_path=bridge,
+                home_path=temp_root / "home",
+            )
+            bridge_calls = bridge.with_suffix(".called").read_text(encoding="utf-8")
+
+        result = responses[1]["result"]
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(
+            result["structuredContent"]["status"],
+            "committed_verification_pending",
+        )
+        self.assertEqual(bridge_calls.splitlines(), ["called"])
+        self.assertFalse(adapter.with_suffix(".called").exists())
 
     def test_url_attachment_failure_preserves_the_eventkit_write_as_partial_success(self) -> None:
         url = "https://example.com/results"
@@ -1295,6 +1543,12 @@ class McpProtocolTests(unittest.TestCase):
                 eventkit_bridge_path=bridge,
                 home_path=temp_root / "home",
             )
+            bridge_requests = [
+                json.loads(line)
+                for line in bridge.with_suffix(".requests")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
 
         result = responses[1]["result"]
         payload = result["structuredContent"]
@@ -1302,6 +1556,10 @@ class McpProtocolTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "partial_success")
         self.assertEqual(payload["after"]["id"], "REMINDER-CREATED")
+        self.assertEqual(
+            payload["after"]["last_modified"],
+            "2026-08-25T00:00:01.000Z",
+        )
         self.assertEqual(payload["verification"]["url_attachment"]["state"], "failed")
         self.assertFalse(payload["verification"]["url_attachment"]["attachment_active"])
         self.assertEqual(payload["warnings"][-1]["code"], "schema_mismatch")
@@ -1313,6 +1571,10 @@ class McpProtocolTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["status"], "partial_success")
         self.assertEqual(replay["warnings"][-1]["code"], "schema_mismatch")
+        self.assertEqual(
+            [request["operation"] for request in bridge_requests],
+            ["create_reminder", "read_reminder"],
+        )
 
     def test_pending_eventkit_create_retry_replays_a_valid_receipt(self) -> None:
         create_arguments = {

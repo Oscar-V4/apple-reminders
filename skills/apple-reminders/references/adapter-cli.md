@@ -12,7 +12,7 @@ First-run tools are deliberately separate:
 
 Public reads use `list_reminder_accounts`, `list_reminder_lists`, `fetch_reminders`, and `read_reminder`. Existing-reminder EventKit writes require the exact ID plus `expected_last_modified`; create requires an idempotency key. `fetch_reminders` requires a native semantic bound in addition to a limit: calendar IDs, an incomplete due range, or a completed completion range. Its opaque cursor is valid only with unchanged filters, sort, and page size.
 
-A non-null URL passed to the public MCP create/update tools is a deliberate hybrid operation: after EventKit succeeds, the MCP obtains a fresh private reminder version and verifies the matching native URL attachment. Call `attach_url_to_reminder` directly only for extra URL attachments or explicit recovery from `partial_success`.
+A non-null URL passed to the public MCP create/update tools is a deliberate hybrid operation: after EventKit succeeds, the MCP obtains a fresh private reminder version, verifies the matching native URL attachment, and performs a final exact EventKit read. Use the returned final `after.last_modified` for the next guarded EventKit write. A failed final read is verification-pending, while a failed attachment step is `partial_success`. Call `attach_url_to_reminder` directly only for extra URL attachments or explicit recovery from `partial_success`.
 
 The rest of this reference documents the lower-level private implementation and maintenance escape hatch.
 
@@ -43,7 +43,7 @@ Diagnostics and backups:
 Cache and read paths:
 
 - `cache_rebuild`, `cache_info`, `cache_search`, `cache_query`
-- `list_lists`, `list_sections`, `snapshot`
+- `list_lists`, `list_sections --list-id <exact-list-id>`, `snapshot`
 - `search_reminders`, `read_reminder`
 - `list_tags`
 

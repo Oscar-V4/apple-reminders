@@ -1136,6 +1136,62 @@ def _url_attachment_partial_receipt(
     return payload
 
 
+def _is_rfc3339_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})",
+        value,
+    ):
+        return False
+    try:
+        dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _url_final_read_pending(
+    payload: dict[str, Any],
+    *,
+    reminder_id: str,
+    attachment: dict[str, Any] | None,
+    reason_code: str,
+) -> dict[str, Any]:
+    message = (
+        "The EventKit write and native URL attachment step completed, but the final "
+        "exact EventKit read was not safe to use. Read the reminder again before the "
+        "next guarded write."
+    )
+    safe_after: dict[str, Any] = {"id": reminder_id}
+    if attachment is not None:
+        safe_after["url_attachment"] = attachment
+    payload["after"] = safe_after
+    payload.setdefault("warnings", []).append(
+        {"code": "eventkit_final_read_pending", "message": message}
+    )
+    verification = payload.setdefault("verification", {})
+    verification["eventkit_final_read"] = {
+        "state": "pending",
+        "reason_code": reason_code,
+        "last_modified_safe_for_precondition": False,
+    }
+    payload.setdefault("recovery", {})["eventkit_final_read"] = {
+        "semantics": "read_reminder_before_next_write",
+        "automatic_retry_safe": False,
+    }
+    if payload.get("status") == "partial_success":
+        verification["state"] = "partial"
+        return payload
+    payload["ok"] = True
+    payload["status"] = "committed_verification_pending"
+    verification["state"] = "pending"
+    payload["error"] = {
+        "code": "sync_pending",
+        "reason_code": reason_code,
+        "message": message,
+    }
+    return payload
+
+
 def ensure_visible_url_attachment(
     payload: dict[str, Any],
     url: str,
@@ -1153,6 +1209,9 @@ def ensure_visible_url_attachment(
             ),
         )
 
+    initial_eventkit_status = str(payload["status"])
+    attachment: dict[str, Any] | None = None
+    attachment_status: str | None = None
     list_arguments = {"reminder_id": reminder_id, "limit": 1}
     list_payload, list_is_error = invoke_adapter(
         build_adapter_argv("list_reminder_attachments", list_arguments)
@@ -1165,7 +1224,7 @@ def ensure_visible_url_attachment(
         or reminder_version < 0
     ):
         error = list_payload.get("error") if isinstance(list_payload.get("error"), dict) else {}
-        return _url_attachment_partial_receipt(
+        _url_attachment_partial_receipt(
             payload,
             code=str(error.get("code") or "native_url_attachment_precondition_failed"),
             message=(
@@ -1173,52 +1232,134 @@ def ensure_visible_url_attachment(
                 "version for the visible URL attachment."
             ),
         )
+    else:
+        attach_arguments = {
+            "reminder_id": reminder_id,
+            "url": url,
+            "if_version": reminder_version,
+        }
+        attach_payload, attach_is_error = invoke_adapter(
+            build_adapter_argv("attach_url_to_reminder", attach_arguments)
+        )
+        receipt_error = (
+            validate_adapter_receipt(attach_payload, expected_operation="attach_url")
+            if not attach_is_error
+            else None
+        )
+        candidate_attachment = (
+            attach_payload.get("after", {}).get("attachment")
+            if isinstance(attach_payload.get("after"), dict)
+            else None
+        )
+        attachment_active = (
+            attach_payload.get("verification", {}).get("attachment_active") is True
+            if isinstance(attach_payload.get("verification"), dict)
+            else False
+        )
+        attachment_receipt_complete = attach_payload.get("status") in {
+            "verified",
+            "unchanged",
+        }
+        attachment_matches = (
+            isinstance(candidate_attachment, dict)
+            and candidate_attachment.get("url") == url
+        )
+        if (
+            attach_is_error
+            or receipt_error
+            or not attachment_receipt_complete
+            or not attachment_active
+            or not attachment_matches
+        ):
+            error = (
+                attach_payload.get("error")
+                if isinstance(attach_payload.get("error"), dict)
+                else {}
+            )
+            _url_attachment_partial_receipt(
+                payload,
+                code=str(
+                    error.get("code")
+                    or (
+                        "invalid_adapter_receipt"
+                        if receipt_error
+                        else "native_url_attachment_failed"
+                    )
+                ),
+                message=(
+                    "The EventKit write succeeded, but the native URL attachment was not "
+                    "verified in Reminders."
+                ),
+            )
+        else:
+            attachment = candidate_attachment
+            attachment_status = str(attach_payload["status"])
+            payload.setdefault("verification", {})["url_attachment"] = {
+                **attach_payload["verification"],
+                "status": attachment_status,
+            }
+            payload.setdefault("recovery", {})["url_attachment"] = attach_payload[
+                "recovery"
+            ]
 
-    attach_arguments = {
-        "reminder_id": reminder_id,
-        "url": url,
-        "if_version": reminder_version,
-    }
-    attach_payload, attach_is_error = invoke_adapter(
-        build_adapter_argv("attach_url_to_reminder", attach_arguments)
+    final_payload, final_is_error = invoke_eventkit_bridge(
+        "read_reminder",
+        {"reminder_id": reminder_id},
     )
-    receipt_error = (
-        validate_adapter_receipt(attach_payload, expected_operation="attach_url")
-        if not attach_is_error
+    final_data = final_payload.get("data")
+    final_reminder = (
+        final_data.get("reminder")
+        if isinstance(final_data, dict) and isinstance(final_data.get("reminder"), dict)
         else None
     )
-    attachment = (
-        attach_payload.get("after", {}).get("attachment")
-        if isinstance(attach_payload.get("after"), dict)
-        else None
+    final_error = (
+        final_payload.get("error")
+        if isinstance(final_payload.get("error"), dict)
+        else {}
     )
-    attachment_active = (
-        attach_payload.get("verification", {}).get("attachment_active") is True
-        if isinstance(attach_payload.get("verification"), dict)
-        else False
-    )
-    if attach_is_error or receipt_error or not isinstance(attachment, dict) or not attachment_active:
-        error = attach_payload.get("error") if isinstance(attach_payload.get("error"), dict) else {}
-        return _url_attachment_partial_receipt(
+    reason_code: str | None = None
+    if final_is_error:
+        reason_code = str(
+            final_error.get("reason_code")
+            or final_error.get("code")
+            or "eventkit_final_read_failed"
+        )
+    elif final_payload.get("status") != "verified" or final_reminder is None:
+        reason_code = "eventkit_final_read_unverified"
+    elif _mutation_reminder_id({"after": final_reminder}) != reminder_id:
+        reason_code = "eventkit_final_read_target_mismatch"
+    elif final_reminder.get("url") != url:
+        reason_code = "eventkit_final_read_url_mismatch"
+    elif not _is_rfc3339_timestamp(final_reminder.get("last_modified")):
+        reason_code = "eventkit_final_last_modified_invalid"
+    if reason_code is not None:
+        return _url_final_read_pending(
             payload,
-            code=str(
-                error.get("code")
-                or ("invalid_adapter_receipt" if receipt_error else "native_url_attachment_failed")
-            ),
-            message=(
-                "The EventKit write succeeded, but the native URL attachment was not verified in "
-                "Reminders."
-            ),
+            reminder_id=reminder_id,
+            attachment=attachment,
+            reason_code=reason_code,
         )
 
-    payload.setdefault("after", {})["url_attachment"] = attachment
-    payload.setdefault("verification", {})["url_attachment"] = {
-        **attach_payload["verification"],
-        "status": attach_payload["status"],
+    final_after = dict(final_reminder)
+    if attachment is not None:
+        final_after["url_attachment"] = attachment
+    payload["after"] = final_after
+    payload.setdefault("verification", {})["eventkit_final_read"] = {
+        "state": "read_back",
+        "reminder_id": reminder_id,
+        "last_modified_safe_for_precondition": True,
     }
-    payload.setdefault("recovery", {})["url_attachment"] = attach_payload["recovery"]
-    if payload.get("status") == "unchanged" and attach_payload.get("status") == "verified":
-        payload["status"] = "verified"
+    payload.setdefault("recovery", {})["eventkit_final_read"] = {
+        "semantics": "not_applicable",
+        "automatic_retry_safe": True,
+    }
+    if payload.get("status") == "partial_success":
+        return payload
+    payload["status"] = (
+        "unchanged"
+        if initial_eventkit_status == "unchanged" and attachment_status == "unchanged"
+        else "verified"
+    )
     return payload
 
 

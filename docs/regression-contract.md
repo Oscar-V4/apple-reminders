@@ -26,16 +26,21 @@ The exact 0.2.x tool-name contract lives in
    Recently Deleted was visually confirmed.
 4. Timed and all-day due values stay distinct from alarms. Time zones,
    recurrence, location alarms, and priority keep their typed contracts.
-5. A non-null URL create/update preserves EventKit metadata and also verifies
-   the user-visible native URL attachment. A failed second step is reported as
-   `partial_success`, and retry does not duplicate the reminder or attachment.
+5. A non-null URL create/update preserves EventKit metadata, verifies the
+   user-visible native URL attachment, and then performs a final exact EventKit
+   read. Its returned `after.last_modified` is the token for the next guarded
+   write; an unavailable final read remains verification-pending rather than
+   verified. A failed attachment step is reported as `partial_success`, and
+   retry does not duplicate the reminder or attachment.
 6. Image attachment and replacement use the native ReminderKit path. CloudKit
    evidence may be described as mobile-visibility evidence, never as direct
    iPhone-screen confirmation.
 7. URL attachment replacement and deletion preserve native tombstone and
    ordering behavior and reject duplicates or stale versions before mutation.
-8. Section creation and same-list membership moves use native ReminderKit and
-   require CloudKit read-back before `verified`.
+8. Section enumeration scopes by exact list identifier, including when
+   different accounts contain duplicate list names. Section creation and
+   same-list membership moves use native ReminderKit and require CloudKit
+   read-back before `verified`.
 9. Tag assignment uses a fresh reminder version. Unused-tag cleanup keeps the
    intentional preview-digest, literal-scope, zero-reference, backup, and
    hard-delete behavior.
