@@ -1067,10 +1067,26 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
     store_ready = checks["store_access"]["status"] in {STATUS_OK, STATUS_WARNING}
     command_details = checks["command_schema"].get("details", {}).get("commands", {})
     public_tool = checks["permissions"]["details"]["automation"]
-    reminderkit_static = (
-        checks["helper_toolchain"]["status"] == STATUS_OK
-        and checks["private_frameworks"]["status"] == STATUS_OK
+    helper_ready = checks["helper_toolchain"]["status"] == STATUS_OK
+    framework_check = checks["private_frameworks"]
+    framework_items = framework_check.get("details", {}).get("frameworks", {})
+    canonical_framework_paths_absent = bool(framework_items) and all(
+        item.get("exists") is False for item in framework_items.values()
     )
+    framework_statically_available = framework_check["status"] == STATUS_OK
+    reminderkit_unknown = helper_ready and (
+        framework_statically_available or canonical_framework_paths_absent
+    )
+    if not helper_ready:
+        reminderkit_basis = "static_prerequisites_failed"
+    elif framework_statically_available:
+        reminderkit_basis = "static_prerequisites_passed_runtime_not_probed"
+    elif canonical_framework_paths_absent:
+        reminderkit_basis = (
+            "canonical_framework_paths_absent_runtime_probe_required"
+        )
+    else:
+        reminderkit_basis = "static_prerequisites_failed"
     return {
         "sqlite_schema_reads": {
             "status": STATUS_OK if store_ready else STATUS_BLOCKED,
@@ -1086,12 +1102,8 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
             "basis": public_tool["code"],
         },
         "reminderkit_image_attachments": {
-            "status": STATUS_UNKNOWN if reminderkit_static else STATUS_BLOCKED,
-            "basis": (
-                "static_prerequisites_passed_runtime_not_probed"
-                if reminderkit_static
-                else "static_prerequisites_failed"
-            ),
+            "status": STATUS_UNKNOWN if reminderkit_unknown else STATUS_BLOCKED,
+            "basis": reminderkit_basis,
             "requires_runtime_verification": True,
         },
         "command_schema": {

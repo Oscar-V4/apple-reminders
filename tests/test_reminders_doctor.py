@@ -425,6 +425,35 @@ class LocalArtifactTests(unittest.TestCase):
 
 
 class ReportContractTests(unittest.TestCase):
+    def test_missing_canonical_framework_paths_require_a_runtime_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            fixture.paths["private_frameworks"] = {
+                "ReminderKit": fixture.root
+                / "missing/ReminderKit.framework/ReminderKit",
+                "ReminderKitInternal": fixture.root
+                / "missing/ReminderKitInternal.framework/ReminderKitInternal",
+            }
+
+            report = reminders_doctor.collect_report(
+                fixture.paths,
+                system_info=DARWIN_INFO,
+                which=fake_which,
+                runner=fake_runner,
+            )
+
+        capability = report["capabilities"]["reminderkit_image_attachments"]
+        self.assertEqual(
+            report["checks"]["private_frameworks"]["code"],
+            "private_framework_unavailable",
+        )
+        self.assertEqual(capability["status"], "unknown")
+        self.assertEqual(
+            capability["basis"],
+            "canonical_framework_paths_absent_runtime_probe_required",
+        )
+        self.assertTrue(capability["requires_runtime_verification"])
+
     def test_ready_report_has_stable_privacy_and_capability_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = DoctorFixture(Path(temporary))
@@ -445,7 +474,39 @@ class ReportContractTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["application_launched"])
         self.assertIn("delete_reminder_db", report["capabilities"]["command_schema"])
         self.assertIn("cleanup_tags", report["capabilities"]["command_schema"])
+        self.assertEqual(
+            report["capabilities"]["reminderkit_image_attachments"],
+            {
+                "status": "unknown",
+                "basis": "static_prerequisites_passed_runtime_not_probed",
+                "requires_runtime_verification": True,
+            },
+        )
         self.assertEqual(report["errors"], [])
+
+    def test_helper_failure_keeps_reminderkit_capability_blocked(self) -> None:
+        def failing_runner(
+            argv: list[str], *, timeout: float = 20.0
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 1, "", "compile failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            report = reminders_doctor.collect_report(
+                fixture.paths,
+                system_info=DARWIN_INFO,
+                which=fake_which,
+                runner=failing_runner,
+            )
+
+        self.assertEqual(
+            report["capabilities"]["reminderkit_image_attachments"],
+            {
+                "status": "blocked",
+                "basis": "static_prerequisites_failed",
+                "requires_runtime_verification": True,
+            },
+        )
 
     def test_missing_group_produces_blocked_report_and_structured_codes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
