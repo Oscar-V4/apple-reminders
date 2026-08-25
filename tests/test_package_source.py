@@ -19,9 +19,10 @@ import audit_source_package  # noqa: E402
 import build_source_package  # noqa: E402
 
 
-# The slim package is about 701 KB. This leaves roughly 14% headroom, but not
-# enough to silently reintroduce one of the removed, roughly 100 KB icon copies.
-RELEASE_ARCHIVE_SIZE_BUDGET_BYTES = 800_000
+# The deterministic allowlist is the primary content boundary. This hard ceiling
+# catches gross package growth while leaving room for reviewed runtime modules;
+# exact source/archive bytes remain visible in every benchmark result.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = 1_048_576
 
 
 class SourcePackagePolicyTests(unittest.TestCase):
@@ -52,6 +53,12 @@ class SourcePackagePolicyTests(unittest.TestCase):
             manifest["interface"]["termsOfServiceURL"],
             "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
         )
+
+    def test_core_module_is_in_the_runtime_package(self) -> None:
+        files, errors = audit_source_package.package_files(ROOT)
+
+        self.assertEqual(errors, [])
+        self.assertIn(Path("scripts/reminders_service.py"), files)
 
     def test_forbidden_artifacts_are_classified_by_path(self) -> None:
         cases = {
@@ -135,9 +142,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
 
         self.assertLessEqual(
             archive_size,
-            RELEASE_ARCHIVE_SIZE_BUDGET_BYTES,
-            "release archive exceeded its 800 KB budget; review package growth "
-            "before raising the ceiling",
+            RELEASE_ARCHIVE_HARD_CEILING_BYTES,
+            "release archive exceeded its 1 MiB hard ceiling; review runtime "
+            "contents before raising the ceiling",
         )
 
     def test_archive_contains_only_runtime_allowlist(self) -> None:

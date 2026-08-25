@@ -204,8 +204,9 @@ Reminders, or read reminder rows. Use `--plugin-root` to compare another clean
 checkout on the same machine. A p95 budget failure exits with status 2; use
 `--no-enforce-performance-gates` only for an advisory diagnostic run. Timing
 is end-to-end subprocess wall time, including Python/process startup. It varies
-with host load and is not a cross-machine score; the deterministic release
-archive has a CI-tested 800,000-byte budget.
+with host load and is not a cross-machine score. The deterministic allowlist is
+the package-content boundary, benchmarks expose exact source/archive bytes, and
+CI applies a 1 MiB hard ceiling against gross growth.
 
 ## Deterministic Source Package
 
