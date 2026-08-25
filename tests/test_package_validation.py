@@ -38,6 +38,23 @@ class PluginValidationTests(unittest.TestCase):
         )
         self.assertEqual(entry["category"], "Productivity")
 
+    def test_readme_has_a_doctor_free_install_upgrade_and_uninstall_path(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        quick_start = readme.split("## Quick Start", 1)[1].split("## Release Status", 1)[0]
+
+        self.assertIn(
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0",
+            quick_start,
+        )
+        self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)
+        self.assertIn("오늘 할 일 보여줘", quick_start)
+        self.assertNotIn("doctor", quick_start.casefold())
+        self.assertIn("## Upgrade", readme)
+        self.assertIn("## Uninstall", readme)
+        self.assertIn("codex plugin remove apple-reminders@oscar-v4-reminders", readme)
+        self.assertIn("macOS 14 or newer", readme)
+        self.assertIn("Python 3.11 or newer", readme)
+
     def test_manifest_reuses_one_reviewed_brand_asset(self) -> None:
         manifest = json.loads(
             (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")

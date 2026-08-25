@@ -1,14 +1,75 @@
 # Apple Reminders Codex Plugin
 
-Apple Reminders is an experimental, local macOS Codex plugin. It provides a
-bundled stdio MCP server, task-oriented skills, and narrow adapters for reading
-and changing the current user's Apple Reminders data.
+Apple Reminders is a local macOS Codex plugin being prepared for its first 0.3
+public beta. It provides a bundled stdio MCP server, task-oriented skills, and
+narrow adapters for reading and changing the current user's Apple Reminders
+data.
 
 This is not an Apple-supported integration, an App Store component, or a claim
 of stable compatibility with every macOS release. Public APIs are preferred.
 Some advanced operations rely on private frameworks or the private Reminders
 store and must pass build-, permission-, schema-, and read-back gates at run
 time.
+
+## Quick Start
+
+The commands below target the tagged 0.3.0 repo-marketplace release. Until that
+tag exists, treat this repository as development source rather than a finished
+installer.
+
+```bash
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
+codex plugin add apple-reminders@oscar-v4-reminders
+```
+
+Start a new Codex task so it loads the installed tools and skills, then try one
+of these prompts:
+
+```text
+오늘 할 일 보여줘.
+쇼핑 목록에 우유 사기를 추가해줘.
+```
+
+The first operation that needs Apple Reminders will cause macOS to request
+Reminders access for the app running Codex. Approve it only if the displayed
+app and requested operation are expected. A normal first task does not require
+diagnostics or private-interface setup.
+
+Supported source-beta environment:
+
+- macOS 14 or newer with Apple Reminders available for the current user.
+- Python 3.11 or newer.
+- Xcode command-line tools while native helpers are distributed as source.
+
+Native Extension operations such as image attachments and sections may rely on
+version-sensitive Apple interfaces. Core Reminder work remains separate from
+those capabilities.
+
+## Upgrade
+
+Refresh the pinned marketplace snapshot, reinstall the plugin, and start a new
+Codex task:
+
+```bash
+codex plugin marketplace upgrade oscar-v4-reminders
+codex plugin add apple-reminders@oscar-v4-reminders
+```
+
+Read [CHANGELOG.md](CHANGELOG.md) before crossing a minor or major version.
+
+## Uninstall
+
+Remove the installed plugin without changing Apple Reminders data:
+
+```bash
+codex plugin remove apple-reminders@oscar-v4-reminders
+```
+
+To remove the marketplace source as well, run
+`codex plugin marketplace remove oscar-v4-reminders`. Plugin removal does not
+delete optional local journals, caches, or Snapshots. Review
+[PRIVACY.md](PRIVACY.md) and inspect the documented local-data directories
+before choosing whether to remove them separately.
 
 ## Release Status
 
@@ -66,8 +127,8 @@ device/UI observation.
 
 ## Requirements
 
-- macOS with Apple Reminders available for the current user.
-- Python 3.10 or newer.
+- macOS 14 or newer with Apple Reminders available for the current user.
+- Python 3.11 or newer.
 - Xcode command-line tools for non-linking syntax checks and locally compiled
   native helpers.
 - Reminders access for EventKit and, when used, Automation access for
@@ -75,9 +136,10 @@ device/UI observation.
 - Explicit acceptance of the private-interface risk before using ReminderKit
   or SQLite-backed advanced operations.
 
-Do not assume support solely from the OS version. Run the doctor after macOS or
-Reminders updates and treat an unknown schema, missing entitlement/permission,
-or failed helper check as a blocked capability.
+Do not assume Native Extension support solely from the OS version. When a
+specific operation reports an environment or native-capability failure, run
+targeted summary diagnosis and treat an unknown schema, missing permission, or
+failed runtime probe as limited to the affected capability.
 
 ## Local Validation
 
@@ -214,11 +276,13 @@ Depending on the commands used, the adapter can create data under:
 These locations can contain sensitive identifiers, cached titles/list names,
 operation metadata, compiled helpers, capability records, and optional
 recovery snapshots. Multi-label tag cleanup uses a single-database SQLite
-online backup. Cross-store attachment repair keeps the broader best-effort
-container archive. Managed database backups keep at most five/100 MB; managed
-container archives keep at most two/300 MB. Explicit user-selected backup
-paths are not auto-pruned. See [PRIVACY.md](PRIVACY.md) before enabling
-advanced writes or sharing diagnostic output.
+online Snapshot. Cross-store attachment repair keeps the broader best-effort
+container archive. Managed database Snapshots target five/100 MB and managed
+container archives target two/300 MB by pruning older managed files. The newest
+protected file is currently retained even when it alone exceeds that budget,
+so these values are not hard storage caps. Explicit user-selected paths are not
+auto-pruned. See [PRIVACY.md](PRIVACY.md) before enabling Maintenance writes or
+sharing diagnostic output.
 
 ## OpenMinis Boundary
 
@@ -239,7 +303,8 @@ local evidence.
 
 ## License and Contributions
 
-See [LICENSE](LICENSE), [PRIVACY.md](PRIVACY.md), and the upstream
+See [LICENSE](LICENSE), [PRIVACY.md](PRIVACY.md), [TERMS.md](TERMS.md),
+[SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and the upstream
 [contribution guide](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
 Do not include real reminder data, screenshots, databases, archives, backups,
 journals, or caches in issues, fixtures, commits, or release artifacts.
