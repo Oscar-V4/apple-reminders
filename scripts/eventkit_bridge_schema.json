@@ -15,6 +15,7 @@
         "request_access",
         "list_accounts",
         "list_calendars",
+        "ensure_reminder_list",
         "fetch_reminders",
         "read_reminder",
         "create_reminder",
@@ -26,6 +27,7 @@
       ]
     },
     "source_id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 512},
     "writable_only": {"type": "boolean"},
     "reminder_id": {"type": "string", "minLength": 1},
     "calendar_id": {"type": "string", "minLength": 1},

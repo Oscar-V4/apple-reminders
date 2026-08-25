@@ -52,6 +52,7 @@ OPERATIONS = {
     "request_access",
     "list_accounts",
     "list_calendars",
+    "ensure_reminder_list",
     "fetch_reminders",
     "read_reminder",
     "create_reminder",
@@ -63,6 +64,7 @@ OPERATIONS = {
 }
 
 MUTATION_OPERATIONS = {
+    "ensure_reminder_list",
     "create_reminder",
     "update_reminder",
     "complete_reminder",
@@ -754,6 +756,16 @@ def normalize_request(raw: Any) -> dict[str, Any]:
             normalized["source_id"] = normalized_string(request["source_id"], "$.source_id")
         if "writable_only" in request:
             normalized["writable_only"] = normalized_bool(request["writable_only"], "$.writable_only")
+        return normalized
+    if operation == "ensure_reminder_list":
+        reject_unknown(request, COMMON | {"source_id", "name"})
+        require_fields(request, {"source_id", "name"})
+        normalized["source_id"] = normalized_string(
+            request["source_id"], "$.source_id", maximum=2_048
+        )
+        normalized["name"] = normalized_string(
+            request["name"], "$.name", maximum=512
+        ).strip()
         return normalized
     if operation == "read_reminder":
         reject_unknown(request, COMMON | {"reminder_id"})

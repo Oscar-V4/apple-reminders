@@ -13,6 +13,7 @@ static NSArray<NSString *> *BridgeOperations(void) {
         @"request_access",
         @"list_accounts",
         @"list_calendars",
+        @"ensure_reminder_list",
         @"fetch_reminders",
         @"read_reminder",
         @"create_reminder",
@@ -272,6 +273,7 @@ static NSDictionary *Capabilities(void) {
             @"exact_reminder" : @YES,
         },
         @"writes" : @{
+            @"ensure_list" : @YES,
             @"create" : @YES,
             @"update" : @YES,
             @"complete" : @YES,
@@ -939,6 +941,18 @@ static EKCalendar *CalendarByIdentifier(EKEventStore *store, NSString *identifie
     return calendar;
 }
 
+static EKSource *SourceByIdentifier(EKEventStore *store, NSString *identifier) {
+    for (EKSource *source in store.sources) {
+        if ([source.sourceIdentifier isEqualToString:identifier]) {
+            return source;
+        }
+    }
+    RaiseRequest(@"source_not_found",
+                 @"Reminder source was not found",
+                 @"not_found",
+                 @{ @"source_id" : identifier });
+}
+
 static EKReminder *ReminderByIdentifier(EKEventStore *store, NSString *identifier) {
     EKCalendarItem *item = [store calendarItemWithIdentifier:identifier];
     if (![item isKindOfClass:[EKReminder class]]) {
@@ -1513,6 +1527,133 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
             [items addObject:CalendarJSON(calendar)];
         }
         return BridgeResponse(operation, @"verified", @{ @"items" : items }, nil);
+    }
+    if ([operation isEqualToString:@"ensure_reminder_list"]) {
+        NSString *operationID = NewOperationIdentifier();
+        NSString *sourceID = RequiredString(request, @"source_id");
+        NSString *name = RequiredString(request, @"name");
+        EKSource *source = SourceByIdentifier(store, sourceID);
+        NSMutableArray<EKCalendar *> *matches = [NSMutableArray array];
+        for (EKCalendar *calendar in [store calendarsForEntityType:EKEntityTypeReminder]) {
+            if ([calendar.source.sourceIdentifier isEqualToString:sourceID] &&
+                [calendar.title isEqualToString:name]) {
+                [matches addObject:calendar];
+            }
+        }
+        [matches sortUsingComparator:^NSComparisonResult(EKCalendar *left, EKCalendar *right) {
+            return [left.calendarIdentifier compare:right.calendarIdentifier];
+        }];
+        if (matches.count > 0) {
+            EKCalendar *existing = matches.firstObject;
+            NSDictionary *list = CalendarJSON(existing);
+            NSArray *warnings = matches.count > 1
+                ? @[
+                      @{
+                          @"code" : @"duplicate_list_name_in_source",
+                          @"message" : @"More than one reminder list in this source has the exact name; the first stable identifier was returned.",
+                      },
+                  ]
+                : nil;
+            return MutationReceipt(
+                operation,
+                operationID,
+                @"unchanged",
+                @{
+                    @"list_id" : existing.calendarIdentifier ?: @"",
+                    @"source_id" : sourceID,
+                },
+                list,
+                list,
+                @{
+                    @"state" : @"not_needed",
+                    @"matched" : @YES,
+                    @"write_performed" : @NO,
+                    @"final_read" : @YES,
+                },
+                EventKitRecovery(NO),
+                warnings,
+                nil);
+        }
+
+        EKCalendar *calendar = [EKCalendar calendarForEntityType:EKEntityTypeReminder
+                                                      eventStore:store];
+        calendar.title = name;
+        calendar.source = source;
+        NSError *saveError = nil;
+        BOOL saved = [store saveCalendar:calendar commit:YES error:&saveError];
+        if (!saved) {
+            return Failure(operation,
+                           @"eventkit_calendar_save_failed",
+                           saveError.localizedDescription ?: @"EventKit could not save the reminder list",
+                           @"runtime",
+                           @{
+                               @"source_id" : sourceID,
+                               @"native_domain" : saveError.domain ?: (id)[NSNull null],
+                               @"native_code" : saveError == nil ? (id)[NSNull null] : @(saveError.code),
+                           });
+        }
+        NSString *calendarID = calendar.calendarIdentifier;
+        EKCalendar *readBack = calendarID == nil ? nil : [store calendarWithIdentifier:calendarID];
+        BOOL verified =
+            readBack != nil &&
+            [readBack.title isEqualToString:name] &&
+            [readBack.source.sourceIdentifier isEqualToString:sourceID];
+        if (!verified) {
+            NSString *message = @"The reminder list was saved, but its exact EventKit read-back could not be verified.";
+            return MutationReceipt(
+                operation,
+                operationID,
+                @"committed_verification_pending",
+                @{
+                    @"list_id" : calendarID ?: (id)[NSNull null],
+                    @"source_id" : sourceID,
+                },
+                @{},
+                readBack == nil ? @{} : CalendarJSON(readBack),
+                @{
+                    @"state" : @"pending",
+                    @"write_performed" : @YES,
+                    @"final_read" : @NO,
+                },
+                @{
+                    @"semantics" : @"list_may_exist_read_lists_before_retry",
+                    @"automatic_retry_safe" : @NO,
+                },
+                @[
+                    @{
+                        @"code" : @"eventkit_list_read_back_pending",
+                        @"message" : message,
+                    },
+                ],
+                BridgeError(@"eventkit_list_read_back_pending",
+                            message,
+                            @"verification",
+                            YES,
+                            @{ @"source_id" : sourceID }));
+        }
+        NSDictionary *list = CalendarJSON(readBack);
+        return MutationReceipt(
+            operation,
+            operationID,
+            @"verified",
+            @{
+                @"list_id" : readBack.calendarIdentifier ?: @"",
+                @"source_id" : sourceID,
+            },
+            @{},
+            list,
+            @{
+                @"state" : @"read_back",
+                @"write_performed" : @YES,
+                @"final_read" : @YES,
+                @"matched" : @YES,
+            },
+            @{
+                @"semantics" : @"delete_list_in_reminders",
+                @"automatic_retry_safe" : @YES,
+            },
+            nil,
+            nil);
     }
     if ([operation isEqualToString:@"fetch_reminders"]) {
         return FetchReminders(store, request, operation);

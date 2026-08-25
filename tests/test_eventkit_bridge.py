@@ -21,6 +21,43 @@ SPEC.loader.exec_module(eventkit_bridge)
 
 
 class EventKitRequestValidationTests(unittest.TestCase):
+    def test_ensure_list_requires_an_exact_source_and_normalizes_name(self) -> None:
+        normalized = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "ensure_reminder_list",
+                "source_id": "SOURCE-ICLOUD",
+                "name": "  Work  ",
+            }
+        )
+
+        self.assertEqual(
+            normalized,
+            {
+                "schema_version": 1,
+                "operation": "ensure_reminder_list",
+                "source_id": "SOURCE-ICLOUD",
+                "name": "Work",
+            },
+        )
+
+    def test_ensure_list_rejects_unscoped_or_styling_fields(self) -> None:
+        cases = [
+            {"name": "Work"},
+            {"source_id": "SOURCE-ICLOUD", "name": "Work", "emblem": "briefcase"},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(
+                eventkit_bridge.BridgeValidationError
+            ):
+                eventkit_bridge.normalize_request(
+                    {
+                        "schema_version": 1,
+                        "operation": "ensure_reminder_list",
+                        **fields,
+                    }
+                )
+
     def test_timed_due_keeps_named_zone_and_canonical_offset(self) -> None:
         normalized = eventkit_bridge.normalize_request(
             {
