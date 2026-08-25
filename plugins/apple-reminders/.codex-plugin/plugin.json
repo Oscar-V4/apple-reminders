@@ -1,0 +1,45 @@
+{
+  "name": "apple-reminders",
+  "version": "0.3.0",
+  "description": "Manage Apple Reminders through a local MCP and macOS adapters with explicit verification and private-API trust boundaries.",
+  "author": {
+    "name": "Soo",
+    "url": "https://github.com/Oscar-V4"
+  },
+  "homepage": "https://github.com/Oscar-V4/apple-reminders",
+  "repository": "https://github.com/Oscar-V4/apple-reminders",
+  "license": "MIT",
+  "keywords": [
+    "apple-reminders",
+    "reminders",
+    "tasks",
+    "productivity",
+    "attachments",
+    "local-mcp",
+    "macos",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Apple Reminders",
+    "shortDescription": "Manage reminders with explicit local trust boundaries",
+    "longDescription": "Inspect and change Apple Reminders through a local stdio MCP. Public macOS APIs are preferred; advanced fields use version-sensitive private interfaces and report verification limits explicitly.",
+    "developerName": "Soo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Oscar-V4/apple-reminders",
+    "privacyPolicyURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Oscar-V4/apple-reminders/blob/main/TERMS.md",
+    "defaultPrompt": [
+      "Brief, capture, organize, or safely update my Apple Reminders"
+    ],
+    "brandColor": "#007AFF",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
+    "logoDark": "./assets/icon.png"
+  }
+}

@@ -13,8 +13,9 @@ from unittest import mock
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ADAPTER_PATH = ROOT / "scripts" / "reminders_adapter.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 SPEC = importlib.util.spec_from_file_location("reminders_adapter", ADAPTER_PATH)
 assert SPEC and SPEC.loader
 reminders_adapter = importlib.util.module_from_spec(SPEC)
@@ -138,7 +139,7 @@ class ListSectionScopeTests(unittest.TestCase):
                     "--limit",
                     "10",
                 ],
-                cwd=ROOT,
+                cwd=PLUGIN_ROOT,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -154,6 +155,64 @@ class ListSectionScopeTests(unittest.TestCase):
         self.assertEqual(section["ZDISPLAYNAME"], "Work")
         self.assertEqual(section["list_id"], second_list)
         self.assertEqual(section["list_name"], "Inbox")
+
+
+class TagScopeTests(unittest.TestCase):
+    def test_account_filter_is_applied_before_the_tag_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "tag-accounts.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    """
+                    create table ZREMCDHASHTAGLABEL (
+                        Z_PK integer primary key,
+                        ZNAME text,
+                        ZCANONICALNAME text,
+                        ZACCOUNTIDENTIFIER text,
+                        ZUUIDFORCHANGETRACKING blob,
+                        ZFIRSTOCCURRENCECREATIONDATE real,
+                        ZRECENCYDATE real
+                    );
+                    create table ZREMCDOBJECT (
+                        Z_PK integer primary key,
+                        ZHASHTAGLABEL integer,
+                        Z_ENT integer,
+                        ZMARKEDFORDELETION integer
+                    );
+                    insert into ZREMCDHASHTAGLABEL values
+                        (1, 'aaa-other', 'aaa-other', 'ACCOUNT-OTHER', null, null, null),
+                        (2, 'zzz-target', 'zzz-target', 'ACCOUNT-TARGET', null, null, null);
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "list_tags",
+                    "--db",
+                    str(database),
+                    "--account-id",
+                    "ACCOUNT-TARGET",
+                    "--limit",
+                    "1",
+                ],
+                cwd=PLUGIN_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual([tag["name"] for tag in payload["tags"]], ["zzz-target"])
+        self.assertFalse(payload["truncated"])
 
 
 class ImageCommandBoundaryTests(unittest.TestCase):
@@ -195,7 +254,7 @@ class ImageCommandBoundaryTests(unittest.TestCase):
             for command in commands:
                 completed = subprocess.run(
                     [sys.executable, str(ADAPTER_PATH), *command],
-                    cwd=ROOT,
+                    cwd=PLUGIN_ROOT,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -1557,17 +1616,21 @@ class CacheHelperTests(unittest.TestCase):
 
 class PluginMetadataTests(unittest.TestCase):
     def test_mit_plugin_manifest_has_license_file(self) -> None:
-        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
 
         self.assertEqual(manifest["license"], "MIT")
-        self.assertTrue(any(ROOT.glob("LICENSE*")))
+        self.assertTrue(any(PLUGIN_ROOT.glob("LICENSE*")))
 
     def test_plugin_manifest_asset_paths_exist(self) -> None:
-        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
         interface = manifest["interface"]
 
         for key in ("composerIcon", "logo", "logoDark"):
-            path = ROOT / interface[key]
+            path = PLUGIN_ROOT / interface[key]
             self.assertTrue(path.exists(), f"{key} does not exist: {path}")
 
 

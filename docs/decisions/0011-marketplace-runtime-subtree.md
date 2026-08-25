@@ -11,3 +11,9 @@ The repo marketplace will point to `./plugins/apple-reminders`, which will conta
 ## Consequences
 
 Runtime code and resources move once and remain single-source under `plugins/apple-reminders`; repository tools and tests address that root explicitly. Runtime files must not reach back to the parent repository. Source-only test dependency injection replaces the current `PLUGIN_ROOT/tests/test_mcp_server.py` presence check before the move. The marketplace can then be installed with a sparse checkout of only `.agents/plugins` and `plugins/apple-reminders`.
+
+GitHub-facing `README`, changelog, license, privacy, security, support, and
+terms documents remain canonical at the repository root so repository hosting
+and policy links keep working. Byte-identical copies live in the runtime
+subtree for offline installs; CI compares their SHA-256 digests and fails on
+drift. Executable code, schemas, skills, and assets are never duplicated.

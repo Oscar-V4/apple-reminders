@@ -10,7 +10,7 @@ A first-time macOS Codex user can install one plugin, immediately perform routin
 
 ## Public Interface
 
-The default MCP tool list contains exactly these 15 tools.
+The default MCP tool list contains exactly these 13 tools.
 
 ### Core
 
@@ -21,20 +21,18 @@ The default MCP tool list contains exactly these 15 tools.
 5. `create_reminder`
 6. `change_reminder`
 7. `delete_reminder`
+8. `ensure_reminder_list`
 
 ### Native Extension
 
-8. `inspect_reminder_native`
-9. `ensure_reminder_list`
+9. `inspect_reminder_native`
 10. `create_reminder_section`
 11. `organize_reminder`
 12. `change_reminder_attachment`
 
-### Maintenance
+### Diagnostics
 
 13. `diagnose_reminders`
-14. `preview_reminders_maintenance`
-15. `apply_reminders_maintenance`
 
 The tool count is a reviewable release Interface, not the product goal. A future recognizable user goal may justify a new tool.
 
@@ -81,23 +79,19 @@ The tool count is a reviewable release Interface, not the product goal. A future
 - Flag mutation is not promised until a typed, exact-ID, read-back-verified Interface exists.
 - `show_reminder` is absent until exact UI selection can be observed; opening the app alone is not `verified`.
 
-### Maintenance
+### Diagnostics and withheld maintenance
 
-- `diagnose_reminders` runs a content-free Core summary by default and probes only the requested problem area.
+- `diagnose_reminders` runs one content-free diagnosis, defaults to a small Core summary, and reports only the requested area.
 - A missing framework path cannot by itself prove that a dyld-shared-cache capability is blocked.
-- `preview_reminders_maintenance` supports bounded unused-tag cleanup, attachment repair, and local-log cleanup plans.
-- A preview returns an opaque, expiring plan token bound to candidates, scope, schema/environment fingerprint, Revisions, and truncation state.
-- `apply_reminders_maintenance` accepts only an unexpired untruncated plan token and revalidates it under lock.
-- Risky apply operations create a pre-mutation Snapshot only after proving its retention budget; budget failure happens before mutation.
-- Snapshot behavior is not called restore or recovery until restoration is implemented and verified.
+- Unused-tag cleanup, attachment repair, local-log deletion, backup, and Snapshot operations remain internal in 0.3. They are not normal Reminder work and are withheld until a complete preview/apply contract and verified restoration story justify their public cost and risk.
 - Disposable cache and deprecated DB-first write commands are not part of the public runtime Interface.
 
 ### Schemas and annotations
 
-- Every tool has a closed input schema and an output schema.
+- Every tool has a closed, bounded input schema. MCP `outputSchema` is optional and is intentionally not duplicated into `tools/list`; the 13-tool discovery contract stays below 32 KiB while centralized Module validators and boundary tests enforce result envelopes and mutation Receipts.
 - Size, count, date-range, cursor, selector, and path bounds are explicit.
 - Annotations describe local private-state effects accurately; URL attachment is not marked as open-world public-web access.
-- MCP text output is concise and does not duplicate large structured payloads.
+- Structured results always include `schema_version` and `operation`. MCP text output is a concise status summary and does not duplicate large structured payloads.
 
 ## Behavior migration
 
@@ -115,8 +109,7 @@ The tool count is a reviewable release Interface, not the product goal. A future
 | tag changes and section move | `organize_reminder` |
 | image/URL attach, replace, delete | `change_reminder_attachment` |
 | Doctor | `diagnose_reminders` |
-| unused-tag and attachment-repair preview | `preview_reminders_maintenance` |
-| destructive maintenance apply and log purge | `apply_reminders_maintenance` |
+| unused-tag cleanup, attachment repair, backup, and log purge | withheld internal maintenance |
 | UI handoff | withheld pending exact-selection evidence |
 
 The deprecated adapter CLI may exist temporarily only as an internal migration seam. Skills and the public MCP must not fall back to it.
@@ -126,7 +119,7 @@ The deprecated adapter CLI may exist temporarily only as an internal migration s
 Tests observe behavior only through these agreed Interfaces.
 
 1. MCP schema and dispatch Interface.
-2. Core, Native Extension, and Maintenance Module Interfaces with deterministic Adapters.
+2. Core, Native Extension, and Diagnostics Module Interfaces with deterministic Adapters.
 3. Opt-in live Reminders smoke Interface on a disposable list.
 4. Installed release artifact Interface from a clean unpacked package.
 
@@ -153,4 +146,4 @@ Replace shallow route tests once the same behavior is protected at a new Interfa
 
 ## Completion gate
 
-The beta is ready only when all 15 tools satisfy their output schemas, every migrated behavior above has execution evidence, no old skill depends on a removed route, the packaged fresh-install flow passes, and a two-axis Standards/Spec review has no unresolved release-blocking finding.
+The beta is ready only when all 13 tools satisfy their centralized result contracts, every migrated behavior above has execution evidence, no old skill depends on a removed route, the packaged fresh-install flow passes, and a two-axis Standards/Spec review has no unresolved release-blocking finding.

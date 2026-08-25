@@ -26,7 +26,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+ROOT = PLUGIN_ROOT
+DEV_SCRIPTS_DIR = REPO_ROOT / "scripts"
 PYTHON = sys.executable
 P95_BUDGETS_MS = {
     "mcp_initialize_tools_list": 300.0,
@@ -198,7 +201,7 @@ def git_value(*args: str, root: Path = ROOT) -> str | None:
 
 def package_snapshot(root: Path = ROOT) -> dict[str, Any]:
     completed = subprocess.run(
-        [PYTHON, str(root / "scripts" / "audit_source_package.py"), str(root), "--json"],
+        [PYTHON, str(DEV_SCRIPTS_DIR / "audit_source_package.py"), str(root), "--json"],
         cwd=root,
         text=True,
         stdout=subprocess.PIPE,
@@ -213,7 +216,7 @@ def package_snapshot(root: Path = ROOT) -> dict[str, Any]:
         built = subprocess.run(
             [
                 PYTHON,
-                str(root / "scripts" / "build_source_package.py"),
+                str(DEV_SCRIPTS_DIR / "build_source_package.py"),
                 str(root),
                 "--output-directory",
                 output,
@@ -267,7 +270,10 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
-        "params": {"name": "reminders_plugin_doctor", "arguments": {}},
+        "params": {
+            "name": "diagnose_reminders",
+            "arguments": {"scope": "core", "detail_level": "summary"},
+        },
     }
     doctor_stdin = json.dumps(initialize) + "\n" + json.dumps(doctor_call) + "\n"
     eventkit_stdin = json.dumps(
@@ -318,7 +324,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
                 "source_package_audit",
                 (
                     PYTHON,
-                    str(root / "scripts" / "audit_source_package.py"),
+                    str(DEV_SCRIPTS_DIR / "audit_source_package.py"),
                     str(root),
                     "--json",
                 ),
@@ -383,7 +389,7 @@ def collect_payload(args: argparse.Namespace) -> dict[str, Any]:
                     "deterministic_package_build",
                     (
                         PYTHON,
-                        str(root / "scripts" / "build_source_package.py"),
+                        str(DEV_SCRIPTS_DIR / "build_source_package.py"),
                         str(root),
                         "--output-directory",
                         output,
@@ -446,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         "--plugin-root",
         type=Path,
         default=ROOT,
-        help="Plugin checkout to benchmark (defaults to this script's repository)",
+        help="Plugin runtime root to benchmark (defaults to plugins/apple-reminders)",
     )
     parser.add_argument("--samples", type=int, default=15)
     parser.add_argument("--warmups", type=int, default=3)

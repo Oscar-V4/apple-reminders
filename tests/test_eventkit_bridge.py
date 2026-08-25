@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import stat
 import subprocess
 import sys
@@ -11,9 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-BRIDGE_PATH = ROOT / "scripts" / "eventkit_bridge.py"
-SCHEMA_PATH = ROOT / "scripts" / "eventkit_bridge_schema.json"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
+SCHEMA_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge_schema.json"
 SPEC = importlib.util.spec_from_file_location("eventkit_bridge", BRIDGE_PATH)
 assert SPEC and SPEC.loader
 eventkit_bridge = importlib.util.module_from_spec(SPEC)
@@ -260,6 +262,24 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unbounded_read")
 
+    def test_fetch_rejects_status_any(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "fetch_reminders",
+                    "calendar_ids": ["CALENDAR-1"],
+                    "status": "any",
+                    "limit": 50,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_enum")
+        self.assertEqual(
+            str(raised.exception),
+            "$.status must be incomplete or completed",
+        )
+
     def test_bounded_fetch_normalizes_pagination_defaults(self) -> None:
         normalized = eventkit_bridge.normalize_request(
             {
@@ -287,7 +307,7 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unbounded_read")
 
-    def test_completed_due_range_requires_calendar_or_completion_bound(self) -> None:
+    def test_completed_due_range_does_not_replace_completion_range(self) -> None:
         with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
             eventkit_bridge.normalize_request(
                 {
@@ -300,7 +320,25 @@ class EventKitRequestValidationTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(raised.exception.code, "unbounded_read")
+        self.assertEqual(raised.exception.code, "missing_completion_range")
+
+    def test_completed_fetch_requires_completion_range_even_for_calendar_scope(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "fetch_reminders",
+                    "calendar_ids": ["CALENDAR-1"],
+                    "status": "completed",
+                    "limit": 50,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "missing_completion_range")
+        self.assertEqual(
+            str(raised.exception),
+            "status=completed requires both $.completion_start and $.completion_end",
+        )
 
     def test_incomplete_due_range_is_a_native_eventkit_bound(self) -> None:
         normalized = eventkit_bridge.normalize_request(
@@ -315,6 +353,85 @@ class EventKitRequestValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(normalized["status"], "incomplete")
+
+    def test_incomplete_fetch_rejects_due_range_over_366_days(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "fetch_reminders",
+                    "status": "incomplete",
+                    "due_start": "2026-01-01T00:00:00Z",
+                    "due_end": "2027-01-03T00:00:00Z",
+                    "limit": 50,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "range_too_wide")
+        self.assertEqual(
+            str(raised.exception),
+            "$.due_start/$.due_end span must not exceed 366 days",
+        )
+
+    def test_completed_fetch_rejects_completion_range_over_90_days(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "fetch_reminders",
+                    "status": "completed",
+                    "completion_start": "2026-01-01T00:00:00Z",
+                    "completion_end": "2026-04-02T00:00:00Z",
+                    "limit": 50,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "range_too_wide")
+        self.assertEqual(
+            str(raised.exception),
+            "$.completion_start/$.completion_end span must not exceed 90 days",
+        )
+
+    def test_fetch_accepts_exact_maximum_date_ranges(self) -> None:
+        incomplete = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "fetch_reminders",
+                "status": "incomplete",
+                "due_start": "2026-01-01T00:00:00Z",
+                "due_end": "2027-01-02T00:00:00Z",
+                "limit": 50,
+            }
+        )
+        completed = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "fetch_reminders",
+                "calendar_ids": ["CALENDAR-1"],
+                "status": "completed",
+                "completion_start": "2026-01-01T00:00:00Z",
+                "completion_end": "2026-04-01T00:00:00Z",
+                "limit": 50,
+            }
+        )
+
+        self.assertEqual(incomplete["status"], "incomplete")
+        self.assertEqual(completed["status"], "completed")
+
+    def test_incomplete_fetch_rejects_completion_range_as_its_only_scope(self) -> None:
+        with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+            eventkit_bridge.normalize_request(
+                {
+                    "schema_version": 1,
+                    "operation": "fetch_reminders",
+                    "status": "incomplete",
+                    "completion_start": "2026-01-01T00:00:00Z",
+                    "completion_end": "2026-01-31T00:00:00Z",
+                    "limit": 50,
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "unbounded_read")
 
     def test_existing_item_write_requires_last_modified_precondition(self) -> None:
         with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
@@ -408,7 +525,9 @@ class EventKitRequestValidationTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "invalid_identifier")
 
     def test_native_delete_does_not_claim_missing_identifier_was_already_deleted(self) -> None:
-        source = (ROOT / "scripts" / "reminders_eventkit.m").read_text(encoding="utf-8")
+        source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
 
         self.assertNotIn('@"already_absent"', source)
         self.assertIn(
@@ -550,6 +669,11 @@ class EventKitContractTests(unittest.TestCase):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
         self.assertEqual(
+            schema["properties"]["status"]["enum"],
+            ["incomplete", "completed"],
+        )
+
+        self.assertEqual(
             set(schema["x-response-statuses"]),
             {
                 "unchanged",
@@ -561,6 +685,20 @@ class EventKitContractTests(unittest.TestCase):
         )
 
         self.assertEqual(set(schema["x-error-codes"]), eventkit_bridge.STABLE_ERROR_CODES)
+
+    def test_helper_and_bundle_match_the_documented_macos_14_minimum(self) -> None:
+        helper = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
+        bridge = BRIDGE_PATH.read_text(encoding="utf-8")
+        info = plistlib.loads(
+            (PLUGIN_ROOT / "scripts" / "eventkit_bridge_info.plist").read_bytes()
+        )
+
+        self.assertIn("requestFullAccessToRemindersWithCompletion", helper)
+        self.assertNotIn("requestAccessToEntityType", helper)
+        self.assertIn('"-mmacosx-version-min=14.0"', bridge)
+        self.assertEqual(info["LSMinimumSystemVersion"], "14.0")
 
     def test_validation_error_uses_failed_no_mutation_and_stable_code(self) -> None:
         error = eventkit_bridge.BridgeValidationError(

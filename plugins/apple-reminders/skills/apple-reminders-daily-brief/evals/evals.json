@@ -1,0 +1,56 @@
+{
+  "skill_name": "apple-reminders-daily-brief",
+  "evals": [
+    {
+      "id": 1,
+      "category": "direct",
+      "prompt": "오늘 할 일 브리핑해줘. 지난 항목, 오늘 마감, 이번 주 예정, 기한 없는 항목으로 나눠줘.",
+      "expected_output": "Reads a bounded incomplete reminder scope, resolves today's local date and timezone, runs the deterministic renderer, and returns overdue, due today, later this week, and no-due-date sections with exact IDs and no note bodies.",
+      "assertions": [
+        "Uses list_reminder_lists and fetch_reminders with exact list_ids and a limit before summarizing.",
+        "States the date and timezone basis.",
+        "Does not expose raw database paths, full JSON rows, or unrelated notes."
+      ]
+    },
+    {
+      "id": 2,
+      "category": "indirect",
+      "prompt": "내일 리마인더 브리핑을 아주 간단히 보여줘.",
+      "expected_output": "Normalizes tomorrow to an exact date, feeds bounded MCP/EventKit JSON to render_daily_brief.py, and returns a compact version of the generated sections without widening the read.",
+      "assertions": [
+        "Uses an explicit date window or bounded read.",
+        "Preserves reminder titles and IDs from tool output."
+      ]
+    },
+    {
+      "id": 3,
+      "category": "incomplete",
+      "prompt": "아까 말한 그 목록만 브리핑해줘.",
+      "expected_output": "Does not invent prior context or a list identity. It asks which Reminder List the user means or presents a bounded list choice before reading reminders.",
+      "assertions": [
+        "Does not guess a list from recency that is unavailable in the current context.",
+        "Does not run an unbounded all-list read to compensate for missing scope."
+      ]
+    },
+    {
+      "id": 4,
+      "category": "should_not_activate",
+      "prompt": "내일 오후 3시 팀 회의를 Apple Calendar에 추가해줘.",
+      "expected_output": "Does not activate the Reminders daily-brief workflow and routes the request to an Apple Calendar capability if one is available.",
+      "assertions": [
+        "Does not create or read a Reminder.",
+        "Does not reinterpret a calendar event as a due task."
+      ]
+    },
+    {
+      "id": 5,
+      "category": "unsupported_edge",
+      "prompt": "지난해 완료한 리마인더를 전 계정에서 제한 없이 전부 덤프해줘.",
+      "expected_output": "Refuses an unbounded full-history dump and asks for explicit accounts, lists, date bounds, and a page limit before any read.",
+      "assertions": [
+        "Does not bypass semantic bounds.",
+        "Does not expose note bodies or raw rows by default."
+      ]
+    }
+  ]
+}

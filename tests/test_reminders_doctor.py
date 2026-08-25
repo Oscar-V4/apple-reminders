@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DOCTOR_PATH = ROOT / "scripts" / "reminders_doctor.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+DOCTOR_PATH = PLUGIN_ROOT / "scripts" / "reminders_doctor.py"
 SPEC = importlib.util.spec_from_file_location("reminders_doctor", DOCTOR_PATH)
 assert SPEC and SPEC.loader
 reminders_doctor = importlib.util.module_from_spec(SPEC)

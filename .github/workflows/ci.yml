@@ -17,24 +17,31 @@ jobs:
   validate-and-test:
     runs-on: macos-14
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONHASHSEED: "0"
+      PLUGIN_ROOT: plugins/apple-reminders
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Validate plugin manifest, MCP, skills, and evals
-        run: python3 scripts/validate_plugin.py .
+        run: python3 scripts/validate_plugin.py "$PLUGIN_ROOT"
 
       - name: Validate portable Minis export
         run: python3 scripts/validate_minis_export.py
 
       - name: Audit runtime source allowlist
-        run: python3 scripts/audit_source_package.py . --strict-worktree
+        run: >-
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT"
+          --strict-worktree --verify-root-document-mirrors
 
       - name: Compile all Python source in memory
         run: |
@@ -55,7 +62,7 @@ jobs:
       - name: Validate EventKit request contract without live access
         run: |
           printf '%s\n' '{"schema_version":1,"operation":"capabilities"}' | \
-            python3 scripts/eventkit_bridge.py --validate-only
+            python3 "$PLUGIN_ROOT/scripts/eventkit_bridge.py" --validate-only
 
       - name: Run all synthetic unit and packaging tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -64,31 +71,33 @@ jobs:
         run: |
           clang -x objective-c -fobjc-arc \
             -framework Foundation -framework AppKit \
-            -fsyntax-only scripts/remkit_attach_image.m
+            -fsyntax-only "$PLUGIN_ROOT/scripts/remkit_attach_image.m"
           clang -x objective-c -fobjc-arc \
             -framework Foundation -framework AppKit \
-            -fsyntax-only scripts/remkit_sections.m
+            -fsyntax-only "$PLUGIN_ROOT/scripts/remkit_sections.m"
 
       - name: Check EventKit helper syntax without linking
         run: >-
           clang -x objective-c -fobjc-arc
           -framework Foundation -framework EventKit
-          -fsyntax-only scripts/reminders_eventkit.m
+          -fsyntax-only "$PLUGIN_ROOT/scripts/reminders_eventkit.m"
 
       - name: Validate EventKit helper plist
-        run: plutil -lint scripts/eventkit_bridge_info.plist
+        run: plutil -lint "$PLUGIN_ROOT/scripts/eventkit_bridge_info.plist"
 
       - name: Prove deterministic source packaging
         run: |
           mkdir -p "$RUNNER_TEMP/package-a" "$RUNNER_TEMP/package-b"
-          python3 scripts/build_source_package.py \
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
             --output-directory "$RUNNER_TEMP/package-a" > "$RUNNER_TEMP/package-a.json"
-          python3 scripts/build_source_package.py \
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
             --output-directory "$RUNNER_TEMP/package-b" > "$RUNNER_TEMP/package-b.json"
           cmp "$RUNNER_TEMP/package-a/"*.zip "$RUNNER_TEMP/package-b/"*.zip
-          python3 scripts/audit_source_package.py . \
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT" \
             --archive "$RUNNER_TEMP/package-a/"*.zip
           shasum -a 256 "$RUNNER_TEMP/package-a/"*.zip
 
       - name: Confirm checks left no forbidden source artifacts
-        run: python3 scripts/audit_source_package.py . --strict-worktree
+        run: >-
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT"
+          --strict-worktree --verify-root-document-mirrors

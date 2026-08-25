@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-BENCHMARK_PATH = ROOT / "scripts" / "benchmark_plugin.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+BENCHMARK_PATH = REPO_ROOT / "scripts" / "benchmark_plugin.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_plugin", BENCHMARK_PATH)
 assert SPEC and SPEC.loader
 benchmark_plugin = importlib.util.module_from_spec(SPEC)
@@ -67,7 +68,10 @@ class BenchmarkCliContractTests(unittest.TestCase):
         case = next(case for case in cases if case.name == "mcp_initialize_tools_list")
         requests = [json.loads(line) for line in case.stdin.splitlines()]
 
-        self.assertEqual(case.command, (benchmark_plugin.PYTHON, str(ROOT / "mcp" / "server.py")))
+        self.assertEqual(
+            case.command,
+            (benchmark_plugin.PYTHON, str(PLUGIN_ROOT / "mcp" / "server.py")),
+        )
         self.assertEqual([request["method"] for request in requests], ["initialize", "tools/list"])
 
     def test_eventkit_benchmark_runs_validation_only_request(self) -> None:
@@ -79,7 +83,7 @@ class BenchmarkCliContractTests(unittest.TestCase):
             case.command,
             (
                 benchmark_plugin.PYTHON,
-                str(ROOT / "scripts" / "eventkit_bridge.py"),
+                str(PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"),
                 "--validate-only",
             ),
         )
@@ -92,7 +96,7 @@ class BenchmarkCliContractTests(unittest.TestCase):
 
         expected_prefix = (
             benchmark_plugin.PYTHON,
-            str(ROOT / "scripts" / "eventkit_bridge.py"),
+            str(PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"),
             "--build-only",
             "--cache-dir",
         )
@@ -108,9 +112,16 @@ class BenchmarkCliContractTests(unittest.TestCase):
         case = next(case for case in cases if case.name == "mcp_doctor_route")
         requests = [json.loads(line) for line in case.stdin.splitlines()]
 
-        self.assertEqual(case.command, (benchmark_plugin.PYTHON, str(ROOT / "mcp" / "server.py")))
+        self.assertEqual(
+            case.command,
+            (benchmark_plugin.PYTHON, str(PLUGIN_ROOT / "mcp" / "server.py")),
+        )
         self.assertEqual([request["method"] for request in requests], ["initialize", "tools/call"])
-        self.assertEqual(requests[-1]["params"]["name"], "reminders_plugin_doctor")
+        self.assertEqual(requests[-1]["params"]["name"], "diagnose_reminders")
+        self.assertEqual(
+            requests[-1]["params"]["arguments"],
+            {"scope": "core", "detail_level": "summary"},
+        )
         self.assertEqual(case.environment.keys(), {"HOME"})
         self.assertNotEqual(case.environment["HOME"], str(Path.home()))
         self.assertIn("apple-reminders-benchmark-home-", case.environment["HOME"])
@@ -123,8 +134,8 @@ class BenchmarkCliContractTests(unittest.TestCase):
             case.command,
             (
                 benchmark_plugin.PYTHON,
-                str(ROOT / "scripts" / "audit_source_package.py"),
-                str(ROOT),
+                str(REPO_ROOT / "scripts" / "audit_source_package.py"),
+                str(PLUGIN_ROOT),
                 "--json",
             ),
         )
@@ -309,11 +320,14 @@ class BenchmarkRunnerTests(unittest.TestCase):
             )
 
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
-            snapshot = benchmark_plugin.package_snapshot(ROOT)
+            snapshot = benchmark_plugin.package_snapshot(PLUGIN_ROOT)
 
         self.assertEqual(snapshot["archive_bytes"], 321)
         self.assertEqual(snapshot["allowlisted_files"], 1)
-        self.assertEqual(snapshot["allowlisted_source_bytes"], (ROOT / "README.md").stat().st_size)
+        self.assertEqual(
+            snapshot["allowlisted_source_bytes"],
+            (PLUGIN_ROOT / "README.md").stat().st_size,
+        )
 
     def test_run_command_raises_when_return_code_is_not_allowed(self) -> None:
         completed = subprocess.CompletedProcess(["tool"], 2, "", "permission denied\n")

@@ -10,8 +10,9 @@ from pathlib import Path
 from types import ModuleType
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / "mcp" / "server.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SERVER = PLUGIN_ROOT / "mcp" / "server.py"
 
 TEST_ADAPTER_PATH_ENV = "APPLE_REMINDERS_TEST_HARNESS_ADAPTER_PATH"
 TEST_EVENTKIT_BRIDGE_PATH_ENV = "APPLE_REMINDERS_TEST_HARNESS_EVENTKIT_BRIDGE_PATH"

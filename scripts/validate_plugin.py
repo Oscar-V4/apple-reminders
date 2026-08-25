@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\."
     r"(0|[1-9]\d*)\."
@@ -63,6 +65,24 @@ REQUIRED_INTERFACE_FIELDS = {
 }
 PATH_INTERFACE_FIELDS = {"composerIcon", "logo", "logoDark"}
 HTTPS_INTERFACE_FIELDS = {"websiteURL", "privacyPolicyURL", "termsOfServiceURL"}
+
+PUBLIC_MCP_TOOL_NAMES = (
+    "request_reminders_access",
+    "list_reminder_lists",
+    "fetch_reminders",
+    "read_reminder",
+    "create_reminder",
+    "change_reminder",
+    "delete_reminder",
+    "inspect_reminder_native",
+    "ensure_reminder_list",
+    "create_reminder_section",
+    "organize_reminder",
+    "change_reminder_attachment",
+    "diagnose_reminders",
+)
+PUBLIC_MCP_TOOL_NAME_SET = frozenset(PUBLIC_MCP_TOOL_NAMES)
+MAX_MCP_DISCOVERY_BYTES = 32_768
 
 
 def _load_json(path: Path, errors: list[str]) -> Any:
@@ -305,18 +325,29 @@ def _extract_string_collection_members(
         elif (
             isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
-            and node.value.func.id == "set"
+            and node.value.func.id in {"set", "frozenset"}
+            and len(node.value.args) == 1
+            and not node.value.keywords
+            and isinstance(node.value.args[0], ast.Set)
+        ):
+            values = list(node.value.args[0].elts)
+        elif (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in {"set", "frozenset"}
             and not node.value.args
             and not node.value.keywords
         ):
             values = []
         else:
-            errors.append(f"{path}: MCP route collections must be literal dictionaries or sets")
+            errors.append(
+                f"{path}: MCP string collections must be literal dictionaries or sets"
+            )
             return None
         members: set[str] = set()
         for value in values:
             if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-                errors.append(f"{path}: MCP route collections must use literal strings")
+                errors.append(f"{path}: MCP string collections must use literal strings")
                 return None
             members.add(value.value)
         for name in names:
@@ -383,14 +414,15 @@ def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> Non
     schema_path = root / "schemas" / "mcp-tools.json"
     schema = _load_json(schema_path, errors)
     tool_names: set[str] | None = None
-    if not isinstance(schema, dict) or schema.get("schemaVersion") != 1:
-        errors.append("schemas/mcp-tools.json must use schemaVersion 1")
+    if not isinstance(schema, dict) or schema.get("schemaVersion") != 2:
+        errors.append("schemas/mcp-tools.json must use schemaVersion 2")
     else:
         tools = schema.get("tools")
         if not isinstance(tools, list) or not tools:
             errors.append("schemas/mcp-tools.json must define at least one tool")
         else:
             names: set[str] = set()
+            ordered_names: list[str] = []
             for index, tool in enumerate(tools):
                 if not isinstance(tool, dict) or not _nonempty_string(tool.get("name")):
                     errors.append(f"MCP tool {index} needs a string name")
@@ -399,12 +431,32 @@ def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> Non
                 if name in names:
                     errors.append(f"duplicate MCP tool name: {name}")
                 names.add(name)
+                ordered_names.append(name)
                 input_schema = tool.get("inputSchema")
                 if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
                     errors.append(f"MCP tool {name} needs an object inputSchema")
                 elif input_schema.get("additionalProperties") is not False:
                     errors.append(f"MCP tool {name} must reject unknown input fields")
+                if "outputSchema" in tool:
+                    errors.append(
+                        f"MCP tool {name} must keep outputSchema out of public discovery"
+                    )
             tool_names = names
+            if tuple(ordered_names) != PUBLIC_MCP_TOOL_NAMES:
+                errors.append(
+                    "public MCP tool contract drift: "
+                    f"expected={list(PUBLIC_MCP_TOOL_NAMES)}, actual={ordered_names}"
+                )
+            compact_bytes = len(
+                json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if compact_bytes > MAX_MCP_DISCOVERY_BYTES:
+                errors.append(
+                    "public MCP discovery contract exceeds the 32 KiB budget: "
+                    f"{compact_bytes} bytes"
+                )
 
     server_path = root / "mcp" / "server.py"
     if not server_path.is_file() or server_path.stat().st_size < 1_000:
@@ -418,25 +470,24 @@ def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> Non
     for method in ("initialize", "tools/list", "tools/call"):
         if method not in server_text:
             errors.append(f"mcp/server.py is missing MCP method {method!r}")
-    route_names = _extract_string_collection_members(
-        server_path,
-        (
-            "ROUTES",
-            "EVENTKIT_READ_ROUTES",
-            "EVENTKIT_CONTROL_ROUTES",
-            "EVENTKIT_MUTATION_ROUTES",
-            "DOCTOR_TOOLS",
-        ),
+    contract_path = root / "mcp" / "v2_contract.py"
+    contract_names = _extract_string_collection_members(
+        contract_path,
+        ("READ_TOOLS", "MUTATION_TOOLS"),
         errors,
     )
-    if route_names is not None and tool_names is not None:
-        missing_definitions = sorted(route_names - tool_names)
-        missing_routes = sorted(tool_names - route_names)
-        if missing_definitions or missing_routes:
+    if contract_names is not None:
+        if contract_names != PUBLIC_MCP_TOOL_NAME_SET:
             errors.append(
-                "MCP route/schema drift: "
-                f"routes_without_tools={missing_definitions}, "
-                f"tools_without_routes={missing_routes}"
+                "public MCP runtime contract drift: "
+                f"expected={sorted(PUBLIC_MCP_TOOL_NAME_SET)}, "
+                f"actual={sorted(contract_names)}"
+            )
+        if tool_names is not None and tool_names != contract_names:
+            errors.append(
+                "public MCP schema/runtime drift: "
+                f"schema_only={sorted(tool_names - contract_names)}, "
+                f"runtime_only={sorted(contract_names - tool_names)}"
             )
     server_version = _extract_string_assignment(server_path, "SERVER_VERSION", errors)
     plugin_version = manifest.get("version")
@@ -552,7 +603,7 @@ def validate_root(root: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("plugin", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("plugin", nargs="?", type=Path, default=PLUGIN_ROOT)
     args = parser.parse_args(argv)
     root = args.plugin.expanduser().resolve()
     errors = validate_root(root)

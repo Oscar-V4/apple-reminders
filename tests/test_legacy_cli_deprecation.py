@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ADAPTER = ROOT / "scripts/reminders_adapter.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+ADAPTER = PLUGIN_ROOT / "scripts/reminders_adapter.py"
 
 
 class LegacyCliDeprecationTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class LegacyCliDeprecationTests(unittest.TestCase):
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         completed = subprocess.run(
             [sys.executable, str(ADAPTER), "--help"],
-            cwd=ROOT,
+            cwd=PLUGIN_ROOT,
             env=environment,
             text=True,
             stdout=subprocess.PIPE,
@@ -34,7 +35,10 @@ class LegacyCliDeprecationTests(unittest.TestCase):
         ):
             self.assertIn(command, completed.stdout)
         self.assertGreaterEqual(completed.stdout.casefold().count("deprecated"), 5)
-        self.assertIn("0.3.0", completed.stdout)
+        self.assertIn("MCP create_reminder", completed.stdout)
+        self.assertIn("MCP change_reminder", completed.stdout)
+        self.assertIn("MCP delete_reminder", completed.stdout)
+        self.assertNotIn("removal planned", completed.stdout)
 
 
 if __name__ == "__main__":

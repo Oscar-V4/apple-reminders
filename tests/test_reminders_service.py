@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SCRIPTS = PLUGIN_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -19,6 +21,7 @@ from reminders_service import (  # noqa: E402
     Guard,
     MoveToListAction,
     MutationOutcome,
+    MutationOutcomeUnknown,
     PatchAction,
     ReferenceRejected,
     SetCompletionAction,
@@ -144,6 +147,86 @@ class InMemoryAdapter:
 
 
 class CoreModuleTests(unittest.TestCase):
+    def test_adapter_exception_after_dispatch_consumes_the_reference(self) -> None:
+        class ThrowingAdapter(InMemoryAdapter):
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                raise RuntimeError("native process disappeared after dispatch")
+
+        module = CoreModule(
+            ThrowingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        exact = module.read_exact("reminder-1")
+
+        with self.assertRaises(MutationOutcomeUnknown):
+            module.change(
+                exact.reference,
+                {"kind": "patch", "patch": {"title": "Possibly committed"}},
+            )
+
+        with self.assertRaises(ReferenceRejected) as consumed:
+            module.revalidate_reference(exact.reference)
+        self.assertEqual(consumed.exception.code, "invalid_reference")
+
+    def test_reference_port_revalidates_and_can_invalidate_a_shared_guard(self) -> None:
+        adapter = InMemoryAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        exact = module.read_exact("reminder-1")
+
+        guard = module.revalidate_reference(exact.reference)
+
+        self.assertEqual(guard.reminder_id, "reminder-1")
+        self.assertEqual(guard.store_identity, "store-alpha")
+        self.assertEqual(guard.public_concurrency_value, "public-revision-7")
+        module.invalidate_reference(exact.reference)
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.revalidate_reference(exact.reference)
+        self.assertEqual(raised.exception.code, "invalid_reference")
+
+    def test_reference_port_rejects_and_consumes_a_concurrently_changed_guard(self) -> None:
+        adapter = InMemoryAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        exact = module.read_exact("reminder-1")
+        adapter.external_patch("reminder-1", {"title": "Changed elsewhere"})
+
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.revalidate_reference(exact.reference)
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        with self.assertRaises(ReferenceRejected) as consumed:
+            module.revalidate_reference(exact.reference)
+        self.assertEqual(consumed.exception.code, "invalid_reference")
+
+    def test_reference_port_consumes_a_grant_when_revalidation_cannot_finish(self) -> None:
+        adapter = InMemoryAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        exact = module.read_exact("reminder-1")
+        adapter.fail_next_read = True
+
+        with self.assertRaises(RuntimeError):
+            module.revalidate_reference(exact.reference)
+
+        with self.assertRaises(ReferenceRejected) as consumed:
+            module.revalidate_reference(exact.reference)
+        self.assertEqual(consumed.exception.code, "invalid_reference")
+
     def test_exact_read_returns_reminder_and_an_opaque_reference(self) -> None:
         module = CoreModule(
             InMemoryAdapter(),

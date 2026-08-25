@@ -8,7 +8,7 @@
       "name": "apple-reminders",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./plugins/apple-reminders"
       },
       "policy": {
         "installation": "AVAILABLE",

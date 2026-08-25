@@ -1,0 +1,1593 @@
+{
+  "schemaVersion": 2,
+  "tools": [
+    {
+      "name": "request_reminders_access",
+      "description": "Explicitly request full macOS Reminders access through EventKit. This may display the system permission prompt but does not read or change Reminder content.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_reminder_lists",
+      "description": "List a bounded set of Apple Reminder Lists through EventKit, including exact account identity so duplicate display names remain distinguishable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "writable_only": {
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "fetch_reminders",
+      "description": "Fetch one semantically bounded page of Reminders through EventKit. Incomplete reads require list_ids or a due range of at most 366 days; completed reads always require a completion range of at most 90 days. Cursors are opaque and bound to the original filters, sort, and page size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "status": {
+            "enum": [
+              "incomplete",
+              "completed"
+            ],
+            "default": "incomplete"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "due_start": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20,
+            "maxLength": 64
+          },
+          "due_end": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20,
+            "maxLength": 64
+          },
+          "completion_start": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20,
+            "maxLength": 64
+          },
+          "completion_end": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20,
+            "maxLength": 64
+          },
+          "modified_after": {
+            "type": "string",
+            "format": "date-time",
+            "minLength": 20,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "sort": {
+            "enum": [
+              "due",
+              "modified",
+              "title"
+            ],
+            "default": "due"
+          },
+          "cursor": {
+            "$ref": "#/$defs/cursor"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "status": {
+                "const": "incomplete"
+              }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "list_ids"
+                ]
+              },
+              {
+                "required": [
+                  "due_start",
+                  "due_end"
+                ]
+              }
+            ]
+          },
+          {
+            "required": [
+              "status",
+              "completion_start",
+              "completion_end"
+            ],
+            "properties": {
+              "status": {
+                "const": "completed"
+              }
+            }
+          }
+        ],
+        "x-rangeConstraints": [
+          {
+            "start": "due_start",
+            "end": "due_end",
+            "maximumDays": 366
+          },
+          {
+            "start": "completion_start",
+            "end": "completion_end",
+            "maximumDays": 90
+          }
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "read_reminder",
+      "description": "Read one exact Reminder and return its full Core projection plus one opaque rev1 Reference for guarded changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "reminder_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_reminder",
+      "description": "Create one Reminder in an exact writable Reminder List. Typed due dates, alarms, recurrence, URL visibility, and create idempotency retain their existing behavior.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "minLength": 1,
+            "maxLength": 100000
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9
+          },
+          "due": {
+            "$ref": "#/$defs/due"
+          },
+          "alarms": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/$defs/alarm"
+            }
+          },
+          "recurrence_rules": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/$defs/recurrence"
+            }
+          },
+          "idempotency_key": {
+            "$ref": "#/$defs/idempotency_key"
+          }
+        },
+        "required": [
+          "list_id",
+          "title",
+          "idempotency_key"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "due": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "all_day"
+                  },
+                  "date": {
+                    "type": "string",
+                    "format": "date",
+                    "minLength": 10,
+                    "maxLength": 10
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "timed"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  },
+                  "time_zone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time",
+                  "time_zone"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "latitude": {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              },
+              "longitude": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "radius_meters": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 100000
+              }
+            },
+            "required": [
+              "title",
+              "latitude",
+              "longitude"
+            ],
+            "additionalProperties": false
+          },
+          "alarm": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "absolute"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "location"
+                  },
+                  "proximity": {
+                    "enum": [
+                      "enter",
+                      "leave"
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/location"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "proximity",
+                  "location"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "weekday": {
+            "type": "object",
+            "properties": {
+              "day": {
+                "enum": [
+                  "sunday",
+                  "monday",
+                  "tuesday",
+                  "wednesday",
+                  "thursday",
+                  "friday",
+                  "saturday"
+                ]
+              },
+              "ordinal": {
+                "type": "integer",
+                "minimum": -53,
+                "maximum": 53,
+                "not": {
+                  "const": 0
+                }
+              }
+            },
+            "required": [
+              "day"
+            ],
+            "additionalProperties": false
+          },
+          "recurrence_end": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "count"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "kind",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "date"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "recurrence": {
+            "type": "object",
+            "properties": {
+              "frequency": {
+                "enum": [
+                  "daily",
+                  "weekly",
+                  "monthly",
+                  "yearly"
+                ]
+              },
+              "interval": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999
+              },
+              "days_of_week": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/weekday"
+                }
+              },
+              "days_of_month": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 62,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -31,
+                  "maximum": 31,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "months_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                }
+              },
+              "weeks_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 106,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -53,
+                  "maximum": 53,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "days_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 732,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -366,
+                  "maximum": 366,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "set_positions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 732,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -366,
+                  "maximum": 366,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "end": {
+                "$ref": "#/$defs/recurrence_end"
+              }
+            },
+            "required": [
+              "frequency",
+              "interval"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "change_reminder",
+      "description": "Change public Reminder fields, completion state, or Reminder List membership through one closed action and one opaque fresh Reference.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "$ref": "#/$defs/reference"
+          },
+          "action": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "patch"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/patch"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "patch"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "set_completion"
+                  },
+                  "completed": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "completed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "move_to_list"
+                  },
+                  "list_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "kind",
+                  "list_id"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "reference",
+          "action"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^rev1\\.[A-Za-z0-9_-]{32,4091}$"
+          },
+          "due": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "all_day"
+                  },
+                  "date": {
+                    "type": "string",
+                    "format": "date",
+                    "minLength": 10,
+                    "maxLength": 10
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "timed"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  },
+                  "time_zone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time",
+                  "time_zone"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "latitude": {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              },
+              "longitude": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "radius_meters": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 100000
+              }
+            },
+            "required": [
+              "title",
+              "latitude",
+              "longitude"
+            ],
+            "additionalProperties": false
+          },
+          "alarm": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "absolute"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "location"
+                  },
+                  "proximity": {
+                    "enum": [
+                      "enter",
+                      "leave"
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/location"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "proximity",
+                  "location"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "weekday": {
+            "type": "object",
+            "properties": {
+              "day": {
+                "enum": [
+                  "sunday",
+                  "monday",
+                  "tuesday",
+                  "wednesday",
+                  "thursday",
+                  "friday",
+                  "saturday"
+                ]
+              },
+              "ordinal": {
+                "type": "integer",
+                "minimum": -53,
+                "maximum": 53,
+                "not": {
+                  "const": 0
+                }
+              }
+            },
+            "required": [
+              "day"
+            ],
+            "additionalProperties": false
+          },
+          "recurrence_end": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "count"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  }
+                },
+                "required": [
+                  "kind",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "date"
+                  },
+                  "date_time": {
+                    "type": "string",
+                    "format": "date-time",
+                    "minLength": 20,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "kind",
+                  "date_time"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "recurrence": {
+            "type": "object",
+            "properties": {
+              "frequency": {
+                "enum": [
+                  "daily",
+                  "weekly",
+                  "monthly",
+                  "yearly"
+                ]
+              },
+              "interval": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999
+              },
+              "days_of_week": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/weekday"
+                }
+              },
+              "days_of_month": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 62,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -31,
+                  "maximum": 31,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "months_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                }
+              },
+              "weeks_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 106,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -53,
+                  "maximum": 53,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "days_of_year": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 732,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -366,
+                  "maximum": 366,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "set_positions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 732,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": -366,
+                  "maximum": 366,
+                  "not": {
+                    "const": 0
+                  }
+                }
+              },
+              "end": {
+                "$ref": "#/$defs/recurrence_end"
+              }
+            },
+            "required": [
+              "frequency",
+              "interval"
+            ],
+            "additionalProperties": false
+          },
+          "patch": {
+            "type": "object",
+            "minProperties": 1,
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 10000
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 100000
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uri",
+                "maxLength": 100000
+              },
+              "priority": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9
+              },
+              "due": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/due"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "alarms": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "$ref": "#/$defs/alarm"
+                    }
+                  }
+                ]
+              },
+              "recurrence_rules": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "maxItems": 1,
+                    "items": {
+                      "$ref": "#/$defs/recurrence"
+                    }
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "delete_reminder",
+      "description": "Delete one exact Reminder through EventKit native deletion using a fresh opaque Reference, then verify local absence without claiming UI observation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "$ref": "#/$defs/reference"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^rev1\\.[A-Za-z0-9_-]{32,4091}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "inspect_reminder_native",
+      "description": "Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "reminder",
+              "sections",
+              "tags"
+            ]
+          },
+          "reference": {
+            "$ref": "#/$defs/reference"
+          },
+          "include": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "section",
+                "tags",
+                "attachments",
+                "sync"
+              ]
+            }
+          },
+          "attachment_type": {
+            "enum": [
+              "image",
+              "url"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "list_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "reminder"
+              },
+              "reference": {
+                "$ref": "#/$defs/reference"
+              },
+              "include": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "section",
+                    "tags",
+                    "attachments",
+                    "sync"
+                  ]
+                }
+              },
+              "attachment_type": {
+                "enum": [
+                  "image",
+                  "url"
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              }
+            },
+            "required": [
+              "kind",
+              "reference",
+              "include"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "sections"
+              },
+              "list_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              }
+            },
+            "required": [
+              "kind",
+              "list_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "tags"
+              },
+              "account_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "$defs": {
+          "reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^rev1\\.[A-Za-z0-9_-]{32,4091}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "ensure_reminder_list",
+      "description": "Return an existing Reminder List or create exactly one within an exact account identity. The idempotency key prevents duplicate creation after an unknown outcome.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        },
+        "required": [
+          "source_id",
+          "name",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_reminder_section",
+      "description": "Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "list_id",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "organize_reminder",
+      "description": "Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "$ref": "#/$defs/reference"
+          },
+          "action": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "move_to_section"
+                  },
+                  "section_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "kind",
+                  "section_id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "add_tag"
+                  },
+                  "tag": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tag"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "remove_tag"
+                  },
+                  "tag": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tag"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "reference",
+          "action"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^rev1\\.[A-Za-z0-9_-]{32,4091}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "change_reminder_attachment",
+      "description": "Attach, replace, or delete one exact image or URL attachment through a closed action. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "$ref": "#/$defs/reference"
+          },
+          "action": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "attach_image"
+                  },
+                  "image_path": {
+                    "type": "string",
+                    "pattern": "^/",
+                    "minLength": 2,
+                    "maxLength": 4096
+                  },
+                  "idempotency_key": {
+                    "$ref": "#/$defs/idempotency_key"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "image_path",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "attach_url"
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+                    "minLength": 8,
+                    "maxLength": 8192
+                  }
+                },
+                "required": [
+                  "kind",
+                  "url"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "replace_image"
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "image_path": {
+                    "type": "string",
+                    "pattern": "^/",
+                    "minLength": 2,
+                    "maxLength": 4096
+                  },
+                  "idempotency_key": {
+                    "$ref": "#/$defs/idempotency_key"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "attachment_id",
+                  "image_path",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "replace_url"
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+                    "minLength": 8,
+                    "maxLength": 8192
+                  },
+                  "idempotency_key": {
+                    "$ref": "#/$defs/idempotency_key"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "attachment_id",
+                  "url",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "delete"
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "kind",
+                  "attachment_id"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "reference",
+          "action"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^rev1\\.[A-Za-z0-9_-]{32,4091}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diagnose_reminders",
+      "description": "Run one content-free diagnosis and report the requested area, defaulting to a small Core summary. Static private-framework path absence is inconclusive.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "enum": [
+              "core",
+              "access",
+              "native_extension",
+              "sections",
+              "tags",
+              "attachments",
+              "packaging"
+            ],
+            "default": "core"
+          },
+          "detail_level": {
+            "enum": [
+              "summary",
+              "full"
+            ],
+            "default": "summary"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

@@ -5,36 +5,58 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 
 
 class GoldenRegressionContractTests(unittest.TestCase):
-    def test_0_2_x_keeps_the_user_validated_mcp_tool_surface(self) -> None:
-        expected = json.loads(
-            (ROOT / "tests/fixtures/golden_mcp_tools.json").read_text(encoding="utf-8")
-        )
+    def test_v2_maps_user_validated_behaviors_without_preserving_v1_names(self) -> None:
         schema = json.loads(
-            (ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8")
+            (PLUGIN_ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8")
         )
+        names = {tool["name"] for tool in schema["tools"]}
 
-        self.assertEqual([tool["name"] for tool in schema["tools"]], expected)
-        self.assertEqual(len(expected), 32)
+        self.assertTrue(
+            {
+                "fetch_reminders",
+                "read_reminder",
+                "create_reminder",
+                "change_reminder",
+                "delete_reminder",
+                "inspect_reminder_native",
+                "create_reminder_section",
+                "organize_reminder",
+                "change_reminder_attachment",
+            }.issubset(names)
+        )
+        self.assertTrue(
+            {
+                "update_reminder",
+                "complete_reminder",
+                "reopen_reminder",
+                "move_reminder_to_list",
+                "list_reminder_attachments",
+                "apply_reminder_attachment_repairs",
+            }.isdisjoint(names)
+        )
 
     def test_regression_contract_names_the_live_validated_feature_families(self) -> None:
-        contract = (ROOT / "docs/regression-contract.md").read_text(encoding="utf-8")
+        contract = (REPO_ROOT / "docs/regression-contract.md").read_text(encoding="utf-8")
+        normalized = contract.casefold()
 
         for required in (
-            "EventKit",
+            "eventkit",
             "partial_success",
-            "URL attachment",
-            "ReminderKit",
-            "Section creation",
-            "Tag assignment",
-            "Attachment audit",
-            "show_reminder",
+            "url attachment",
+            "reminderkit",
+            "section creation",
+            "tag add/remove",
+            "attachment",
+            "concurrency",
+            "idempotency",
             "release package",
         ):
-            self.assertIn(required, contract)
+            self.assertIn(required, normalized)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ from pathlib import Path
 from audit_source_package import FIXED_ZIP_TIMESTAMP, audit_archive, audit_source
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+
+
 def build_package(root: Path, output_directory: Path, *, force: bool = False) -> Path:
     root = root.expanduser().resolve()
     output_directory = output_directory.expanduser().resolve()
@@ -65,11 +69,11 @@ def sha256(path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("plugin", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("plugin", nargs="?", type=Path, default=PLUGIN_ROOT)
     parser.add_argument(
         "--output-directory",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "dist",
+        default=REPO_ROOT / "dist",
     )
     parser.add_argument("--force", action="store_true", help="Replace only the exact versioned artifact")
     args = parser.parse_args(argv)
