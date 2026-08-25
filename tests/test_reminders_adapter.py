@@ -156,6 +156,62 @@ class ListSectionScopeTests(unittest.TestCase):
         self.assertEqual(section["list_name"], "Inbox")
 
 
+class ImageCommandBoundaryTests(unittest.TestCase):
+    def test_attach_and_replace_reject_symlinks_before_mutation(self) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target.png"
+            link = root / "link.png"
+            target.write_bytes(b"not-decoded-because-the-symlink-must-fail-first")
+            link.symlink_to(target)
+            commands = [
+                [
+                    "attach_image",
+                    "--id",
+                    reminder_id,
+                    "--image",
+                    str(link),
+                    "--if-version",
+                    "1",
+                    "--idempotency-key",
+                    "image-boundary-attach",
+                ],
+                [
+                    "replace_attachment",
+                    "--id",
+                    reminder_id,
+                    "--attachment-id",
+                    "11111111-1111-4111-8111-111111111111",
+                    "--image",
+                    str(link),
+                    "--if-version",
+                    "1",
+                    "--idempotency-key",
+                    "image-boundary-replace",
+                ],
+            ]
+            results = []
+            for command in commands:
+                completed = subprocess.run(
+                    [sys.executable, str(ADAPTER_PATH), *command],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=10,
+                )
+                results.append((completed, json.loads(completed.stdout)))
+
+        for completed, payload in results:
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertEqual(payload["status"], "failed_no_mutation")
+            self.assertFalse(payload["verification"]["write_performed"])
+            self.assertEqual(payload["error"]["code"], "invalid_input")
+            self.assertEqual(payload["error"]["reason_code"], "symlink_not_allowed")
+
+
 class AppleScriptSyncTests(unittest.TestCase):
     def test_sync_reminder_text_uses_no_change_sentinels(self) -> None:
         with mock.patch.object(reminders_adapter, "run_osascript", return_value="x-apple-reminder://AAA") as run:

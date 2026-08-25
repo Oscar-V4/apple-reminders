@@ -1163,7 +1163,7 @@
             "pattern": "^/",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute local filesystem path to the image."
+            "description": "Absolute path to a regular non-symlink file decoded as PNG or JPEG, at most 25 MiB, at most 16,384 pixels per dimension, and at most 40,000,000 total pixels."
           },
           "if_version": {
             "type": "integer",
@@ -1450,7 +1450,7 @@
             "pattern": "^/",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute local image path. Mutually exclusive with url."
+            "description": "Absolute path to a regular non-symlink file decoded as PNG or JPEG, at most 25 MiB, at most 16,384 pixels per dimension, and at most 40,000,000 total pixels. Mutually exclusive with url."
           },
           "url": {
             "type": "string",

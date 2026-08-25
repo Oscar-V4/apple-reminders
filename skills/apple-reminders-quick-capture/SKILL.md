@@ -42,7 +42,7 @@ For an all-day due date use `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute a
 
 ## Attachments During Capture
 
-- For image capture, resolve the exact source file and target reminder, call `list_reminder_attachments` for a fresh `reminder_version`, then pass it as `if_version` to `attach_image_to_reminder` through the attachment maintenance rules.
+- For image capture, resolve an absolute regular non-symlink PNG or JPEG within the documented byte and pixel limits, then resolve the target reminder, call `list_reminder_attachments` for a fresh `reminder_version`, and pass it as `if_version` to `attach_image_to_reminder` through the attachment maintenance rules.
 - A URL supplied to `create_reminder` is a combined write: EventKit metadata plus a visible native URL attachment. Do not follow a `verified` create with a redundant `attach_url_to_reminder` call.
 - For a newly requested URL on an existing reminder, use `update_reminder` with a non-null `patch.url`; it likewise ensures the visible attachment. Use `attach_url_to_reminder` directly only for an additional URL attachment or to recover from a reported `partial_success`, after obtaining a fresh `reminder_version`.
 - Clearing `patch.url` removes only EventKit URL metadata. Never infer that the user also wants existing URL attachments deleted; attachment deletion remains explicit.

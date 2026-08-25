@@ -47,6 +47,10 @@ from reminders_contracts import (  # noqa: E402
     REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
     command_schema_requirements,
 )
+from reminders_image_input import (  # noqa: E402
+    ImageInputError,
+    validate_image_input,
+)
 
 
 HOME = Path.home()
@@ -5816,7 +5820,9 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_attach_image(args: argparse.Namespace) -> int:
     image = Path(args.image).expanduser().resolve()
-    image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
+    image_hash = getattr(args, "_validated_image_sha256", None)
+    if not isinstance(image_hash, str):
+        image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
     result = execute_idempotent(
         operation="attach_image",
         key=args.idempotency_key,
@@ -6657,7 +6663,9 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
     image_hash = None
     if args.image:
         image = Path(args.image).expanduser().resolve()
-        image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
+        image_hash = getattr(args, "_validated_image_sha256", None)
+        if not isinstance(image_hash, str):
+            image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
     key = getattr(args, "idempotency_key", None)
     if not isinstance(key, str):
         key = None
@@ -7053,6 +7061,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if getattr(args, "command", None) in {
+            "attach_image",
+            "replace_attachment",
+        } and getattr(args, "image", None):
+            try:
+                validated_image = validate_image_input(args.image)
+            except ImageInputError as exc:
+                raise AdapterError(
+                    str(exc),
+                    code="invalid_input",
+                    reason_code=exc.reason_code,
+                ) from exc
+            args.image = str(validated_image.path)
+            args._validated_image_sha256 = validated_image.sha256
         return args.func(args)
     except AdapterError as exc:
         details = dict(exc.details)
