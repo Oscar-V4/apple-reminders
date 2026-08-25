@@ -3,39 +3,71 @@
 
 from __future__ import annotations
 
+import copy
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 
 
 @dataclass(frozen=True)
-class AdapterReminder:
-    """Exact Adapter read, including concurrency data hidden from callers."""
+class Guard:
+    """Atomic identity and concurrency precondition for one exact Reminder."""
 
-    data: Mapping[str, Any]
+    reminder_id: str
+    store_identity: str
     public_concurrency_value: str
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """Canonical exact Adapter read with its write Guard."""
+
+    reminder: Mapping[str, Any]
+    guard: Guard
+
+
+@dataclass(frozen=True)
+class PatchAction:
+    patch: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class SetCompletionAction:
+    completed: bool
+
+
+@dataclass(frozen=True)
+class MoveToListAction:
+    list_id: str
+
+
+CoreAction = PatchAction | SetCompletionAction | MoveToListAction
+MutationState = Literal["not_mutated", "committed", "unknown"]
+
+
+@dataclass(frozen=True)
+class MutationOutcome:
+    receipt: Mapping[str, Any]
+    mutation_state: MutationState
 
 
 class ReminderAdapter(Protocol):
     """Port implemented by native production and in-memory test Adapters."""
 
-    store_identity: str
-
-    def read_exact(self, reminder_id: str) -> AdapterReminder:
+    def read_exact(self, reminder_id: str) -> Snapshot:
         ...
 
-    def apply_patch(
-        self,
-        reminder_id: str,
-        expected_public_concurrency_value: str,
-        patch: Mapping[str, Any],
-    ) -> None:
+    def apply_action(self, guard: Guard, action: CoreAction) -> MutationOutcome:
         ...
 
 
 class AdapterConflict(Exception):
     """The Adapter rejected an atomic change because its revision was stale."""
+
+    def __init__(self, code: str = "concurrent_modification") -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class ReferenceRejected(Exception):
@@ -46,6 +78,18 @@ class ReferenceRejected(Exception):
         self.code = code
 
 
+class ActionRejected(ValueError):
+    """A requested Core action was not part of the closed Interface."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "invalid_action"
+
+
+class AdapterContractError(RuntimeError):
+    """An Adapter response violated the Core seam."""
+
+
 @dataclass(frozen=True)
 class ExactRead:
     reminder: dict[str, Any]
@@ -53,23 +97,37 @@ class ExactRead:
 
 
 @dataclass(frozen=True)
-class Receipt:
-    status: str
-    after: dict[str, Any]
-    verification: dict[str, str]
-    reference: str
+class ChangeResult:
+    receipt: dict[str, Any]
+    reference: str | None
+    final_reminder: dict[str, Any] | None
+    reference_error: str | None = None
 
 
 @dataclass(frozen=True)
 class _ReferenceGrant:
-    reminder_id: str
-    store_identity: str
-    public_concurrency_value: str
+    guard: Guard
     expires_at: float
 
 
 def _new_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+PATCH_FIELDS = frozenset(
+    {"title", "notes", "url", "priority", "due", "alarms", "recurrence_rules"}
+)
+RECEIPT_STATUSES = frozenset(
+    {
+        "unchanged",
+        "verified",
+        "committed_verification_pending",
+        "partial_success",
+        "failed_no_mutation",
+        "failed_manual_repair_required",
+    }
+)
+REFERENCE_ELIGIBLE_STATUSES = frozenset({"unchanged", "verified"})
 
 
 class CoreModule:
@@ -96,7 +154,11 @@ class CoreModule:
         self._references: dict[str, _ReferenceGrant] = {}
 
     def read_exact(self, reminder_id: str) -> ExactRead:
-        snapshot = self._adapter.read_exact(reminder_id)
+        snapshot = self._read_snapshot(reminder_id)
+        reference = self._issue_reference(snapshot)
+        return ExactRead(reminder=copy.deepcopy(dict(snapshot.reminder)), reference=reference)
+
+    def _issue_reference(self, snapshot: Snapshot) -> str:
         now = self._clock()
         for reference, grant in list(self._references.items()):
             if now >= grant.expires_at:
@@ -104,18 +166,43 @@ class CoreModule:
         while len(self._references) >= self._max_active_references:
             oldest_reference = next(iter(self._references))
             self._references.pop(oldest_reference)
-        reference = self._token_source()
-        if not reference or reference in self._references:
+        entropy = self._token_source()
+        if not entropy:
+            raise RuntimeError("token_source must return a unique, non-empty token")
+        reference = f"rev1.{entropy}"
+        if reference in self._references:
             raise RuntimeError("token_source must return a unique, non-empty token")
         self._references[reference] = _ReferenceGrant(
-            reminder_id=reminder_id,
-            store_identity=self._adapter.store_identity,
-            public_concurrency_value=snapshot.public_concurrency_value,
+            guard=snapshot.guard,
             expires_at=now + self._reference_ttl_seconds,
         )
-        return ExactRead(reminder=dict(snapshot.data), reference=reference)
+        return reference
 
-    def change(self, reference: str, patch: Mapping[str, Any]) -> Receipt:
+    def _read_snapshot(self, reminder_id: str) -> Snapshot:
+        snapshot = self._adapter.read_exact(reminder_id)
+        if not isinstance(snapshot, Snapshot):
+            raise AdapterContractError("Exact Adapter read must return a Snapshot")
+        if not isinstance(snapshot.reminder, Mapping) or not isinstance(
+            snapshot.guard, Guard
+        ):
+            raise AdapterContractError("Exact Adapter read returned invalid Snapshot fields")
+        reminder = dict(snapshot.reminder)
+        guard = snapshot.guard
+        if (
+            not isinstance(reminder_id, str)
+            or not reminder_id
+            or reminder.get("id") != reminder_id
+            or guard.reminder_id != reminder_id
+            or not isinstance(guard.store_identity, str)
+            or not guard.store_identity
+            or not isinstance(guard.public_concurrency_value, str)
+            or not guard.public_concurrency_value
+        ):
+            raise AdapterContractError("Exact Adapter read returned an invalid identity Guard")
+        return Snapshot(reminder=copy.deepcopy(reminder), guard=guard)
+
+    def change(self, reference: str, raw_action: Mapping[str, Any]) -> ChangeResult:
+        action = self._parse_action(raw_action)
         grant = self._references.get(reference)
         if grant is None:
             raise ReferenceRejected(
@@ -128,31 +215,128 @@ class CoreModule:
                 "expired_reference",
                 "The change reference has expired; read the Reminder again",
             )
-        if self._adapter.store_identity != grant.store_identity:
-            self._references.pop(reference, None)
-            raise ReferenceRejected(
-                "invalid_reference",
-                "The change reference belongs to a different Reminder store",
-            )
         try:
-            self._adapter.apply_patch(
-                grant.reminder_id,
-                grant.public_concurrency_value,
-                dict(patch),
-            )
-        except AdapterConflict:
+            outcome = self._adapter.apply_action(grant.guard, action)
+        except AdapterConflict as exc:
             self._references.pop(reference, None)
             raise ReferenceRejected(
-                "concurrent_modification",
+                exc.code,
                 "The Reminder changed; read it again before applying a change",
             ) from None
-        read_back = self.read_exact(grant.reminder_id)
-        if any(read_back.reminder.get(key) != value for key, value in patch.items()):
-            raise RuntimeError("Adapter change did not match its exact read-back")
+        if outcome.mutation_state in {"committed", "unknown"}:
+            self._references.pop(reference, None)
+        try:
+            receipt = self._validated_receipt(outcome)
+        except AdapterContractError:
+            self._references.pop(reference, None)
+            raise
+        if outcome.mutation_state == "unknown":
+            return ChangeResult(
+                receipt=receipt,
+                reference=None,
+                final_reminder=None,
+                reference_error="mutation_outcome_unknown",
+            )
+        if receipt["status"] not in REFERENCE_ELIGIBLE_STATUSES:
+            return ChangeResult(receipt=receipt, reference=None, final_reminder=None)
+        try:
+            final_snapshot = self._read_snapshot(grant.guard.reminder_id)
+        except Exception:
+            return ChangeResult(
+                receipt=receipt,
+                reference=None,
+                final_reminder=None,
+                reference_error="final_read_failed",
+            )
+        replacement = self._issue_reference(final_snapshot)
         self._references.pop(reference, None)
-        return Receipt(
-            status="verified",
-            after=read_back.reminder,
-            verification={"state": "exact_read_back"},
-            reference=read_back.reference,
+        return ChangeResult(
+            receipt=receipt,
+            reference=replacement,
+            final_reminder=copy.deepcopy(dict(final_snapshot.reminder)),
         )
+
+    @staticmethod
+    def _parse_action(raw_action: Mapping[str, Any]) -> CoreAction:
+        if not isinstance(raw_action, Mapping):
+            raise ActionRejected("Core action must be an object")
+        action_type = raw_action.get("kind")
+        if action_type == "patch":
+            if set(raw_action) != {"kind", "patch"}:
+                raise ActionRejected("patch action contains unsupported fields")
+            patch = raw_action.get("patch")
+            if not isinstance(patch, Mapping) or not patch:
+                raise ActionRejected("patch action requires at least one field")
+            unknown = set(patch) - PATCH_FIELDS
+            if unknown:
+                raise ActionRejected("patch action contains unsupported Reminder fields")
+            return PatchAction(copy.deepcopy(dict(patch)))
+        if action_type == "set_completion":
+            if set(raw_action) != {"kind", "completed"} or not isinstance(
+                raw_action.get("completed"), bool
+            ):
+                raise ActionRejected("set_completion requires one boolean completed field")
+            return SetCompletionAction(raw_action["completed"])
+        if action_type == "move_to_list":
+            list_id = raw_action.get("list_id")
+            if (
+                set(raw_action) != {"kind", "list_id"}
+                or not isinstance(list_id, str)
+                or not list_id
+            ):
+                raise ActionRejected("move_to_list requires one non-empty list_id")
+            return MoveToListAction(list_id)
+        raise ActionRejected("Core action type is not supported")
+
+    @staticmethod
+    def _validated_receipt(outcome: MutationOutcome) -> dict[str, Any]:
+        if outcome.mutation_state not in {"not_mutated", "committed", "unknown"}:
+            raise AdapterContractError("Adapter returned an invalid mutation state")
+        receipt = copy.deepcopy(dict(outcome.receipt))
+        required = {
+            "ok",
+            "status",
+            "operation",
+            "operation_id",
+            "backend",
+            "target",
+            "before",
+            "after",
+            "verification",
+            "recovery",
+        }
+        if required - set(receipt) or receipt.get("status") not in RECEIPT_STATUSES:
+            raise AdapterContractError("Adapter returned an invalid mutation Receipt")
+        status = receipt["status"]
+        expected_ok = status not in {
+            "failed_no_mutation",
+            "failed_manual_repair_required",
+        }
+        if receipt.get("ok") is not expected_ok:
+            raise AdapterContractError("Adapter mutation Receipt status and ok disagree")
+        allowed_states = {
+            "not_mutated": {"unchanged", "failed_no_mutation"},
+            "committed": {
+                "verified",
+                "committed_verification_pending",
+                "partial_success",
+                "failed_manual_repair_required",
+            },
+            "unknown": {
+                "committed_verification_pending",
+                "partial_success",
+                "failed_manual_repair_required",
+            },
+        }
+        if status not in allowed_states[outcome.mutation_state]:
+            raise AdapterContractError(
+                "Adapter mutation Receipt status disagrees with mutation state"
+            )
+        for key in ("target", "before", "after", "verification", "recovery"):
+            if not isinstance(receipt[key], dict):
+                raise AdapterContractError("Adapter mutation Receipt objects are required")
+        if "warnings" in receipt and not isinstance(receipt["warnings"], list):
+            raise AdapterContractError("Adapter mutation Receipt warnings must be an array")
+        if "error" in receipt and not isinstance(receipt["error"], dict):
+            raise AdapterContractError("Adapter mutation Receipt error must be an object")
+        return receipt
