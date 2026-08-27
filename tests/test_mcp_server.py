@@ -689,6 +689,35 @@ class McpProtocolTests(unittest.TestCase):
             13,
         )
 
+    def test_post_dispatch_contract_fallback_uses_exact_safe_recovery(self) -> None:
+        cases = (
+            ("create_reminder", "fetch_reminders"),
+            ("ensure_reminder_list", "list_reminder_lists"),
+            ("create_reminder_section", "inspect_reminder_native"),
+            ("delete_reminder", "read_reminder"),
+        )
+        for name, recovery_tool in cases:
+            facade = mock.Mock()
+            facade.call.side_effect = RuntimeError("lost public facade result")
+            self.server._V2_CORE_FACADE = facade
+            self.server._V2_NATIVE_FACADE = facade
+            self.server.RECENT_CALLS.clear()
+
+            with self.subTest(tool=name):
+                result = self.server.call_tool(
+                    name, copy.deepcopy(VALID_ARGUMENTS[name])
+                )
+                payload = result["structuredContent"]
+                self.assertFalse(result["isError"])
+                self.assertEqual(
+                    payload["status"], "committed_verification_pending"
+                )
+                self.assertFalse(payload["error"]["retryable"])
+                self.assertEqual(payload["next_action"]["tool"], recovery_tool)
+                self.assertFalse(
+                    payload["next_action"]["retry_original_once"]
+                )
+
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
         notes = "n" * 70_000
         facade = mock.Mock()

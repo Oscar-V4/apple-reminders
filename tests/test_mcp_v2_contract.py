@@ -196,7 +196,11 @@ def mutation_failure(
     if code == "concurrent_modification":
         payload["next_action"] = {
             "kind": "fresh_read",
-            "tool": "read_reminder",
+            "tool": {
+                "create_reminder": "fetch_reminders",
+                "ensure_reminder_list": "list_reminder_lists",
+                "create_reminder_section": "inspect_reminder_native",
+            }.get(tool_name, "read_reminder"),
             "retry_original_once": False,
             "message": "Read the exact Reminder again.",
         }
@@ -226,10 +230,20 @@ def pending_mutation(tool_name: str = "change_reminder") -> dict[str, object]:
                 "code": "sync_pending",
                 "reason_code": "final_read_failed",
                 "message": "The write may have committed, but final read failed.",
-                "retryable": True,
+                "retryable": False,
             },
         }
     )
+    payload["next_action"] = {
+        "kind": "fresh_read",
+        "tool": {
+            "create_reminder": "fetch_reminders",
+            "ensure_reminder_list": "list_reminder_lists",
+            "create_reminder_section": "inspect_reminder_native",
+        }.get(tool_name, "read_reminder"),
+        "retry_original_once": False,
+        "message": "Inspect the exact target before another mutation.",
+    }
     return payload
 
 
@@ -439,6 +453,26 @@ class PublicV2ResultContractTests(unittest.TestCase):
                     validate_public_result("change_reminder", fixture, "unknown")
                 self.assertEqual(raised.exception.code, "incomplete_receipt")
 
+        missing_recovery = pending_mutation()
+        missing_recovery.pop("next_action")
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("change_reminder", missing_recovery, "unknown")
+        self.assertEqual(raised.exception.code, "incomplete_failure")
+
+        unsafe_retry = pending_mutation()
+        unsafe_retry["error"]["retryable"] = True  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("change_reminder", unsafe_retry, "unknown")
+        self.assertEqual(raised.exception.code, "unsafe_retry")
+
+        unsafe_original_retry = pending_mutation()
+        unsafe_original_retry["next_action"]["retry_original_once"] = True  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result(
+                "change_reminder", unsafe_original_retry, "unknown"
+            )
+        self.assertEqual(raised.exception.code, "unsafe_retry")
+
         exposed = pending_mutation()
         exposed["after"] = {"reference": REFERENCE}
         with self.assertRaises(PublicResultContractError) as raised:
@@ -446,18 +480,33 @@ class PublicV2ResultContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unsafe_reference")
 
         create_pending = pending_mutation("create_reminder")
-        create_pending["next_action"] = {
-            "kind": "fresh_read",
-            "tool": "fetch_reminders",
-            "retry_original_once": False,
-            "message": "Fetch the exact list before retrying.",
-        }
         self.assertEqual(
             validate_public_result("create_reminder", create_pending, "unknown")[
                 "next_action"
             ]["tool"],
             "fetch_reminders",
         )
+
+        for tool_name, expected_tool in (
+            ("ensure_reminder_list", "list_reminder_lists"),
+            ("create_reminder_section", "inspect_reminder_native"),
+        ):
+            fixture = pending_mutation(tool_name)
+            with self.subTest(tool=tool_name):
+                self.assertEqual(
+                    validate_public_result(tool_name, fixture, "unknown")[
+                        "next_action"
+                    ]["tool"],
+                    expected_tool,
+                )
+
+        wrong_section_recovery = pending_mutation("create_reminder_section")
+        wrong_section_recovery["next_action"]["tool"] = "read_reminder"  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result(
+                "create_reminder_section", wrong_section_recovery, "unknown"
+            )
+        self.assertEqual(raised.exception.code, "invalid_next_action")
 
     def test_partial_manual_and_failed_receipts_preserve_write_semantics(self) -> None:
         for status, ok in (
@@ -537,6 +586,19 @@ class PublicV2ResultContractTests(unittest.TestCase):
             "not_mutated",
         )
         self.assertEqual(stale["next_action"]["kind"], "fresh_read")
+
+        for tool_name, expected_tool in (
+            ("create_reminder", "fetch_reminders"),
+            ("ensure_reminder_list", "list_reminder_lists"),
+            ("create_reminder_section", "inspect_reminder_native"),
+        ):
+            with self.subTest(tool=tool_name, error="concurrent_modification"):
+                result = validate_public_result(
+                    tool_name,
+                    mutation_failure(tool_name, code="concurrent_modification"),
+                    "not_mutated",
+                )
+                self.assertEqual(result["next_action"]["tool"], expected_tool)
 
         missing = validate_public_result(
             "read_reminder",

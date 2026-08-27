@@ -513,6 +513,18 @@ def _validate_error(
             tool_name=tool_name,
             mutation_state=mutation_state,
         )
+    if (
+        code == "sync_pending"
+        and tool_name in MUTATION_TOOLS
+        and value.get("retryable") is not False
+    ):
+        _fail(
+            "unsafe_retry",
+            "$.error.retryable",
+            "a pending mutation must not authorize retrying the original write",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
     return dict(value)
 
 
@@ -598,6 +610,16 @@ def _validate_next_action(
                 tool_name=tool_name,
                 mutation_state=mutation_state,
             )
+        if error_code in {"concurrent_modification", "sync_pending"} and (
+            tool_name in MUTATION_TOOLS
+        ):
+            _fail(
+                "incomplete_failure",
+                "$.next_action",
+                "a recoverable mutation result must provide its exact fresh-read action",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
         return
     if not isinstance(value, Mapping):
         _fail(
@@ -627,13 +649,15 @@ def _validate_next_action(
         mutation_state=mutation_state,
         missing_code="invalid_next_action",
     )
+    sync_pending_tool = {
+        "create_reminder": "fetch_reminders",
+        "ensure_reminder_list": "list_reminder_lists",
+        "create_reminder_section": "inspect_reminder_native",
+    }.get(tool_name, "read_reminder")
     expected = {
         "permission_denied": ("request_access", "request_reminders_access"),
-        "concurrent_modification": ("fresh_read", "read_reminder"),
-        "sync_pending": (
-            "fresh_read",
-            "fetch_reminders" if tool_name == "create_reminder" else "read_reminder",
-        ),
+        "concurrent_modification": ("fresh_read", sync_pending_tool),
+        "sync_pending": ("fresh_read", sync_pending_tool),
     }.get(error_code)
     kind = value.get("kind")
     next_tool = value.get("tool")
@@ -666,6 +690,14 @@ def _validate_next_action(
             "invalid_next_action",
             "$.next_action.retry_original_once",
             "retry_original_once must be boolean",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if kind == "fresh_read" and value.get("retry_original_once") is not False:
+        _fail(
+            "unsafe_retry",
+            "$.next_action.retry_original_once",
+            "a fresh-read recovery must not authorize retrying the original mutation",
             tool_name=tool_name,
             mutation_state=mutation_state,
         )

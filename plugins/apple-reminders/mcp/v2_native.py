@@ -528,7 +528,7 @@ class NativeFacade:
                 message=(
                     "The section may have been created; inspect this exact list before retrying."
                 ),
-                next_tool=None,
+                next_tool="inspect_reminder_native",
             )
         try:
             return self._section_receipt(payload, list_id=list_id)
@@ -542,7 +542,7 @@ class NativeFacade:
                     "The section result could not be validated; inspect this exact list "
                     "before retrying."
                 ),
-                next_tool=None,
+                next_tool="inspect_reminder_native",
             )
 
     def _section_receipt(self, payload: Any, *, list_id: str) -> dict[str, Any]:
@@ -604,7 +604,7 @@ class NativeFacade:
         self._copy_receipt_extras(raw, result)
         self._finalize_pending_receipt(
             result,
-            next_tool=None,
+            next_tool="inspect_reminder_native",
             next_message=(
                 "Inspect this exact list before attempting to create the section again."
             ),
@@ -980,7 +980,7 @@ class NativeFacade:
                 "sync_pending",
                 reason_code,
                 message,
-                retryable=True,
+                retryable=False,
             ),
         }
         if next_tool is not None:
@@ -1246,7 +1246,10 @@ class NativeFacade:
         if result["status"] in FAILURE_STATUSES or (
             "error" in raw and isinstance(raw.get("error"), Mapping)
         ):
-            result["error"] = _normalized_error(raw.get("error"))
+            error = _normalized_error(raw.get("error"))
+            if error["code"] == "sync_pending":
+                error["retryable"] = False
+            result["error"] = error
 
     @staticmethod
     def _finalize_pending_receipt(
@@ -1256,6 +1259,21 @@ class NativeFacade:
         next_message: str,
     ) -> None:
         if result.get("status") != "committed_verification_pending":
+            current_error = result.get("error")
+            if (
+                next_tool is not None
+                and isinstance(current_error, Mapping)
+                and current_error.get("code")
+                in {"concurrent_modification", "sync_pending"}
+            ):
+                if current_error.get("code") == "sync_pending":
+                    result["error"] = {**current_error, "retryable": False}
+                result["next_action"] = {
+                    "kind": "fresh_read",
+                    "tool": next_tool,
+                    "retry_original_once": False,
+                    "message": next_message,
+                }
             return
         warnings = result.setdefault("warnings", [])
         if not any(
@@ -1270,6 +1288,9 @@ class NativeFacade:
             )
         result["warnings"] = warnings[:20]
         current_error = result.get("error")
+        if isinstance(current_error, Mapping) and current_error.get("code") == "sync_pending":
+            result["error"] = {**current_error, "retryable": False}
+            current_error = result["error"]
         if (
             not isinstance(current_error, Mapping)
             or current_error.get("code") != "sync_pending"
@@ -1290,11 +1311,10 @@ class NativeFacade:
             )
             reason_code = causal_warning.get("code")
             message = causal_warning.get("message")
-            retryable = True
+            retryable = False
             if isinstance(current_error, Mapping):
                 reason_code = current_error.get("reason_code") or reason_code
                 message = current_error.get("message") or message
-                retryable = current_error.get("retryable") is True
             result["error"] = _error(
                 "sync_pending",
                 str(reason_code or "native_verification_pending"),

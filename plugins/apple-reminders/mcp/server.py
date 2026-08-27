@@ -1159,6 +1159,25 @@ def _v2_contract_failure(
     message: str,
 ) -> tuple[dict[str, Any], str | None]:
     if name in V2_MUTATION_TOOLS and may_have_mutated:
+        recovery_tool = {
+            "create_reminder": "fetch_reminders",
+            "ensure_reminder_list": "list_reminder_lists",
+            "create_reminder_section": "inspect_reminder_native",
+        }.get(name, "read_reminder")
+        recovery_message = {
+            "create_reminder": (
+                "Fetch the target list and resolve whether the Reminder create "
+                "committed before retrying."
+            ),
+            "ensure_reminder_list": (
+                "List the exact Reminder account's lists and resolve whether the "
+                "list create committed before retrying."
+            ),
+            "create_reminder_section": (
+                "Inspect the exact Reminder List's sections and resolve whether "
+                "the section create committed before retrying."
+            ),
+        }.get(name, "Read the exact Reminder again before another change.")
         return (
             {
                 "schema_version": 2,
@@ -1189,7 +1208,13 @@ def _v2_contract_failure(
                     "code": "sync_pending",
                     "reason_code": "public_result_contract_failed",
                     "message": message[:2000],
-                    "retryable": True,
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "fresh_read",
+                    "tool": recovery_tool,
+                    "retry_original_once": False,
+                    "message": recovery_message,
                 },
             },
             "unknown",
