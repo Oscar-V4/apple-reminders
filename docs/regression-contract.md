@@ -177,6 +177,14 @@ even though optional MCP `outputSchema` descriptors are omitted from
     history, injected backend paths, and lazy Core/Native/Recovery/Diagnostics
     Facades cannot leak between runtime instances. Tool discovery remains lazy,
     and test injection does not add an environment-variable production seam.
+29. Core, Native, and Recovery mutations carry backend-owned
+    `not_mutated`/`committed`/`unknown` state beside the public Receipt through
+    `call_with_state`. MCP contract validation never reconstructs this fact
+    from public `status`; a false no-write projection cannot erase a committed
+    or unknown raw outcome, and contract fallback preserves an exact commit.
+    Lost final-read, identity, or projection evidence preserves `committed` but
+    degrades a prior no-write claim to `unknown`. Read-only and Diagnostics
+    calls carry no mutation state.
 
 ## Deliberately withheld behavior
 

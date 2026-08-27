@@ -49,9 +49,23 @@ class FakeEventKit:
         *,
         mutation: bool = False,
         is_error: bool = False,
+        mutation_state: str | None = None,
     ) -> None:
+        if mutation and mutation_state is None:
+            status = payload.get("status")
+            mutation_state = (
+                "not_mutated"
+                if status in {"unchanged", "failed_no_mutation"}
+                else "committed"
+                if status == "verified"
+                else "unknown"
+            )
         self._replies[(operation, mutation)].append(
-            EventKitReply(payload=copy.deepcopy(dict(payload)), is_error=is_error)
+            EventKitReply(
+                payload=copy.deepcopy(dict(payload)),
+                is_error=is_error,
+                mutation_state=mutation_state,  # type: ignore[arg-type]
+            )
         )
 
     def fail(self, operation: str, exc: Exception, *, mutation: bool = False) -> None:
@@ -326,6 +340,76 @@ class V2CoreFacadeTests(unittest.TestCase):
         rejected = subject.delete_reminder({"reference": reference})
         self.assertEqual(rejected["error"]["reason_code"], "invalid_reference")
         self.assertEqual(len(eventkit.calls), 3)
+
+    def test_delete_public_no_write_claim_cannot_preserve_a_stale_reference(self) -> None:
+        for raw_state in ("committed", "unknown"):
+            with self.subTest(raw_state=raw_state):
+                eventkit = FakeEventKit()
+                before = native_reminder()
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue(
+                    "delete_reminder",
+                    {
+                        "schema_version": 1,
+                        "ok": False,
+                        "status": "failed_no_mutation",
+                        "operation": "delete_reminder",
+                        "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                        "backend": "eventkit_public_sdk",
+                        "target": {"id": "REMINDER-1"},
+                        "before": before,
+                        "after": None,
+                        "verification": {
+                            "state": "not_needed",
+                            "write_performed": False,
+                            "final_read": False,
+                        },
+                        "recovery": {
+                            "semantics": "fresh_read_required",
+                            "automatic_retry_safe": False,
+                        },
+                        "error": {
+                            "code": "permission_denied",
+                            "reason_code": "synthetic_public_projection",
+                            "message": "The public projection claims no write.",
+                            "retryable": False,
+                        },
+                    },
+                    mutation=True,
+                    is_error=True,
+                    mutation_state=raw_state,
+                )
+                subject = facade(eventkit)
+                reference = subject.read_reminder(
+                    {"reminder_id": "REMINDER-1"}
+                )["data"]["reminder"]["reference"]
+
+                payload, state = subject.call_with_state(
+                    "delete_reminder",
+                    {"reference": reference},
+                )
+                rejected, rejected_state = subject.call_with_state(
+                    "delete_reminder",
+                    {"reference": reference},
+                )
+
+                self.assertEqual(
+                    payload["status"],
+                    "committed_verification_pending",
+                )
+                self.assertIs(
+                    payload["verification"]["write_performed"],
+                    True if raw_state == "committed" else None,
+                )
+                self.assertEqual(state, raw_state)
+                validate_public_result("delete_reminder", payload, state)
+                self.assertEqual(
+                    rejected["error"]["reason_code"],
+                    "invalid_reference",
+                )
+                self.assertEqual(rejected_state, "not_mutated")
+                self.assertEqual(len(eventkit.calls), 3)
 
     def test_delete_verified_without_exact_absence_is_downgraded_to_pending(self) -> None:
         eventkit = FakeEventKit()
@@ -1392,6 +1476,324 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["kind"], "fresh_read")
         self.assertIsNone(result["before"])
         self.assertIsNone(result["after"])
+
+    def test_call_with_state_does_not_infer_no_write_from_public_failure(self) -> None:
+        for raw_state in ("committed", "unknown"):
+            with self.subTest(raw_state=raw_state):
+                eventkit = FakeEventKit()
+                eventkit.queue(
+                    "create_reminder",
+                    {
+                        "schema_version": 1,
+                        "ok": False,
+                        "status": "failed_no_mutation",
+                        "operation": "create_reminder",
+                        "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                        "backend": "eventkit_public_sdk",
+                        "target": {"calendar_id": "LIST-1"},
+                        "before": None,
+                        "after": None,
+                        "verification": {
+                            "state": "not_needed",
+                            "write_performed": False,
+                            "final_read": False,
+                        },
+                        "recovery": {
+                            "semantics": "fresh_read_required",
+                            "automatic_retry_safe": False,
+                        },
+                        "error": {
+                            "code": "permission_denied",
+                            "reason_code": "synthetic_public_projection",
+                            "message": "The public projection claims no write.",
+                            "retryable": False,
+                        },
+                    },
+                    mutation=True,
+                    is_error=True,
+                    mutation_state=raw_state,
+                )
+
+                payload, state = facade(eventkit).call_with_state(
+                    "create_reminder",
+                    {
+                        "list_id": "LIST-1",
+                        "title": "State channel",
+                        "idempotency_key": f"state-conflict-{raw_state}",
+                    },
+                )
+
+                self.assertEqual(
+                    payload["status"],
+                    "committed_verification_pending",
+                )
+                self.assertIs(
+                    payload["verification"]["write_performed"],
+                    True if raw_state == "committed" else None,
+                )
+                self.assertEqual(state, raw_state)
+                validate_public_result("create_reminder", payload, state)
+
+    def test_call_with_state_preserves_in_process_ensure_list_replay_state(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "ensure_reminder_list",
+            {
+                "schema_version": 1,
+                "ok": True,
+                "status": "verified",
+                "operation": "ensure_reminder_list",
+                "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                "backend": "eventkit_public_sdk",
+                "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
+                "before": None,
+                "after": {
+                    "id": "LIST-1",
+                    "title": "Work",
+                    "source": {"id": "SOURCE-1", "title": "iCloud"},
+                },
+                "verification": {
+                    "state": "read_back",
+                    "write_performed": True,
+                    "final_read": True,
+                    "matched": True,
+                },
+                "recovery": {
+                    "semantics": "delete_list_in_reminders",
+                    "automatic_retry_safe": True,
+                },
+            },
+            mutation=True,
+            mutation_state="committed",
+        )
+        subject = facade(eventkit)
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure-state-replay",
+        }
+
+        first, first_state = subject.call_with_state("ensure_reminder_list", arguments)
+        replay, replay_state = subject.call_with_state("ensure_reminder_list", arguments)
+
+        self.assertEqual(first_state, "committed")
+        self.assertEqual(replay_state, "committed")
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(eventkit.calls), 1)
+
+    def test_change_contract_failure_preserves_raw_committed_state(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue(
+            "update_reminder",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "update_reminder",
+                "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                "backend": "eventkit_public_sdk",
+                "target": {"id": "REMINDER-1"},
+                "before": before,
+                "after": None,
+                "verification": {
+                    "state": "not_needed",
+                    "write_performed": False,
+                    "final_read": False,
+                },
+                "recovery": {
+                    "semantics": "fresh_read_required",
+                    "automatic_retry_safe": False,
+                },
+                "error": {
+                    "code": "permission_denied",
+                    "reason_code": "synthetic_public_projection",
+                    "message": "Synthetic projection conflict.",
+                    "retryable": False,
+                },
+            },
+            mutation=True,
+            is_error=True,
+            mutation_state="committed",
+        )
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})["data"][
+            "reminder"
+        ]["reference"]
+
+        payload, state = subject.call_with_state(
+            "change_reminder",
+            {
+                "reference": reference,
+                "action": {"kind": "patch", "patch": {"title": "Changed"}},
+            },
+        )
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "committed")
+
+    def test_concurrent_projection_cannot_erase_raw_change_state(self) -> None:
+        for raw_state in ("committed", "unknown"):
+            with self.subTest(raw_state=raw_state):
+                eventkit = FakeEventKit()
+                before = native_reminder()
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue(
+                    "update_reminder",
+                    {
+                        "schema_version": 1,
+                        "ok": False,
+                        "status": "failed_no_mutation",
+                        "operation": "update_reminder",
+                        "operation_id": "12345678-1234-4234-9234-1234567890ab",
+                        "backend": "eventkit_public_sdk",
+                        "target": {"id": "REMINDER-1"},
+                        "before": before,
+                        "after": None,
+                        "verification": {
+                            "state": "not_needed",
+                            "write_performed": False,
+                            "final_read": False,
+                        },
+                        "recovery": {
+                            "semantics": "fresh_read_required",
+                            "automatic_retry_safe": False,
+                        },
+                        "error": {
+                            "code": "concurrent_modification",
+                            "reason_code": "synthetic_concurrent_projection",
+                            "message": "The public projection claims no write.",
+                            "retryable": True,
+                        },
+                    },
+                    mutation=True,
+                    is_error=True,
+                    mutation_state=raw_state,
+                )
+                subject = facade(eventkit)
+                reference = subject.read_reminder(
+                    {"reminder_id": "REMINDER-1"}
+                )["data"]["reminder"]["reference"]
+
+                payload, state = subject.call_with_state(
+                    "change_reminder",
+                    {
+                        "reference": reference,
+                        "action": {
+                            "kind": "patch",
+                            "patch": {"title": "Changed"},
+                        },
+                    },
+                )
+
+                self.assertEqual(
+                    payload["status"],
+                    "committed_verification_pending",
+                )
+                self.assertEqual(state, raw_state)
+                self.assertNotEqual(
+                    payload.get("error", {}).get("code"),
+                    "concurrent_modification",
+                )
+
+    def test_change_and_delete_carry_success_state_from_eventkit(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        changed = native_reminder(
+            title="Changed",
+            last_modified="2026-08-25T01:00:01.000Z",
+        )
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue(
+            "update_reminder",
+            mutation_receipt("update_reminder", before, changed),
+            mutation=True,
+            mutation_state="committed",
+        )
+        eventkit.queue("read_reminder", read_receipt(changed))
+        eventkit.queue("read_reminder", read_receipt(changed))
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})["data"][
+            "reminder"
+        ]["reference"]
+
+        _, change_state = subject.call_with_state(
+            "change_reminder",
+            {
+                "reference": reference,
+                "action": {"kind": "patch", "patch": {"title": "Changed"}},
+            },
+        )
+
+        eventkit.queue("read_reminder", read_receipt(changed))
+        delete_receipt = mutation_receipt("delete_reminder", changed, changed)
+        delete_receipt["verification"]["local_absence"] = True
+        eventkit.queue(
+            "delete_reminder",
+            delete_receipt,
+            mutation=True,
+            mutation_state="committed",
+        )
+        delete_reference = subject.read_reminder({"reminder_id": "REMINDER-1"})[
+            "data"
+        ]["reminder"]["reference"]
+        _, delete_state = subject.call_with_state(
+            "delete_reminder",
+            {"reference": delete_reference},
+        )
+
+        self.assertEqual(change_state, "committed")
+        self.assertEqual(delete_state, "committed")
+
+    def test_dispatched_create_exception_reports_unknown_state(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.fail(
+            "create_reminder",
+            OSError("helper connection dropped"),
+            mutation=True,
+        )
+
+        payload, state = facade(eventkit).call_with_state(
+            "create_reminder",
+            {
+                "list_id": "LIST-1",
+                "title": "Unknown outcome",
+                "idempotency_key": "unknown-create-state",
+            },
+        )
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+
+    def test_call_with_state_reports_reads_and_pre_dispatch_failures(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "request_access",
+            {
+                "schema_version": 1,
+                "ok": True,
+                "status": "verified",
+                "operation": "request_access",
+                "data": {
+                    "authorization_before": "full_access",
+                    "authorization": "full_access",
+                    "request_attempted": False,
+                    "prompt_expected": False,
+                    "prompt_observed": False,
+                    "prompted_explicitly": True,
+                },
+            },
+        )
+        subject = facade(eventkit)
+
+        invalid, invalid_state = subject.call_with_state("create_reminder", {})
+        _, read_state = subject.call_with_state("request_reminders_access", {})
+
+        self.assertEqual(invalid["status"], "failed_no_mutation")
+        self.assertEqual(invalid_state, "not_mutated")
+        self.assertIsNone(read_state)
 
 
 if __name__ == "__main__":

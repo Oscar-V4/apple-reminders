@@ -23,8 +23,19 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from reminders_service import Guard, MutationOutcome, ReferenceRejected
-from receipt_contract import FAILURE_RECEIPT_STATUSES, SUCCESS_RECEIPT_STATUSES
+from reminders_service import (
+    Guard,
+    MutationOutcome,
+    MutationState,
+    ReferenceRejected,
+    mutation_state_after_unverified_projection,
+    unverified_mutation_projection,
+)
+from receipt_contract import (
+    FAILURE_RECEIPT_STATUSES,
+    SUCCESS_RECEIPT_STATUSES,
+    validated_receipt_mutation_state,
+)
 if __package__:
     from .v2_transport import TransportResult
 else:  # pragma: no cover - exercised by the stdio entry point
@@ -43,7 +54,6 @@ class NativeBackend:
     _PUBLIC_READ_ROUTES = {
         "list_sections": "list_reminder_sections",
         "list_tags": "list_reminder_tags",
-        "create_section": "create_reminder_section",
     }
     _EXPECTED_OPERATIONS = {
         "move_reminder_to_section": "move_to_section",
@@ -80,6 +90,101 @@ class NativeBackend:
             self._build_adapter_argv(public_route, route_arguments)
         )
         return transport.payload
+
+    def create_section(self, list_id: str, name: str) -> MutationOutcome:
+        route_arguments = {"list_id": list_id, "name": name}
+        target = {"list_id": list_id, "section_id": None}
+        try:
+            transport = self._adapter_call(
+                self._build_adapter_argv(
+                    "create_reminder_section",
+                    route_arguments,
+                )
+            )
+        except Exception as exc:
+            return self._pending_outcome(
+                target,
+                "create_section",
+                reason_code="native_section_dispatch_failed",
+                message=(
+                    "The section helper did not return after dispatch may have "
+                    f"started ({type(exc).__name__})."
+                ),
+            )
+
+        if transport.proves_not_started:
+            raw_error = (
+                transport.payload.get("error")
+                if isinstance(transport.payload.get("error"), dict)
+                else {}
+            )
+            code = str(raw_error.get("code") or "adapter_unavailable")
+            message = str(
+                raw_error.get("message")
+                or "The section helper could not be started."
+            )
+            return self._failure_outcome(
+                target,
+                "create_section",
+                code=code,
+                message=message,
+            )
+
+        payload = copy.deepcopy(transport.payload)
+        status = payload.get("status")
+        if status not in SUCCESS_RECEIPT_STATUSES | FAILURE_RECEIPT_STATUSES:
+            return self._pending_outcome(
+                target,
+                "create_section",
+                reason_code="invalid_native_section_receipt",
+                message="The section result could not be validated.",
+            )
+        receipt_error = self._receipt_validator(
+            payload,
+            expected_operation="create_section",
+        )
+        if receipt_error:
+            return self._pending_outcome(
+                target,
+                "create_section",
+                reason_code="invalid_native_section_receipt",
+                message=receipt_error,
+            )
+        if transport.is_error and status not in {
+            "failed_no_mutation",
+            "failed_manual_repair_required",
+        }:
+            return self._pending_outcome(
+                target,
+                "create_section",
+                reason_code="native_section_failed_after_dispatch",
+                message="The section mutation may have partially committed.",
+            )
+
+        mutation_state = validated_receipt_mutation_state(payload)
+
+        if status in {"verified", "unchanged"}:
+            raw_after = payload.get("after")
+            after = raw_after.get("section") if isinstance(raw_after, dict) else None
+            if (
+                not isinstance(after, dict)
+                or after.get("list_id") != list_id
+                or not isinstance(after.get("id"), str)
+                or not after.get("id")
+            ):
+                return self._pending_outcome(
+                    target,
+                    "create_section",
+                    reason_code="native_section_identity_mismatch",
+                    message=(
+                        "The section result could not be bound to the requested "
+                        "exact list."
+                    ),
+                    mutation_state=mutation_state_after_unverified_projection(
+                        mutation_state
+                    ),
+                )
+        return MutationOutcome(receipt=payload, mutation_state=mutation_state)
 
     def _revalidate_guard(self, guard: Guard) -> dict[str, Any]:
         transport = self._bridge_call(
@@ -194,7 +299,7 @@ class NativeBackend:
 
     @staticmethod
     def _failure_outcome(
-        guard: Guard,
+        owner: Guard | dict[str, Any],
         command: str,
         *,
         code: str,
@@ -207,7 +312,11 @@ class NativeBackend:
                 "operation": command,
                 "operation_id": str(uuid.uuid4()),
                 "backend": "native_extension",
-                "target": {"reminder_id": guard.reminder_id},
+                "target": (
+                    {"reminder_id": owner.reminder_id}
+                    if isinstance(owner, Guard)
+                    else copy.deepcopy(owner)
+                ),
                 "before": {},
                 "after": {},
                 "verification": {
@@ -231,45 +340,35 @@ class NativeBackend:
 
     @staticmethod
     def _pending_outcome(
-        guard: Guard,
+        owner: Guard | dict[str, Any],
         command: str,
         *,
         reason_code: str,
         message: str,
+        mutation_state: MutationState = "unknown",
     ) -> MutationOutcome:
-        return MutationOutcome(
-            receipt={
-                "ok": True,
-                "status": "committed_verification_pending",
-                "operation": command,
-                "operation_id": str(uuid.uuid4()),
-                "backend": "native_extension",
-                "target": {"reminder_id": guard.reminder_id},
-                "before": {},
-                "after": {},
-                "verification": {
-                    "state": "pending",
-                    "write_performed": None,
-                    "final_read": False,
-                },
-                "recovery": {
-                    "semantics": "read_before_retry",
-                    "automatic_retry_safe": False,
-                },
-                "warnings": [
-                    {
-                        "code": "verification_pending",
-                        "message": "The native process may have committed; read before retrying.",
-                    }
-                ],
-                "error": {
-                    "code": "sync_pending",
-                    "reason_code": reason_code,
-                    "message": message,
-                    "retryable": True,
-                },
+        receipt: dict[str, Any] = {
+            **unverified_mutation_projection(mutation_state),
+            "operation": command,
+            "operation_id": str(uuid.uuid4()),
+            "backend": "native_extension",
+            "target": (
+                {"reminder_id": owner.reminder_id}
+                if isinstance(owner, Guard)
+                else copy.deepcopy(owner)
+            ),
+            "before": {},
+            "after": {},
+            "error": {
+                "code": "sync_pending",
+                "reason_code": reason_code,
+                "message": message,
+                "retryable": False,
             },
-            mutation_state="unknown",
+        }
+        return MutationOutcome(
+            receipt=receipt,
+            mutation_state=mutation_state,
         )
 
     @staticmethod
@@ -661,6 +760,7 @@ class NativeBackend:
                 message="The native mutation may have partially committed.",
             )
 
+        mutation_state = validated_receipt_mutation_state(payload)
         if status in {"verified", "unchanged"}:
             try:
                 if command in {"move_to_section", "add_tag", "remove_tag"}:
@@ -685,6 +785,9 @@ class NativeBackend:
                         "The native result could not be bound to a final state; "
                         "read the exact Reminder before retrying."
                     ),
+                    mutation_state=mutation_state_after_unverified_projection(
+                        mutation_state
+                    ),
                 )
             if not self._final_state_matches(
                 command,
@@ -701,18 +804,15 @@ class NativeBackend:
                         "The native final read did not match the requested action; "
                         "read the exact Reminder before another mutation."
                     ),
+                    mutation_state=mutation_state_after_unverified_projection(
+                        mutation_state
+                    ),
                 )
             if command in {"attach_image", "replace_image"}:
                 verification = payload.setdefault("verification", {})
                 verification["final_attachment_content_matched"] = True
                 verification["mobile_visible_likely"] = True
 
-        if status in {"unchanged", "failed_no_mutation"}:
-            mutation_state = "not_mutated"
-        elif status in {"verified", "partial_success"}:
-            mutation_state = "committed"
-        else:
-            mutation_state = "unknown"
         return MutationOutcome(receipt=payload, mutation_state=mutation_state)
 
     @staticmethod
@@ -885,10 +985,8 @@ class NativeBackend:
                 reason_code="copy_image_failed_after_dispatch",
                 message="The image copy may have committed to the destination.",
             )
+        mutation_state = validated_receipt_mutation_state(payload)
         if status not in {"verified", "unchanged"}:
-            mutation_state = (
-                "not_mutated" if status == "failed_no_mutation" else "unknown"
-            )
             return MutationOutcome(receipt=payload, mutation_state=mutation_state)
 
         target = payload.get("target")
@@ -908,6 +1006,7 @@ class NativeBackend:
                 command,
                 reason_code="copy_image_target_mismatch",
                 message="The committed copy receipt did not preserve exact identities.",
+                mutation_state=mutation_state_after_unverified_projection(mutation_state),
             )
 
         try:
@@ -959,6 +1058,7 @@ class NativeBackend:
                     "The destination may contain the copied image, but exact source and "
                     "destination read-back did not complete."
                 ),
+                mutation_state=mutation_state_after_unverified_projection(mutation_state),
             )
 
         payload["after"] = {
@@ -991,5 +1091,5 @@ class NativeBackend:
         }
         return MutationOutcome(
             receipt=payload,
-            mutation_state="committed" if status == "verified" else "not_mutated",
+            mutation_state=mutation_state,
         )

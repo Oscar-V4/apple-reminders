@@ -76,6 +76,148 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             receipt_validator=mock.Mock(return_value=receipt_error),
         )
 
+    def test_section_mutation_preserves_validated_committed_state(self) -> None:
+        receipt = {
+            "ok": True,
+            "status": "verified",
+            "operation": "create_section",
+            "operation_id": "22222222-2222-4222-8222-222222222222",
+            "backend": "reminderkit",
+            "target": {"list_id": "LIST-1", "section_id": "SECTION-1"},
+            "before": {},
+            "after": {
+                "section": {
+                    "id": "SECTION-1",
+                    "name": "Next",
+                    "list_id": "LIST-1",
+                }
+            },
+            "verification": {"state": "read_back", "write_performed": True},
+            "recovery": {"semantics": "not_applicable"},
+        }
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+        backend = self.make_backend(
+            bridge_call=mock.Mock(),
+            adapter_call=mock.Mock(return_value=transport(receipt)),
+            argv_calls=argv_calls,
+        )
+
+        outcome = backend.create_section("LIST-1", "Next")
+
+        self.assertEqual(outcome.mutation_state, "committed")
+        self.assertEqual(outcome.receipt, receipt)
+        self.assertEqual(
+            argv_calls,
+            [
+                (
+                    "create_reminder_section",
+                    {"list_id": "LIST-1", "name": "Next"},
+                )
+            ],
+        )
+
+    def test_section_mutation_proves_no_write_only_when_launcher_never_started(self) -> None:
+        backend = self.make_backend(
+            bridge_call=mock.Mock(),
+            adapter_call=mock.Mock(
+                return_value=TransportResult(
+                    payload={
+                        "ok": False,
+                        "error": {
+                            "code": "adapter_unavailable",
+                            "message": "missing helper",
+                        },
+                    },
+                    is_error=True,
+                    dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
+                )
+            ),
+            argv_calls=[],
+        )
+
+        outcome = backend.create_section("LIST-1", "Next")
+
+        self.assertEqual(outcome.mutation_state, "not_mutated")
+        self.assertEqual(outcome.receipt["status"], "failed_no_mutation")
+        self.assertFalse(outcome.receipt["verification"]["write_performed"])
+
+    def test_section_transport_exception_remains_unknown(self) -> None:
+        backend = self.make_backend(
+            bridge_call=mock.Mock(),
+            adapter_call=mock.Mock(side_effect=OSError("response lost")),
+            argv_calls=[],
+        )
+
+        outcome = backend.create_section("LIST-1", "Next")
+
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
+        self.assertEqual(
+            outcome.receipt["error"]["reason_code"],
+            "native_section_dispatch_failed",
+        )
+
+    def test_section_mutation_rejects_receipt_conflict_as_unknown(self) -> None:
+        contradictory = {
+            "ok": False,
+            "status": "failed_no_mutation",
+            "operation": "create_section",
+            "target": {"list_id": "LIST-1"},
+            "before": {},
+            "after": {"section": {"id": "SECTION-1", "list_id": "LIST-1"}},
+            "verification": {"state": "read_back", "write_performed": True},
+            "recovery": {"semantics": "not_applicable"},
+        }
+        backend = self.make_backend(
+            bridge_call=mock.Mock(),
+            adapter_call=mock.Mock(
+                return_value=transport(contradictory, is_error=True)
+            ),
+            argv_calls=[],
+            receipt_error="failed_no_mutation contradicts write evidence",
+        )
+
+        outcome = backend.create_section("LIST-1", "Next")
+
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(
+            outcome.receipt["error"]["reason_code"],
+            "invalid_native_section_receipt",
+        )
+        self.assertFalse(outcome.receipt["recovery"]["automatic_retry_safe"])
+
+    def test_section_identity_projection_conflict_preserves_committed_state(self) -> None:
+        receipt = {
+            "ok": True,
+            "status": "verified",
+            "operation": "create_section",
+            "target": {"list_id": "LIST-OTHER", "section_id": "SECTION-1"},
+            "before": {},
+            "after": {
+                "section": {
+                    "id": "SECTION-1",
+                    "name": "Next",
+                    "list_id": "LIST-OTHER",
+                }
+            },
+            "verification": {"state": "read_back", "write_performed": True},
+            "recovery": {"semantics": "not_applicable"},
+        }
+        backend = self.make_backend(
+            bridge_call=mock.Mock(),
+            adapter_call=mock.Mock(return_value=transport(receipt)),
+            argv_calls=[],
+        )
+
+        outcome = backend.create_section("LIST-1", "Next")
+
+        self.assertEqual(outcome.mutation_state, "committed")
+        self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
+        self.assertEqual(
+            outcome.receipt["error"]["reason_code"],
+            "native_section_identity_mismatch",
+        )
+
     def test_mutation_revalidates_then_uses_fresh_exact_private_revision(self) -> None:
         trace: list[str] = []
 
@@ -198,7 +340,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             {"url": "https://example.com/item"},
         )
 
-        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.mutation_state, "committed")
         self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
         self.assertEqual(outcome.receipt["error"]["reason_code"], "native_final_state_mismatch")
         self.assertFalse(outcome.receipt["recovery"]["automatic_retry_safe"])
@@ -424,7 +566,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.receipt["status"], "failed_manual_repair_required")
-        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.mutation_state, "committed")
         self.assertEqual(adapter_call.call_count, 2)
 
     def test_public_adapter_read_preserves_exact_account_scope(self) -> None:
@@ -930,7 +1072,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.mutation_state, "committed")
         self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
         self.assertFalse(outcome.receipt["verification"]["final_read"])
 

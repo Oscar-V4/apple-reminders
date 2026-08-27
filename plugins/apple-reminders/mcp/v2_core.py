@@ -39,17 +39,29 @@ from reminders_service import (  # noqa: E402
     Guard,
     MoveToListAction,
     MutationOutcome,
+    MutationOutcomeRejected,
     MutationOutcomeUnknown,
+    MutationState,
     PatchAction,
     ReferenceRejected,
     SetCompletionAction,
     Snapshot,
+    mutation_state_after_unverified_projection,
     reminder_matches_fields,
+    unverified_mutation_projection,
 )
 if __package__:  # Package import in tests; script-local import in the stdio server.
-    from .v2_contract import MUTATION_STATUSES, SUCCESS_STATUSES
+    from .v2_contract import (
+        MUTATION_STATUSES,
+        STATUS_MUTATION_STATES,
+        SUCCESS_STATUSES,
+    )
 else:  # pragma: no cover - exercised by the script entry point
-    from v2_contract import MUTATION_STATUSES, SUCCESS_STATUSES
+    from v2_contract import (
+        MUTATION_STATUSES,
+        STATUS_MUTATION_STATES,
+        SUCCESS_STATUSES,
+    )
 
 
 PUBLIC_ERROR_CODES = frozenset(
@@ -125,12 +137,20 @@ class EventKitReply:
 
     payload: Mapping[str, Any]
     is_error: bool = False
+    mutation_state: MutationState | None = None
 
 
 @dataclass(frozen=True)
 class _IdempotentResult:
     fingerprint: str
     payload: dict[str, Any]
+    mutation_state: MutationState
+
+
+@dataclass(frozen=True)
+class _CoreCallResult:
+    payload: dict[str, Any]
+    mutation_state: MutationState
 
 
 @dataclass(frozen=True)
@@ -196,6 +216,12 @@ class UnsafeRevisionError(AdapterContractError):
 
 def _deep_dict(value: Any) -> dict[str, Any]:
     return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else {}
+
+
+def _reply_mutation_state(reply: EventKitReply) -> MutationState:
+    if reply.mutation_state in {"not_mutated", "committed", "unknown"}:
+        return reply.mutation_state
+    return "unknown"
 
 
 def _trimmed_string(value: Any, name: str, maximum: int) -> str:
@@ -848,7 +874,11 @@ class EventKitCoreAdapter:
             raise AdapterContractError("EventKit mutation omitted its receipt status")
         raw_error = payload.get("error")
         public_error = _public_error(raw_error)
-        if status == "failed_no_mutation" and public_error["code"] == "concurrent_modification":
+        if (
+            status == "failed_no_mutation"
+            and public_error["code"] == "concurrent_modification"
+            and _reply_mutation_state(reply) == "not_mutated"
+        ):
             raise AdapterConflict(public_error["reason_code"])
 
         target_raw = payload.get("target")
@@ -892,25 +922,12 @@ class EventKitCoreAdapter:
         ):
             receipt["error"] = public_error
 
-        if status in {"unchanged", "failed_no_mutation"}:
-            mutation_state = "not_mutated"
-        elif status == "verified":
-            mutation_state = "committed"
-        elif status == "partial_success":
-            mutation_state = (
-                "committed"
-                if receipt["verification"]["write_performed"] is True
-                and receipt["verification"]["final_read"]
-                else "unknown"
-            )
-        elif status in {
-            "committed_verification_pending",
-            "failed_manual_repair_required",
-        }:
-            mutation_state = "unknown"
-        else:
+        if status not in MUTATION_STATUSES:
             raise AdapterContractError(f"EventKit returned unsupported status: {status}")
-        return MutationOutcome(receipt=receipt, mutation_state=mutation_state)
+        return MutationOutcome(
+            receipt=receipt,
+            mutation_state=_reply_mutation_state(reply),
+        )
 
 
 class V2CoreFacade:
@@ -957,21 +974,99 @@ class V2CoreFacade:
         return self._references
 
     def call(self, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        routes: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
+        return self.call_with_state(tool_name, arguments)[0]
+
+    def call_with_state(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], MutationState | None]:
+        read_routes: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
             "request_reminders_access": self.request_reminders_access,
             "list_reminder_lists": self.list_reminder_lists,
             "fetch_reminders": self.fetch_reminders,
             "read_reminder": self.read_reminder,
-            "create_reminder": self.create_reminder,
-            "change_reminder": self.change_reminder,
-            "delete_reminder": self.delete_reminder,
-            "ensure_reminder_list": self.ensure_reminder_list,
         }
-        try:
-            route = routes[tool_name]
-        except KeyError as exc:
-            raise FacadeInputError(f"unsupported v2 Core tool: {tool_name}") from exc
-        return route(arguments)
+        mutation_routes: dict[
+            str,
+            Callable[[Mapping[str, Any]], _CoreCallResult],
+        ] = {
+            "create_reminder": self._create_reminder_with_state,
+            "change_reminder": self._change_reminder_with_state,
+            "delete_reminder": self._delete_reminder_with_state,
+            "ensure_reminder_list": self._ensure_reminder_list_with_state,
+        }
+        if tool_name in read_routes:
+            return read_routes[tool_name](arguments), None
+        if tool_name in mutation_routes:
+            outcome = self._align_mutation_projection(
+                mutation_routes[tool_name](arguments)
+            )
+            return outcome.payload, outcome.mutation_state
+        raise FacadeInputError(f"unsupported v2 Core tool: {tool_name}")
+
+    def _align_mutation_projection(
+        self,
+        outcome: _CoreCallResult,
+    ) -> _CoreCallResult:
+        state = outcome.mutation_state
+        if state not in {"not_mutated", "committed", "unknown"}:
+            raise RuntimeError("Core returned invalid independent mutation state")
+        payload = copy.deepcopy(outcome.payload)
+        status = payload.get("status")
+        verification = _deep_dict(payload.get("verification"))
+        write_performed = verification.get("write_performed")
+        state_matches = state in STATUS_MUTATION_STATES.get(status, frozenset())
+        evidence_matches = (
+            write_performed is False
+            if state == "not_mutated"
+            else write_performed is True
+            if state == "committed"
+            else write_performed is not False
+        )
+        if state_matches and evidence_matches:
+            return _CoreCallResult(payload, state)
+
+        operation = str(payload.get("operation") or "change_reminder")
+        current_error = payload.get("error")
+        if (
+            status
+            in {
+                "committed_verification_pending",
+                "partial_success",
+                "failed_manual_repair_required",
+            }
+            and isinstance(current_error, Mapping)
+            and current_error.get("code") == "sync_pending"
+        ):
+            error = {**copy.deepcopy(dict(current_error)), "retryable": False}
+        else:
+            error = {
+                "code": "sync_pending",
+                "reason_code": "mutation_projection_mismatch",
+                "message": (
+                    "The mutation result could not be bound safely; read the exact "
+                    "state before retrying."
+                ),
+                "retryable": False,
+            }
+        previous_warnings = _warnings(payload.get("warnings"))
+        payload.update(unverified_mutation_projection(state))
+        payload.update({"before": None, "after": None, "error": error})
+        if state == "not_mutated":
+            payload.pop("warnings", None)
+        elif previous_warnings:
+            default_warning = payload["warnings"][0]
+            if not any(
+                item.get("code") == "verification_pending"
+                for item in previous_warnings
+            ):
+                previous_warnings.append(default_warning)
+            payload["warnings"] = previous_warnings[:20]
+        next_action = _next_action(error, operation=operation)
+        if next_action is not None:
+            payload["next_action"] = next_action
+        return _CoreCallResult(payload, state)
 
     def request_reminders_access(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if arguments:
@@ -1018,36 +1113,51 @@ class V2CoreFacade:
         }
 
     def ensure_reminder_list(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call_with_state("ensure_reminder_list", arguments)[0]
+
+    def _ensure_reminder_list_with_state(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> _CoreCallResult:
         if set(arguments) != {"source_id", "name", "idempotency_key"}:
-            return self._mutation_failure(
-                "ensure_reminder_list",
-                target={"source_id": arguments.get("source_id"), "list_id": None},
-                code="invalid_input",
-                reason_code="invalid_ensure_list_fields",
-                message="ensure_reminder_list requires source_id, name, and idempotency_key.",
-                retryable=False,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "ensure_reminder_list",
+                    target={"source_id": arguments.get("source_id"), "list_id": None},
+                    code="invalid_input",
+                    reason_code="invalid_ensure_list_fields",
+                    message="ensure_reminder_list requires source_id, name, and idempotency_key.",
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         try:
             source_id = _trimmed_string(arguments["source_id"], "source_id", 2048)
             name = _trimmed_string(arguments["name"], "name", 512)
         except FacadeInputError as exc:
-            return self._mutation_failure(
-                "ensure_reminder_list",
-                target={"source_id": arguments.get("source_id"), "list_id": None},
-                code="invalid_input",
-                reason_code="invalid_list_identity",
-                message=str(exc),
-                retryable=False,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "ensure_reminder_list",
+                    target={"source_id": arguments.get("source_id"), "list_id": None},
+                    code="invalid_input",
+                    reason_code="invalid_list_identity",
+                    message=str(exc),
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         key = arguments["idempotency_key"]
         if not isinstance(key, str) or not IDEMPOTENCY_PATTERN.fullmatch(key):
-            return self._mutation_failure(
-                "ensure_reminder_list",
-                target={"source_id": source_id, "list_id": None},
-                code="invalid_input",
-                reason_code="invalid_idempotency_key",
-                message="idempotency_key must contain 8-256 safe characters.",
-                retryable=False,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "ensure_reminder_list",
+                    target={"source_id": source_id, "list_id": None},
+                    code="invalid_input",
+                    reason_code="invalid_idempotency_key",
+                    message="idempotency_key must contain 8-256 safe characters.",
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
         request_fingerprint = hashlib.sha256(
@@ -1061,17 +1171,20 @@ class V2CoreFacade:
             previous = self._idempotency.get(key_hash)
             if previous is not None:
                 if previous.fingerprint != request_fingerprint:
-                    return self._mutation_failure(
-                        "ensure_reminder_list",
-                        target={"source_id": source_id, "list_id": None},
-                        code="invalid_input",
-                        reason_code="idempotency_key_conflict",
-                        message="The idempotency key was already used for different list input.",
-                        retryable=False,
+                    return _CoreCallResult(
+                        self._mutation_failure(
+                            "ensure_reminder_list",
+                            target={"source_id": source_id, "list_id": None},
+                            code="invalid_input",
+                            reason_code="idempotency_key_conflict",
+                            message="The idempotency key was already used for different list input.",
+                            retryable=False,
+                        ),
+                        "not_mutated",
                     )
                 replay = copy.deepcopy(previous.payload)
                 replay["replayed"] = True
-                return replay
+                return _CoreCallResult(replay, previous.mutation_state)
 
             try:
                 reply = self._eventkit.invoke(
@@ -1080,6 +1193,7 @@ class V2CoreFacade:
                     mutation=True,
                 )
             except Exception:
+                mutation_state: MutationState = "unknown"
                 result = self._pending_list_result(
                     source_id,
                     reason_code="eventkit_list_dispatch_failed",
@@ -1089,11 +1203,16 @@ class V2CoreFacade:
                     ),
                 )
             else:
+                mutation_state = _reply_mutation_state(reply)
                 result = self._project_list_receipt(
                     reply,
                     source_id=source_id,
                     expected_name=name,
                 )
+                if result.get("status") == "committed_verification_pending":
+                    mutation_state = mutation_state_after_unverified_projection(
+                        mutation_state
+                    )
             result["replayed"] = False
             result["idempotency_key_hash"] = key_hash
             if result["status"] in SUCCESS_STATUSES:
@@ -1102,8 +1221,9 @@ class V2CoreFacade:
                 self._idempotency[key_hash] = _IdempotentResult(
                     request_fingerprint,
                     copy.deepcopy(result),
+                    mutation_state,
                 )
-            return result
+            return _CoreCallResult(result, mutation_state)
 
     def _project_list_receipt(
         self,
@@ -1419,6 +1539,12 @@ class V2CoreFacade:
         }
 
     def create_reminder(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call_with_state("create_reminder", arguments)[0]
+
+    def _create_reminder_with_state(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> _CoreCallResult:
         list_id = arguments.get("list_id")
         title = arguments.get("title")
         idempotency_key = arguments.get("idempotency_key")
@@ -1426,13 +1552,16 @@ class V2CoreFacade:
             isinstance(value, str) and value
             for value in (list_id, title, idempotency_key)
         ):
-            return self._mutation_failure(
-                "create_reminder",
-                target={"list_id": list_id} if isinstance(list_id, str) else {},
-                code="invalid_input",
-                reason_code="missing_create_fields",
-                message="create_reminder requires list_id, title, and idempotency_key.",
-                retryable=False,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "create_reminder",
+                    target={"list_id": list_id} if isinstance(list_id, str) else {},
+                    code="invalid_input",
+                    reason_code="missing_create_fields",
+                    message="create_reminder requires list_id, title, and idempotency_key.",
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         bridge_arguments = {
             key: copy.deepcopy(value)
@@ -1447,12 +1576,16 @@ class V2CoreFacade:
                 mutation=True,
             )
         except Exception:
-            return self._unknown_mutation_result(
-                "create_reminder",
-                target={"list_id": list_id},
-                reason_code="eventkit_dispatch_failed",
-                message="The create outcome is unknown; read the list before retrying.",
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    "create_reminder",
+                    target={"list_id": list_id},
+                    reason_code="eventkit_dispatch_failed",
+                    message="The create outcome is unknown; read the list before retrying.",
+                ),
+                "unknown",
             )
+        mutation_state = _reply_mutation_state(reply)
         payload = _deep_dict(reply.payload)
         status = payload.get("status")
         if status not in {
@@ -1465,11 +1598,14 @@ class V2CoreFacade:
         }:
             # Dispatch already occurred. A malformed reply cannot be relabeled
             # failed-no-mutation because the native process may have committed.
-            return self._unknown_mutation_result(
-                "create_reminder",
-                target={"list_id": list_id},
-                reason_code="invalid_eventkit_mutation_receipt",
-                message="The create outcome could not be validated; read the list before retrying.",
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    "create_reminder",
+                    target={"list_id": list_id},
+                    reason_code="invalid_eventkit_mutation_receipt",
+                    message="The create outcome could not be validated; read the list before retrying.",
+                ),
+                mutation_state_after_unverified_projection(mutation_state),
             )
 
         target_raw = payload.get("target")
@@ -1501,18 +1637,24 @@ class V2CoreFacade:
 
         if status in {"verified", "unchanged"}:
             if not isinstance(reminder_id, str) or not reminder_id:
-                return self._mark_final_read_pending(
-                    receipt,
-                    reason_code="created_reminder_id_missing",
-                    message="The create committed, but its exact Reminder identifier was unavailable.",
+                return _CoreCallResult(
+                    self._mark_final_read_pending(
+                        receipt,
+                        reason_code="created_reminder_id_missing",
+                        message="The create committed, but its exact Reminder identifier was unavailable.",
+                    ),
+                    mutation_state_after_unverified_projection(mutation_state),
                 )
             try:
                 exact = self._references.read_exact(reminder_id)
             except (EventKitOperationError, UnsafeRevisionError, AdapterContractError):
-                return self._mark_final_read_pending(
-                    receipt,
-                    reason_code="create_final_read_failed",
-                    message="The create committed, but a fresh exact reference could not be issued.",
+                return _CoreCallResult(
+                    self._mark_final_read_pending(
+                        receipt,
+                        reason_code="create_final_read_failed",
+                        message="The create committed, but a fresh exact reference could not be issued.",
+                    ),
+                    mutation_state_after_unverified_projection(mutation_state),
                 )
             expected_fields = {
                 "list_id": list_id,
@@ -1532,14 +1674,17 @@ class V2CoreFacade:
             }
             if not reminder_matches_fields(exact.reminder, expected_fields):
                 self._references.invalidate_reference(exact.reference)
-                return self._mark_final_state_mismatch(
-                    receipt,
-                    reason_code="create_final_state_mismatch",
-                    message=(
-                        "The create returned an exact Reminder, but its final state "
-                        "did not match the requested fields. Read the list before "
-                        "another create."
+                return _CoreCallResult(
+                    self._mark_final_state_mismatch(
+                        receipt,
+                        reason_code="create_final_state_mismatch",
+                        message=(
+                            "The create returned an exact Reminder, but its final state "
+                            "did not match the requested fields. Read the list before "
+                            "another create."
+                        ),
                     ),
+                    mutation_state_after_unverified_projection(mutation_state),
                 )
             receipt["after"] = _change_reminder(
                 exact.reminder,
@@ -1552,38 +1697,53 @@ class V2CoreFacade:
                 "final_read": True,
                 "matched": True,
             }
-        return receipt
+        return _CoreCallResult(receipt, mutation_state)
 
     def delete_reminder(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call_with_state("delete_reminder", arguments)[0]
+
+    def _delete_reminder_with_state(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> _CoreCallResult:
         reference = arguments.get("reference")
         if not isinstance(reference, str) or not reference:
-            return self._mutation_failure(
-                "delete_reminder",
-                target={},
-                code="invalid_input",
-                reason_code="invalid_reference",
-                message="delete_reminder requires one opaque reference.",
-                retryable=False,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "delete_reminder",
+                    target={},
+                    code="invalid_input",
+                    reason_code="invalid_reference",
+                    message="delete_reminder requires one opaque reference.",
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         try:
             guard = self._references.revalidate_reference(reference)
         except ReferenceRejected as exc:
-            return self._mutation_failure(
-                "delete_reminder",
-                target={},
-                code="concurrent_modification",
-                reason_code=exc.code,
-                message=str(exc),
-                retryable=True,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "delete_reminder",
+                    target={},
+                    code="concurrent_modification",
+                    reason_code=exc.code,
+                    message=str(exc),
+                    retryable=True,
+                ),
+                "not_mutated",
             )
         except (EventKitOperationError, UnsafeRevisionError, AdapterContractError) as exc:
-            return self._mutation_failure(
-                "delete_reminder",
-                target={},
-                code="sync_pending",
-                reason_code="reference_revalidation_failed",
-                message=str(exc),
-                retryable=True,
+            return _CoreCallResult(
+                self._mutation_failure(
+                    "delete_reminder",
+                    target={},
+                    code="sync_pending",
+                    reason_code="reference_revalidation_failed",
+                    message=str(exc),
+                    retryable=True,
+                ),
+                "not_mutated",
             )
 
         target = {"reminder_id": guard.reminder_id}
@@ -1598,12 +1758,16 @@ class V2CoreFacade:
             )
         except Exception:
             self._references.invalidate_reference(reference)
-            return self._unknown_mutation_result(
-                "delete_reminder",
-                target=target,
-                reason_code="eventkit_dispatch_failed",
-                message="The delete outcome is unknown; read before retrying.",
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    "delete_reminder",
+                    target=target,
+                    reason_code="eventkit_dispatch_failed",
+                    message="The delete outcome is unknown; read before retrying.",
+                ),
+                "unknown",
             )
+        mutation_state = _reply_mutation_state(reply)
         payload = _deep_dict(reply.payload)
         status = payload.get("status")
         if status not in {
@@ -1615,15 +1779,22 @@ class V2CoreFacade:
             "failed_manual_repair_required",
         }:
             self._references.invalidate_reference(reference)
-            return self._unknown_mutation_result(
-                "delete_reminder",
-                target=target,
-                reason_code="invalid_eventkit_mutation_receipt",
-                message="The delete outcome could not be validated; read before retrying.",
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    "delete_reminder",
+                    target=target,
+                    reason_code="invalid_eventkit_mutation_receipt",
+                    message="The delete outcome could not be validated; read before retrying.",
+                ),
+                mutation_state_after_unverified_projection(mutation_state),
             )
 
         public_error = _public_error(payload.get("error"))
-        if status != "failed_no_mutation" or public_error["code"] == "concurrent_modification":
+        if (
+            mutation_state in {"committed", "unknown"}
+            or status != "failed_no_mutation"
+            or public_error["code"] == "concurrent_modification"
+        ):
             self._references.invalidate_reference(reference)
         before = (
             _change_reminder(payload.get("before"))
@@ -1644,14 +1815,23 @@ class V2CoreFacade:
             after=after,
         )
         if status in {"verified", "unchanged"} and verification.get("local_absence") is not True:
-            return self._mark_final_read_pending(
-                receipt,
-                reason_code="delete_absence_unverified",
-                message="The delete may have committed, but exact local absence was not verified.",
+            return _CoreCallResult(
+                self._mark_final_read_pending(
+                    receipt,
+                    reason_code="delete_absence_unverified",
+                    message="The delete may have committed, but exact local absence was not verified.",
+                ),
+                mutation_state_after_unverified_projection(mutation_state),
             )
-        return receipt
+        return _CoreCallResult(receipt, mutation_state)
 
     def change_reminder(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call_with_state("change_reminder", arguments)[0]
+
+    def _change_reminder_with_state(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> _CoreCallResult:
         reference = arguments.get("reference")
         raw_action = arguments.get("action")
         action_kind = raw_action.get("kind") if isinstance(raw_action, Mapping) else None
@@ -1664,36 +1844,58 @@ class V2CoreFacade:
                 raise ActionRejected("change_reminder requires reference and action")
             result = self._references.change(reference, raw_action)
         except ReferenceRejected as exc:
-            return self._change_failure(
-                public_operation,
-                None,
-                code="concurrent_modification",
-                reason_code=exc.code,
-                message=str(exc),
-                retryable=True,
+            return _CoreCallResult(
+                self._change_failure(
+                    public_operation,
+                    None,
+                    code="concurrent_modification",
+                    reason_code=exc.code,
+                    message=str(exc),
+                    retryable=True,
+                ),
+                "not_mutated",
             )
         except ActionRejected as exc:
-            return self._change_failure(
-                public_operation,
-                None,
-                code="invalid_input",
-                reason_code=exc.code,
-                message=str(exc),
-                retryable=False,
+            return _CoreCallResult(
+                self._change_failure(
+                    public_operation,
+                    None,
+                    code="invalid_input",
+                    reason_code=exc.code,
+                    message=str(exc),
+                    retryable=False,
+                ),
+                "not_mutated",
             )
         except MutationOutcomeUnknown as exc:
-            return self._unknown_mutation_result(
-                public_operation,
-                target={},
-                reason_code="eventkit_dispatch_failed",
-                message=str(exc),
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    public_operation,
+                    target={},
+                    reason_code="eventkit_dispatch_failed",
+                    message=str(exc),
+                ),
+                "unknown",
+            )
+        except MutationOutcomeRejected as exc:
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    public_operation,
+                    target={},
+                    reason_code="adapter_contract_error",
+                    message=str(exc),
+                ),
+                mutation_state_after_unverified_projection(exc.mutation_state),
             )
         except AdapterContractError as exc:
-            return self._unknown_mutation_result(
-                public_operation,
-                target={},
-                reason_code="adapter_contract_error",
-                message=str(exc),
+            return _CoreCallResult(
+                self._unknown_mutation_result(
+                    public_operation,
+                    target={},
+                    reason_code="adapter_contract_error",
+                    message=str(exc),
+                ),
+                "unknown",
             )
 
         receipt = copy.deepcopy(result.receipt)
@@ -1724,6 +1926,10 @@ class V2CoreFacade:
             receipt["before"] = None
             receipt["after"] = None
 
+        mutation_state = result.mutation_state
+        if result.reference_error in {"final_state_mismatch", "final_read_failed"}:
+            mutation_state = mutation_state_after_unverified_projection(mutation_state)
+
         if result.reference_error == "final_state_mismatch":
             receipt = self._mark_final_state_mismatch(
                 receipt,
@@ -1738,7 +1944,9 @@ class V2CoreFacade:
             receipt["ok"] = True
             receipt["verification"] = {
                 "state": "pending",
-                "write_performed": True,
+                "write_performed": (
+                    True if mutation_state == "committed" else None
+                ),
                 "final_read": False,
                 "matched": None,
             }
@@ -1772,7 +1980,7 @@ class V2CoreFacade:
             )
             if next_action is not None:
                 receipt["next_action"] = next_action
-        return receipt
+        return _CoreCallResult(receipt, mutation_state)
 
     def _project_mutation_receipt(
         self,

@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
-from typing import Any
+from typing import Any, Literal
+
+
+MutationState = Literal["not_mutated", "committed", "unknown"]
 
 
 SUCCESS_RECEIPT_STATUSES = frozenset(
@@ -40,6 +43,46 @@ STABLE_ERROR_CODES = frozenset(
 
 def receipt_status_is_success(status: Any) -> bool:
     return status in SUCCESS_RECEIPT_STATUSES
+
+
+def validated_receipt_mutation_state(payload: dict[str, Any]) -> MutationState:
+    status = payload.get("status")
+    if status == "failed_no_mutation":
+        return (
+            "not_mutated"
+            if failed_no_mutation_evidence_error(payload) is None
+            else "unknown"
+        )
+    verification = payload.get("verification")
+    write_performed = (
+        verification.get("write_performed")
+        if isinstance(verification, dict)
+        else None
+    )
+    evidence_fields = (
+        "write_performed",
+        "committed",
+        "commit_succeeded",
+        "may_have_mutated",
+        "partial_failure",
+    )
+    affirmative_write_evidence = any(
+        payload.get(field) is True
+        or (isinstance(verification, dict) and verification.get(field) is True)
+        for field in evidence_fields
+    )
+    if status == "unchanged":
+        return "unknown" if affirmative_write_evidence else "not_mutated"
+    if status == "verified":
+        return "unknown" if write_performed is False else "committed"
+    if status in {
+        "committed_verification_pending",
+        "partial_success",
+        "failed_manual_repair_required",
+    }:
+        if write_performed is True:
+            return "committed"
+    return "unknown"
 
 
 def failed_no_mutation_evidence_error(payload: Any) -> str | None:

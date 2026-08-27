@@ -54,6 +54,16 @@ NATIVE_TOOLS = {
 }
 RECOVERY_TOOLS = {"inspect_recently_deleted", "recover_deleted_reminder"}
 DIAGNOSTIC_TOOLS = {"diagnose_reminders"}
+MUTATION_TOOLS = {
+    "create_reminder",
+    "change_reminder",
+    "delete_reminder",
+    "recover_deleted_reminder",
+    "ensure_reminder_list",
+    "create_reminder_section",
+    "organize_reminder",
+    "change_reminder_attachment",
+}
 REFERENCE_MUTATIONS = {
     "create_reminder",
     "change_reminder",
@@ -367,6 +377,14 @@ class RecordingFacade:
         copied = copy.deepcopy(dict(arguments))
         self.calls.append((name, copied))
         return valid_public_result(name, copied)
+
+    def call_with_state(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        payload = self.call(name, arguments)
+        return payload, ("committed" if name in MUTATION_TOOLS else None)
 
 
 VALID_ARGUMENTS: dict[str, dict[str, Any]] = {
@@ -1130,12 +1148,69 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(
             payload["error"]["reason_code"], "public_result_contract_failed"
         )
-        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertTrue(payload["verification"]["write_performed"])
         self.assertEqual(payload["next_action"]["tool"], "read_reminder")
         self.assertNotIn("mutation_state", payload)
         summary = json.loads(result["content"][0]["text"])
         self.assertEqual(summary["outcome"], "attention_required")
+        self.assertEqual(summary["write_state"], "committed_unverified")
+
+    def test_invalid_independent_mutation_state_fails_closed(self) -> None:
+        arguments = copy.deepcopy(VALID_ARGUMENTS["create_reminder"])
+
+        class InvalidStateFacade:
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                return valid_public_result(name, supplied), "commited"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("mutation dispatch must use call_with_state")
+
+        self.use_runtime(core=InvalidStateFacade())
+
+        result = self.runtime.call_tool("create_reminder", arguments)
+
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(
+            payload["error"]["reason_code"],
+            "public_result_contract_failed",
+        )
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
         self.assertEqual(summary["write_state"], "unknown")
+
+    def test_read_facade_cannot_smuggle_mutation_state(self) -> None:
+        class InvalidReadStateFacade:
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                return valid_public_result(name, supplied), "committed"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("read dispatch must use call_with_state")
+
+        self.use_runtime(core=InvalidReadStateFacade())
+
+        result = self.runtime.call_tool(
+            "read_reminder",
+            {"reminder_id": REMINDER_ID},
+        )
+
+        payload = result["structuredContent"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertEqual(
+            payload["error"]["reason_code"],
+            "public_result_contract_failed",
+        )
 
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
         notes = "n" * 70_000

@@ -12,13 +12,22 @@ import copy
 import datetime as dt
 import hashlib
 import re
+import sys
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from receipt_contract import validated_receipt_mutation_state
+
 if __package__:  # Package import in tests; script-local import in the stdio server.
-    from .v2_core import EventKitReply
+    from .v2_core import EventKitReply, MutationState
     from .v2_transport import TransportResult
 else:  # pragma: no cover - exercised by the script entry point
-    from v2_core import EventKitReply
+    from v2_core import EventKitReply, MutationState
     from v2_transport import TransportResult
 
 
@@ -30,9 +39,14 @@ ReceiptValidator = Callable[..., str | None]
 
 
 class _EventKitBridgeFailure(RuntimeError):
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        mutation_state: MutationState,
+    ) -> None:
         super().__init__("EventKit bridge operation failed")
         self.payload = payload
+        self.mutation_state = mutation_state
 
 
 class _EventKitReceiptFailure(RuntimeError):
@@ -81,7 +95,7 @@ class CoreBackend:
             tool_name = self._MUTATION_TOOL_NAMES.get(operation)
             if tool_name is None:
                 raise RuntimeError(f"Unsupported v2 EventKit mutation: {operation}")
-            payload, is_error = self._invoke_mutation(
+            payload, is_error, mutation_state = self._invoke_mutation(
                 tool_name,
                 operation,
                 supplied,
@@ -90,7 +104,12 @@ class CoreBackend:
             transport = self._bridge_call(operation, supplied)
             payload = transport.payload
             is_error = transport.is_error
-        return EventKitReply(payload=payload, is_error=is_error)
+            mutation_state = None
+        return EventKitReply(
+            payload=payload,
+            is_error=is_error,
+            mutation_state=mutation_state,
+        )
 
     @staticmethod
     def _mutation_reminder_id(payload: dict[str, Any]) -> str | None:
@@ -162,6 +181,7 @@ class CoreBackend:
     ) -> dict[str, Any]:
         payload["ok"] = False
         payload["status"] = "failed_no_mutation"
+        payload["after"] = {}
         verification = payload.setdefault("verification", {})
         verification.update(
             {
@@ -257,6 +277,18 @@ class CoreBackend:
         payload["ok"] = True
         payload["status"] = "committed_verification_pending"
         verification["state"] = "pending"
+        url_verification = verification.get("url_attachment")
+        verification["write_performed"] = (
+            True
+            if verification.get("write_performed") is True
+            or (
+                isinstance(url_verification, dict)
+                and url_verification.get("status") == "verified"
+            )
+            else None
+        )
+        verification["final_read"] = False
+        verification["matched"] = None
         payload["error"] = {
             "code": "sync_pending",
             "reason_code": reason_code,
@@ -607,10 +639,6 @@ class CoreBackend:
                 reason_code=reason_code,
             )
 
-        final_after = dict(final_reminder)
-        if attachment is not None:
-            final_after["url_attachment"] = attachment
-        payload["after"] = final_after
         payload.setdefault("verification", {})["eventkit_final_read"] = {
             "state": "read_back",
             "reminder_id": reminder_id,
@@ -620,7 +648,11 @@ class CoreBackend:
             "semantics": "not_applicable",
             "automatic_retry_safe": True,
         }
+        final_after = dict(final_reminder)
+        if attachment is not None:
+            final_after["url_attachment"] = attachment
         if payload.get("status") == "partial_success":
+            payload["after"] = final_after
             verification = payload.setdefault("verification", {})
             verification["state"] = "partial"
             verification["final_read"] = True
@@ -628,16 +660,27 @@ class CoreBackend:
             return payload
         if payload.get("status") == "failed_no_mutation":
             verification = payload.setdefault("verification", {})
-            verification["state"] = "read_back"
+            verification["state"] = "not_needed"
             verification["write_performed"] = False
-            verification["final_read"] = True
+            verification["final_read"] = False
             verification["matched"] = False
+            payload["after"] = {}
             return payload
+        payload["after"] = final_after
         payload["status"] = (
             "unchanged"
             if initial_eventkit_status == "unchanged"
             and attachment_status == "unchanged"
             else "verified"
+        )
+        verification = payload.setdefault("verification", {})
+        verification.update(
+            {
+                "state": "read_back",
+                "write_performed": payload["status"] == "verified",
+                "final_read": True,
+                "matched": True,
+            }
         )
         return payload
 
@@ -646,13 +689,15 @@ class CoreBackend:
         tool_name: str,
         operation: str,
         arguments: dict[str, Any],
-    ) -> tuple[dict[str, Any], bool]:
+    ) -> tuple[dict[str, Any], bool, MutationState]:
         bridge_arguments = dict(arguments)
         idempotency_key = bridge_arguments.pop("idempotency_key", None)
         bridge_contract = self._bridge_module()
         adapter: Any | None = None
+        executed_state: MutationState | None = None
 
         def execute_once() -> dict[str, Any]:
+            nonlocal executed_state
             transport = self._bridge_call(operation, bridge_arguments)
             payload = transport.payload
             is_error = transport.is_error
@@ -676,17 +721,24 @@ class CoreBackend:
                     and payload.get("ok") is False
                     and callable(validate_response)
                 )
+                error_state: MutationState = "unknown"
+                if transport_not_started:
+                    error_state = "not_mutated"
+                elif contract_proved_no_write:
+                    try:
+                        validate_response(payload, operation)
+                    except RuntimeError:
+                        contract_proved_no_write = False
+                    else:
+                        error_state = "not_mutated"
                 proven_no_write = (
                     tool_name == "create_reminder"
                     and isinstance(adapter_error, type)
                     and isinstance(mutation_not_started_error, type)
                     and (transport_not_started or contract_proved_no_write)
                 )
-                if proven_no_write and not transport_not_started:
-                    try:
-                        validate_response(payload, operation)
-                    except RuntimeError:
-                        proven_no_write = False
+                if proven_no_write and error_state != "not_mutated":
+                    proven_no_write = False
                 if proven_no_write:
                     error = payload.get("error")
                     if not isinstance(error, dict):
@@ -711,11 +763,12 @@ class CoreBackend:
                         result_status="failed_no_mutation",
                         public_payload=public_payload,
                     )
-                raise _EventKitBridgeFailure(payload)
+                raise _EventKitBridgeFailure(payload, error_state)
             try:
                 bridge_contract.validate_mutation_receipt(payload, operation)
             except RuntimeError as exc:
                 raise _EventKitReceiptFailure(str(exc)) from exc
+            raw_state = validated_receipt_mutation_state(payload)
             visible_url = (
                 bridge_arguments.get("url")
                 if tool_name == "create_reminder"
@@ -727,6 +780,14 @@ class CoreBackend:
                 visible_url = bridge_arguments["patch"].get("url")
             if isinstance(visible_url, str):
                 payload = self._ensure_visible_url_attachment(payload, visible_url)
+            projected_state = validated_receipt_mutation_state(payload)
+            executed_state = (
+                "committed"
+                if raw_state == "committed"
+                else "unknown"
+                if raw_state == "unknown"
+                else projected_state
+            )
             return payload
 
         try:
@@ -767,7 +828,7 @@ class CoreBackend:
             else:
                 payload = execute_once()
         except _EventKitBridgeFailure as exc:
-            return exc.payload, True
+            return exc.payload, True, exc.mutation_state
         except _EventKitReceiptFailure as exc:
             return (
                 {
@@ -778,17 +839,28 @@ class CoreBackend:
                     },
                 },
                 True,
+                "unknown",
             )
         except Exception as exc:
-            adapter_error = getattr(
-                adapter if adapter is not None else self._adapter_module(),
-                "AdapterError",
+            adapter_contract = (
+                adapter if adapter is not None else self._adapter_module()
+            )
+            adapter_error = getattr(adapter_contract, "AdapterError", ())
+            mutation_not_started_error = getattr(
+                adapter_contract,
+                "MutationNotStartedError",
                 (),
             )
             if adapter_error and isinstance(exc, adapter_error):
+                error_state: MutationState = (
+                    "not_mutated"
+                    if mutation_not_started_error
+                    and isinstance(exc, mutation_not_started_error)
+                    else "unknown"
+                )
                 eventkit_payload = getattr(exc, "public_payload", None)
                 if isinstance(eventkit_payload, dict):
-                    return copy.deepcopy(eventkit_payload), True
+                    return copy.deepcopy(eventkit_payload), True, error_state
                 return (
                     {
                         "ok": False,
@@ -801,6 +873,16 @@ class CoreBackend:
                         },
                     },
                     True,
+                    error_state,
                 )
             raise
-        return payload, payload.get("ok") is not True
+        if executed_state is None:
+            try:
+                bridge_contract.validate_mutation_receipt(payload, operation)
+            except RuntimeError:
+                mutation_state: MutationState = "unknown"
+            else:
+                mutation_state = validated_receipt_mutation_state(payload)
+        else:
+            mutation_state = executed_state
+        return payload, payload.get("ok") is not True, mutation_state

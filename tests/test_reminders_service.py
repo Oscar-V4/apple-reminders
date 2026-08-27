@@ -21,6 +21,7 @@ from reminders_service import (  # noqa: E402
     Guard,
     MoveToListAction,
     MutationOutcome,
+    MutationOutcomeRejected,
     MutationOutcomeUnknown,
     PatchAction,
     ReferenceRejected,
@@ -655,11 +656,15 @@ class CoreModuleTests(unittest.TestCase):
                 )
                 initial = module.read_exact("reminder-1")
 
-                with self.assertRaises(AdapterContractError):
+                with self.assertRaises(MutationOutcomeRejected) as raised:
                     module.change(
                         initial.reference,
                         {"kind": "patch", "patch": {"title": "Unsafe"}},
                     )
+                self.assertEqual(
+                    raised.exception.mutation_state,
+                    outcome.mutation_state,
+                )
 
                 with self.assertRaises(ReferenceRejected):
                     module.change(

@@ -47,6 +47,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   `TransportResult`. Only the parent launcher can prove that a subprocess never
   started; child output, timeouts, transport errors, and malformed results
   cannot forge that fact or clear a durable mutation fence.
+- Carried independent `not_mutated`/`committed`/`unknown` facts through every
+  Core, Native, and Recovery mutation, durable replay, public projection, and
+  server fallback. Final-proof loss keeps commits but degrades unproven
+  no-write claims to unknown instead of reconstructing state from display
+  status.
 
 ### Fixed
 

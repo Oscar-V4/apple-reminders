@@ -21,6 +21,7 @@ SPEC.loader.exec_module(adapter)
 from receipt_contract import (  # noqa: E402
     adapter_receipt_error,
     failed_no_mutation_evidence_error,
+    validated_receipt_mutation_state,
 )
 
 
@@ -160,6 +161,48 @@ def create_create_store(path: Path) -> None:
 
 
 class ReceiptAndErrorContractTests(unittest.TestCase):
+    def test_validated_receipt_state_is_evidence_aware(self) -> None:
+        cases = (
+            ({"status": "unchanged"}, "not_mutated"),
+            (
+                {
+                    "status": "unchanged",
+                    "verification": {"write_performed": False},
+                },
+                "not_mutated",
+            ),
+            (
+                {
+                    "status": "unchanged",
+                    "verification": {"write_performed": True},
+                },
+                "unknown",
+            ),
+            ({"status": "unchanged", "committed": True}, "unknown"),
+            ({"status": "verified"}, "committed"),
+            (
+                {
+                    "status": "verified",
+                    "verification": {"write_performed": False},
+                },
+                "unknown",
+            ),
+            (
+                {
+                    "status": "partial_success",
+                    "verification": {"write_performed": True},
+                },
+                "committed",
+            ),
+            ({"status": "partial_success"}, "unknown"),
+        )
+        for receipt, expected in cases:
+            with self.subTest(receipt=receipt):
+                self.assertEqual(
+                    validated_receipt_mutation_state(receipt),
+                    expected,
+                )
+
     def test_operation_receipt_has_stable_shape(self) -> None:
         payload = adapter.operation_receipt(
             status="verified",
@@ -255,6 +298,10 @@ class ReceiptAndErrorContractTests(unittest.TestCase):
                 self.assertIsNotNone(failed_no_mutation_evidence_error(unsafe))
                 self.assertIsNotNone(
                     adapter_receipt_error(unsafe, expected_operation="attach_url")
+                )
+                self.assertEqual(
+                    validated_receipt_mutation_state(unsafe),
+                    "unknown",
                 )
 
 

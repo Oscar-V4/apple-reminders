@@ -30,6 +30,14 @@ only the parent launcher can prove that a child never started.
 - Keep `ToolOutcome` separate. It carries a Facade result and mutation fact at
   the Facade-to-MCP boundary; `TransportResult` carries subprocess evidence at
   a lower trust boundary.
+- Require every mutation-owning Core, Native, and Recovery Facade to implement
+  `call_with_state`. The server rejects mutation Facades without that interface
+  and never reconstructs the fact from the public `status` it must validate.
+- Classify validated Receipts with write evidence, preserve exact state through
+  durable replay and contract fallback, and align the public projection once at
+  each Facade boundary. A lost final identity/read preserves `committed` but
+  degrades `not_mutated` to `unknown`; a contradictory no-write Receipt can
+  never erase affirmative write evidence.
 
 ## Consequences
 
@@ -37,11 +45,11 @@ Runtime instances no longer leak initialization, rate limits, Facade caches,
 or injected paths across sessions. Tool discovery remains lazy. Test seams are
 ordinary constructor arguments instead of mutable production state.
 
-The new transport module adds a small package cost, so the reviewed source ZIP
-budget moves from 1.25 MiB to 1.26 MiB. This is not permission for unbounded
-growth; retiring the obsolete 0.2-era adapter CLI remains a v0.4 release
-blocker and will reduce the package substantially in a separately reviewable
-change.
+The typed transport and independent Core/Native/Recovery mutation-state
+channels add a reviewed package cost, so the source ZIP budget moves from 1.25
+MiB to 1.28 MiB. This is not permission for unbounded growth; retiring the
+obsolete 0.2-era adapter CLI remains a v0.4 release blocker and will reduce the
+package substantially in a separately reviewable change.
 
 ## Rejected alternatives
 

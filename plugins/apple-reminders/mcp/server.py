@@ -987,6 +987,7 @@ class _LocalToolDispatch:
             )
             self._native = NativeFacade(
                 adapter_call=backend.adapter_call,
+                section_mutation=backend.create_section,
                 references=self.core_facade().reference_port,
                 native_read=backend.read,
                 native_mutation=backend.mutate,
@@ -1047,12 +1048,21 @@ class _LocalToolDispatch:
         if callable(call_with_state):
             payload, mutation_state = call_with_state(facade, name, arguments)
         else:
+            if name in V2_MUTATION_TOOLS:
+                raise RuntimeError(
+                    "A mutation Facade must return independent mutation state"
+                )
             payload = facade.call(name, arguments)
-            mutation_state = (
-                _v2_mutation_state(payload) if name in V2_MUTATION_TOOLS else None
-            )
+            mutation_state = None
         if not isinstance(payload, dict):
             raise RuntimeError("A public Facade must return an object")
+        if name in V2_MUTATION_TOOLS:
+            if mutation_state not in {"not_mutated", "committed", "unknown"}:
+                raise RuntimeError(
+                    "A mutation Facade returned invalid independent mutation state"
+                )
+        elif mutation_state is not None:
+            raise RuntimeError("A read Facade must not return mutation state")
         return ToolOutcome(payload=payload, mutation_state=mutation_state)
 
 
@@ -1363,29 +1373,16 @@ def _v2_pre_dispatch_failure(
     )
 
 
-def _v2_mutation_state(payload: Mapping[str, Any]) -> str | None:
-    status = payload.get("status")
-    if status in {"unchanged", "failed_no_mutation"}:
-        return "not_mutated"
-    if status == "verified":
-        return "committed"
-    if status in {
-        "committed_verification_pending",
-        "partial_success",
-        "failed_manual_repair_required",
-    }:
-        return "unknown"
-    return None
-
-
 def _v2_contract_failure(
     name: str,
     arguments: Mapping[str, Any],
     *,
-    may_have_mutated: bool,
+    mutation_state: str | None,
     message: str,
 ) -> tuple[dict[str, Any], str | None]:
-    if name in V2_MUTATION_TOOLS and may_have_mutated:
+    if name in V2_MUTATION_TOOLS and mutation_state in {"committed", "unknown"}:
+        from reminders_service import unverified_mutation_projection  # noqa: PLC0415
+
         recovery_tool = {
             "create_reminder": "fetch_reminders",
             "ensure_reminder_list": "list_reminder_lists",
@@ -1408,29 +1405,13 @@ def _v2_contract_failure(
         return (
             {
                 "schema_version": 2,
-                "ok": True,
-                "status": "committed_verification_pending",
+                **unverified_mutation_projection(mutation_state),
                 "operation": _v2_public_operation(name, arguments),
                 "operation_id": str(uuid.uuid4()),
                 "backend": _v2_public_backend(name, arguments),
                 "target": _v2_public_target(name, arguments),
                 "before": None,
                 "after": None,
-                "verification": {
-                    "state": "pending",
-                    "write_performed": None,
-                    "final_read": False,
-                },
-                "recovery": {
-                    "semantics": "read_before_retry",
-                    "automatic_retry_safe": False,
-                },
-                "warnings": [
-                    {
-                        "code": "verification_pending",
-                        "message": "The local result contract failed after a possible write.",
-                    }
-                ],
                 "error": {
                     "code": "sync_pending",
                     "reason_code": "public_result_contract_failed",
@@ -1444,7 +1425,7 @@ def _v2_contract_failure(
                     "message": recovery_message,
                 },
             },
-            "unknown",
+            mutation_state,
         )
     return _v2_pre_dispatch_failure(
         name,
@@ -1564,7 +1545,9 @@ def _call_tool(
                 payload, mutation_state = _v2_contract_failure(
                     name,
                     arguments,
-                    may_have_mutated=name in V2_MUTATION_TOOLS,
+                    mutation_state=(
+                        "unknown" if name in V2_MUTATION_TOOLS else None
+                    ),
                     message=f"The public facade failed ({type(exc).__name__}).",
                 )
 
@@ -1580,8 +1563,7 @@ def _call_tool(
         payload, mutation_state = _v2_contract_failure(
             name,
             arguments_for_contract,
-            may_have_mutated=exc.may_have_mutated
-            or mutation_state in {"committed", "unknown"},
+            mutation_state=mutation_state,
             message=str(exc),
         )
         payload = validate_public_result(name, payload, mutation_state)

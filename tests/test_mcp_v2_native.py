@@ -35,6 +35,9 @@ class Backend:
         self.adapter_errors: dict[str, Exception] = {}
         self.preview_payloads: dict[str, dict[str, Any]] = {}
         self.apply_payloads: dict[str, dict[str, Any]] = {}
+        self.section_mutations: list[tuple[str, str]] = []
+        self.section_mutation_outcome: MutationOutcome | None = None
+        self.section_mutation_error: Exception | None = None
         self.native_reads: list[tuple[Guard, dict[str, Any]]] = []
         self.native_mutations: list[tuple[Guard, str, dict[str, Any]]] = []
         self.native_copy_mutations: list[
@@ -55,6 +58,14 @@ class Backend:
     def native_read(self, guard: Guard, arguments: dict[str, Any]) -> dict[str, Any]:
         self.native_reads.append((guard, deepcopy(arguments)))
         return deepcopy(self.native_read_payload)
+
+    def section_mutation(self, list_id: str, name: str) -> MutationOutcome:
+        self.section_mutations.append((list_id, name))
+        if self.section_mutation_error is not None:
+            raise self.section_mutation_error
+        if self.section_mutation_outcome is None:
+            raise RuntimeError("section mutation outcome not configured")
+        return deepcopy(self.section_mutation_outcome)
 
     def native_mutation(
         self,
@@ -131,6 +142,7 @@ def mutation_payload(
     after: dict[str, Any] | None = None,
     recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    write_performed = status not in {"unchanged", "failed_no_mutation"}
     return {
         "ok": status not in {"failed_no_mutation", "failed_manual_repair_required"},
         "status": status,
@@ -140,7 +152,10 @@ def mutation_payload(
         "target": {},
         "before": {},
         "after": after or {},
-        "verification": {"state": "read_back", "write_performed": True},
+        "verification": {
+            "state": "read_back" if write_performed else "not_needed",
+            "write_performed": write_performed,
+        },
         "recovery": recovery or {"semantics": "not_applicable"},
     }
 
@@ -154,6 +169,7 @@ class NativeFacadeTests(unittest.TestCase):
     ) -> NativeFacade:
         return NativeFacade(
             adapter_call=backend.adapter,
+            section_mutation=backend.section_mutation,
             references=references or References(),
             native_read=backend.native_read,
             native_mutation=backend.native_mutation,
@@ -162,27 +178,31 @@ class NativeFacadeTests(unittest.TestCase):
 
     def test_create_section_preserves_exact_list_id_and_receipt(self) -> None:
         backend = Backend()
-        backend.preview_payloads["create_section"] = mutation_payload(
-            "create_section",
-            after={
-                "section": {
-                    "id": "SECTION-1",
-                    "name": "Next",
-                    "list_id": "LIST-1",
-                    "list_title": "Work",
-                    "order": 0,
-                }
-            },
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=mutation_payload(
+                "create_section",
+                after={
+                    "section": {
+                        "id": "SECTION-1",
+                        "name": "Next",
+                        "list_id": "LIST-1",
+                        "list_title": "Work",
+                        "order": 0,
+                    }
+                },
+            ),
+            mutation_state="committed",
         )
         facade = self.make_facade(backend)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "create_reminder_section", {"list_id": "LIST-1", "name": "Next"}
         )
 
+        self.assertEqual(mutation_state, "committed")
         self.assertEqual(
-            backend.adapter_calls,
-            [("create_section", {"list_id": "LIST-1", "name": "Next"})],
+            backend.section_mutations,
+            [("LIST-1", "Next")],
         )
         self.assertEqual(result["operation"], "create_reminder_section")
         self.assertEqual(result["backend"], "native_extension")
@@ -194,13 +214,14 @@ class NativeFacadeTests(unittest.TestCase):
 
     def test_create_section_dispatch_exception_is_not_false_no_mutation(self) -> None:
         backend = Backend()
-        backend.adapter_errors["create_section"] = RuntimeError("helper response lost")
+        backend.section_mutation_error = RuntimeError("helper response lost")
         facade = self.make_facade(backend)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "create_reminder_section", {"list_id": "LIST-1", "name": "Next"}
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertTrue(result["ok"])
         self.assertEqual(result["target"], {"list_id": "LIST-1", "section_id": None})
@@ -209,6 +230,20 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["tool"], "inspect_reminder_native")
         self.assertFalse(result["next_action"]["retry_original_once"])
         validate_public_result("create_reminder_section", result, "unknown")
+
+    def test_create_section_input_rejection_is_proven_pre_dispatch(self) -> None:
+        backend = Backend()
+        facade = self.make_facade(backend)
+
+        result, mutation_state = facade.call_with_state(
+            "create_reminder_section",
+            {"list_id": "LIST-1", "name": "   "},
+        )
+
+        self.assertEqual(mutation_state, "not_mutated")
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["reason_code"], "empty_string")
+        self.assertEqual(backend.section_mutations, [])
 
     def test_pending_section_receipt_preserves_identity_and_causal_error(self) -> None:
         backend = Backend()
@@ -244,7 +279,10 @@ class NativeFacadeTests(unittest.TestCase):
                 "message": "The section exists but its sync read-back is pending.",
             },
         ]
-        backend.preview_payloads["create_section"] = receipt
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
         facade = self.make_facade(backend)
 
         result = facade.call(
@@ -263,7 +301,10 @@ class NativeFacadeTests(unittest.TestCase):
 
     def test_create_section_malformed_post_dispatch_reply_is_pending(self) -> None:
         backend = Backend()
-        backend.preview_payloads["create_section"] = {"ok": True, "status": "verified"}
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt={"ok": True, "status": "verified"},
+            mutation_state="committed",
+        )
         facade = self.make_facade(backend)
 
         result = facade.call(
@@ -274,6 +315,96 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["error"]["reason_code"], "invalid_native_section_receipt")
         self.assertEqual(result["next_action"]["tool"], "inspect_reminder_native")
 
+    def test_section_projection_conflict_does_not_erase_committed_state(self) -> None:
+        backend = Backend()
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=mutation_payload(
+                "create_section",
+                after={
+                    "section": {
+                        "id": "SECTION-OTHER",
+                        "name": "Next",
+                        "list_id": "LIST-OTHER",
+                    }
+                },
+            ),
+            mutation_state="committed",
+        )
+        facade = self.make_facade(backend)
+
+        result, mutation_state = facade.call_with_state(
+            "create_reminder_section",
+            {"list_id": "LIST-1", "name": "Next"},
+        )
+
+        self.assertEqual(mutation_state, "committed")
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "invalid_native_section_projection",
+        )
+        self.assertIsNone(result["after"])
+
+    def test_section_state_receipt_conflict_is_downgraded_to_unknown(self) -> None:
+        backend = Backend()
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=mutation_payload(
+                "create_section",
+                after={
+                    "section": {
+                        "id": "SECTION-1",
+                        "name": "Next",
+                        "list_id": "LIST-1",
+                    }
+                },
+            ),
+            mutation_state="not_mutated",
+        )
+        facade = self.make_facade(backend)
+
+        result, mutation_state = facade.call_with_state(
+            "create_reminder_section",
+            {"list_id": "LIST-1", "name": "Next"},
+        )
+
+        self.assertEqual(mutation_state, "unknown")
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "invalid_native_section_receipt",
+        )
+
+    def test_no_write_state_cannot_launder_native_commit_evidence(self) -> None:
+        receipt = mutation_payload(
+            "remove_tag",
+            status="failed_no_mutation",
+            after={"tags": [{"id": "TAG-1", "name": "next"}]},
+        )
+        receipt["verification"]["write_performed"] = True
+        backend = Backend()
+        backend.native_mutation_payloads["remove_tag"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="not_mutated",
+        )
+        facade = self.make_facade(backend)
+
+        result, mutation_state = facade.call_with_state(
+            "organize_reminder",
+            {
+                "reference": f"rev1.{'x' * 32}",
+                "action": {"kind": "remove_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(mutation_state, "unknown")
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "mutation_state_evidence_mismatch",
+        )
+        validate_public_result("organize_reminder", result, "unknown")
+
     def test_create_section_concurrent_receipt_points_to_section_inspection(self) -> None:
         backend = Backend()
         receipt = mutation_payload("create_section", status="failed_no_mutation")
@@ -283,7 +414,10 @@ class NativeFacadeTests(unittest.TestCase):
             "message": "The section list changed before the save.",
             "retryable": True,
         }
-        backend.preview_payloads["create_section"] = receipt
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=receipt,
+            mutation_state="not_mutated",
+        )
         facade = self.make_facade(backend)
 
         result = facade.call(
@@ -310,7 +444,10 @@ class NativeFacadeTests(unittest.TestCase):
             "message": "Full Reminders access is required.",
             "retryable": False,
         }
-        backend.preview_payloads["create_section"] = receipt
+        backend.section_mutation_outcome = MutationOutcome(
+            receipt=receipt,
+            mutation_state="not_mutated",
+        )
         facade = self.make_facade(backend)
 
         result = facade.call(
@@ -497,11 +634,12 @@ class NativeFacadeTests(unittest.TestCase):
         }
         facade = self.make_facade(backend)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "inspect_reminder_native",
             {"kind": "sections", "list_id": "LIST-1", "limit": 10},
         )
 
+        self.assertIsNone(mutation_state)
         self.assertEqual(
             backend.adapter_calls,
             [("list_sections", {"list_id": "LIST-1", "limit": 10})],
@@ -532,7 +670,7 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {
                 "reference": reference,
@@ -540,6 +678,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "committed")
         self.assertEqual(
             backend.native_mutations,
             [(references.guard, "move_to_section", {"section_id": "SECTION-1"})],
@@ -656,7 +795,7 @@ class NativeFacadeTests(unittest.TestCase):
         )
         facade = self.make_facade(backend, references=references)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {
                 "reference": f"rev1.{'x' * 32}",
@@ -664,6 +803,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(result["error"]["code"], "sync_pending")
         self.assertEqual(result["error"]["reason_code"], "verification_pending")
         self.assertEqual(result["next_action"]["tool"], "read_reminder")
@@ -738,7 +878,7 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "change_reminder_attachment",
             {
                 "reference": reference,
@@ -746,6 +886,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(result["status"], "failed_manual_repair_required")
         self.assertFalse(result["ok"])
         self.assertEqual(result["recovery"]["semantics"], "inspect_and_repair_manually")
@@ -762,11 +903,12 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {"reference": reference, "action": {"kind": "add_tag", "tag": "next"}},
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(references.invalidated, [reference])
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertTrue(result["ok"])
@@ -833,11 +975,12 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {"reference": reference, "action": {"kind": "remove_tag", "tag": "old"}},
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(references.invalidated, [reference])
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertEqual(result["error"]["reason_code"], "invalid_native_mutation_outcome")
@@ -903,7 +1046,7 @@ class NativeFacadeTests(unittest.TestCase):
         )
         facade = self.make_facade(backend, references=references)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {
                 "reference": f"rev1.{'x' * 32}",
@@ -911,6 +1054,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "committed")
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertIsNone(result["after"])
         self.assertEqual(
@@ -947,7 +1091,7 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {
                 "reference": reference,
@@ -955,6 +1099,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "unknown")
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertIsNone(result["verification"]["write_performed"])
         self.assertFalse(result["verification"]["final_read"])
@@ -975,7 +1120,7 @@ class NativeFacadeTests(unittest.TestCase):
         )
         facade = self.make_facade(backend)
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "change_reminder_attachment",
             {
                 "reference": f"rev1.{'x' * 32}",
@@ -983,6 +1128,7 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "committed")
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertIsNone(result["verification"]["matched"])
         self.assertFalse(result["verification"]["final_read"])
@@ -1116,7 +1262,7 @@ class NativeFacadeTests(unittest.TestCase):
         facade = self.make_facade(backend, references=references)
         reference = f"rev1.{'x' * 32}"
 
-        result = facade.call(
+        result, mutation_state = facade.call_with_state(
             "organize_reminder",
             {
                 "reference": reference,
@@ -1124,11 +1270,16 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(mutation_state, "committed")
         self.assertEqual(result["status"], "committed_verification_pending")
-        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertTrue(result["verification"]["write_performed"])
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
-        self.assertEqual(result["error"]["reason_code"], "native_facade_failure")
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "invalid_native_mutation_projection",
+        )
         self.assertIn(reference, references.invalidated)
+        validate_public_result("organize_reminder", result, "committed")
 
     def test_attachment_change_uses_closed_action_and_guarded_port(self) -> None:
         backend = Backend()

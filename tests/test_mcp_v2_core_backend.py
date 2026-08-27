@@ -251,8 +251,10 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, failed)
+        self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertEqual(replay.mutation_state, "unknown")
         self.assertTrue(replay.payload["replayed"])
         self.assertEqual(bridge_call.call_count, 1)
 
@@ -294,8 +296,12 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                     support / "idempotency.lock",
                 ),
             ):
-                first = facade.create_reminder(arguments)
-                second = facade.create_reminder(arguments)
+                first, first_state = facade.call_with_state(
+                    "create_reminder", arguments
+                )
+                second, second_state = facade.call_with_state(
+                    "create_reminder", arguments
+                )
                 stored = json.loads(store.read_text(encoding="utf-8"))
 
         for receipt in (first, second):
@@ -306,6 +312,8 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             self.assertNotIn("__dispatch_phase", repr(receipt))
         self.assertEqual(bridge_call.call_count, 2)
         self.assertEqual(stored["entries"], {})
+        self.assertEqual(first_state, "not_mutated")
+        self.assertEqual(second_state, "not_mutated")
 
     def test_create_pending_bridge_receipt_replays_without_redispatch(self) -> None:
         pending = {
@@ -366,9 +374,70 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertFalse(first.is_error)
         self.assertEqual(first.payload["status"], "committed_verification_pending")
+        self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(first.payload.get("replayed", False))
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertEqual(replay.mutation_state, "unknown")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_create_committed_projection_replay_preserves_state(self) -> None:
+        verified = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "create_reminder",
+            "operation_id": "12345678-1234-4234-9234-1234567890ab",
+            "backend": "eventkit_public_sdk",
+            "target": {"calendar_id": "LIST-1"},
+            "after": {"calendar_id": "LIST-1"},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": False,
+            },
+        }
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(verified)))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Committed replay",
+            "url": "https://example.com/item",
+            "idempotency_key": "create-committed-replay",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertEqual(first.payload["status"], "partial_success")
+        self.assertEqual(first.mutation_state, "committed")
+        self.assertEqual(replay.payload["status"], "partial_success")
+        self.assertEqual(replay.mutation_state, "committed")
         self.assertTrue(replay.payload["replayed"])
         self.assertEqual(bridge_call.call_count, 1)
 
@@ -411,6 +480,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload["error"]["code"], "invalid_eventkit_receipt")
+        self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
         self.assertTrue(replay.payload["replayed"])
@@ -459,6 +529,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, rejected)
+        self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
         self.assertTrue(replay.payload["replayed"])
@@ -517,6 +588,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, contradictory)
+        self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
         self.assertTrue(replay.payload["replayed"])
@@ -634,8 +706,10 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertEqual(read_reply.payload, read_payload)
         self.assertFalse(read_reply.is_error)
+        self.assertIsNone(read_reply.mutation_state)
         self.assertEqual(mutation_reply.payload, mutation_payload)
         self.assertFalse(mutation_reply.is_error)
+        self.assertEqual(mutation_reply.mutation_state, "committed")
         self.assertEqual(
             bridge_call.call_args_list,
             [
@@ -1061,6 +1135,163 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         )
         self.assertEqual(adapter_call.call_count, 1)
 
+    def test_native_url_write_promotes_composite_unchanged_to_committed(self) -> None:
+        url = "https://example.com/new-visible-url"
+        eventkit_receipt = {
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "target": {"id": REMINDER_ID},
+            "before": {"id": REMINDER_ID, "url": url},
+            "after": {"id": REMINDER_ID, "url": url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": False,
+                "final_read": True,
+            },
+            "recovery": {"semantics": "not_applicable"},
+        }
+        final_read = {
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": url,
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        attachment = {
+            "id": "ATTACHMENT-NEW",
+            "type": "url",
+            "url": url,
+        }
+        bridge_call = mock.Mock(
+            side_effect=[transport(eventkit_receipt), transport(final_read)]
+        )
+        adapter_call = mock.Mock(
+            side_effect=[
+                transport(
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 7,
+                        "attachments": [],
+                        "truncated": False,
+                    }
+                ),
+                transport(
+                    {
+                        "ok": True,
+                        "status": "verified",
+                        "operation": "attach_url",
+                        "after": {"attachment": attachment},
+                        "verification": {"attachment_active": True},
+                        "recovery": {"semantics": "not_applicable"},
+                    }
+                ),
+            ]
+        )
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=lambda name, _arguments: [name],
+        )
+
+        reply = backend.invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": url},
+            },
+            mutation=True,
+        )
+
+        self.assertEqual(reply.payload["status"], "verified")
+        self.assertTrue(reply.payload["verification"]["write_performed"])
+        self.assertEqual(reply.payload["after"]["url_attachment"], attachment)
+        self.assertEqual(reply.mutation_state, "committed")
+
+    def test_native_url_commit_survives_failed_composite_final_read(self) -> None:
+        url = "https://example.com/new-visible-url"
+        eventkit_receipt = {
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "target": {"id": REMINDER_ID},
+            "before": {"id": REMINDER_ID, "url": url},
+            "after": {"id": REMINDER_ID, "url": url},
+            "verification": {"write_performed": False, "final_read": True},
+            "recovery": {"semantics": "not_applicable"},
+        }
+        bridge_call = mock.Mock(
+            side_effect=[
+                transport(eventkit_receipt),
+                transport(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "sync_pending",
+                            "reason_code": "final_read_lost",
+                        },
+                    },
+                    is_error=True,
+                ),
+            ]
+        )
+        adapter_call = mock.Mock(
+            side_effect=[
+                transport(
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 7,
+                        "attachments": [],
+                        "truncated": False,
+                    }
+                ),
+                transport(
+                    {
+                        "ok": True,
+                        "status": "verified",
+                        "operation": "attach_url",
+                        "after": {
+                            "attachment": {
+                                "id": "ATTACHMENT-NEW",
+                                "type": "url",
+                                "url": url,
+                            }
+                        },
+                        "verification": {"attachment_active": True},
+                        "recovery": {"semantics": "not_applicable"},
+                    }
+                ),
+            ]
+        )
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=lambda name, _arguments: [name],
+        )
+
+        reply = backend.invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": url},
+            },
+            mutation=True,
+        )
+
+        self.assertEqual(reply.payload["status"], "committed_verification_pending")
+        self.assertTrue(reply.payload["verification"]["write_performed"])
+        self.assertFalse(reply.payload["verification"]["final_read"])
+        self.assertEqual(reply.mutation_state, "committed")
+
     def test_unchanged_url_with_another_url_attachment_fails_closed_without_write(
         self,
     ) -> None:
@@ -1147,7 +1378,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "ambiguous_visible_url_attachment",
         )
         self.assertFalse(reply.payload["verification"]["write_performed"])
-        self.assertTrue(reply.payload["verification"]["final_read"])
+        self.assertFalse(reply.payload["verification"]["final_read"])
         self.assertFalse(reply.payload["recovery"]["automatic_retry_safe"])
         self.assertEqual(reply.payload["next_action"]["tool"], "read_reminder")
         self.assertFalse(reply.payload["next_action"]["retry_original_once"])
@@ -1329,7 +1560,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "ambiguous_visible_url_attachment",
         )
         self.assertFalse(retry["verification"]["write_performed"])
-        self.assertTrue(retry["verification"]["final_read"])
+        self.assertFalse(retry["verification"]["final_read"])
         self.assertIsNone(retry["before"])
         self.assertIsNone(retry["after"])
         self.assertNotIn("reference", repr(retry))

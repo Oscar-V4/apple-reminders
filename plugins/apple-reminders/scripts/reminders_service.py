@@ -47,6 +47,44 @@ CoreAction = PatchAction | SetCompletionAction | MoveToListAction
 MutationState = Literal["not_mutated", "committed", "unknown"]
 
 
+def mutation_state_after_unverified_projection(
+    state: MutationState,
+) -> MutationState:
+    return "committed" if state == "committed" else "unknown"
+
+
+def unverified_mutation_projection(state: MutationState) -> dict[str, Any]:
+    no_write = state == "not_mutated"
+    result: dict[str, Any] = {
+        "ok": not no_write,
+        "status": (
+            "failed_no_mutation"
+            if no_write
+            else "committed_verification_pending"
+        ),
+        "verification": {
+            "state": "not_needed" if no_write else "pending",
+            "write_performed": (
+                False if no_write else True if state == "committed" else None
+            ),
+            "final_read": False,
+            "matched": None,
+        },
+        "recovery": {
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        },
+    }
+    if not no_write:
+        result["warnings"] = [
+            {
+                "code": "verification_pending",
+                "message": "The mutation may have committed; read before retrying.",
+            }
+        ]
+    return result
+
+
 @dataclass(frozen=True)
 class MutationOutcome:
     receipt: Mapping[str, Any]
@@ -95,6 +133,12 @@ class MutationOutcomeUnknown(RuntimeError):
     """The Adapter failed after dispatch, so commit state cannot be assumed."""
 
 
+class MutationOutcomeRejected(AdapterContractError):
+    def __init__(self, message: str, mutation_state: MutationState) -> None:
+        super().__init__(message)
+        self.mutation_state = mutation_state
+
+
 @dataclass(frozen=True)
 class ExactRead:
     reminder: dict[str, Any]
@@ -106,6 +150,7 @@ class ChangeResult:
     receipt: dict[str, Any]
     reference: str | None
     final_reminder: dict[str, Any] | None
+    mutation_state: MutationState
     reference_error: str | None = None
 
 
@@ -347,18 +392,27 @@ class CoreModule:
             self._references.pop(reference, None)
         try:
             receipt = self._validated_receipt(outcome)
-        except AdapterContractError:
+        except AdapterContractError as exc:
             self._references.pop(reference, None)
-            raise
+            raise MutationOutcomeRejected(
+                str(exc),
+                outcome.mutation_state,
+            ) from exc
         if outcome.mutation_state == "unknown":
             return ChangeResult(
                 receipt=receipt,
                 reference=None,
                 final_reminder=None,
+                mutation_state=outcome.mutation_state,
                 reference_error="mutation_outcome_unknown",
             )
         if receipt["status"] not in REFERENCE_ELIGIBLE_STATUSES:
-            return ChangeResult(receipt=receipt, reference=None, final_reminder=None)
+            return ChangeResult(
+                receipt=receipt,
+                reference=None,
+                final_reminder=None,
+                mutation_state=outcome.mutation_state,
+            )
         try:
             final_snapshot = self._read_snapshot(grant.guard.reminder_id)
         except Exception:
@@ -366,6 +420,7 @@ class CoreModule:
                 receipt=receipt,
                 reference=None,
                 final_reminder=None,
+                mutation_state=outcome.mutation_state,
                 reference_error="final_read_failed",
             )
         if not reminder_matches_action(final_snapshot.reminder, action):
@@ -374,6 +429,7 @@ class CoreModule:
                 receipt=receipt,
                 reference=None,
                 final_reminder=None,
+                mutation_state=outcome.mutation_state,
                 reference_error="final_state_mismatch",
             )
         replacement = self._issue_reference(final_snapshot)
@@ -382,6 +438,7 @@ class CoreModule:
             receipt=receipt,
             reference=replacement,
             final_reminder=copy.deepcopy(dict(final_snapshot.reminder)),
+            mutation_state=outcome.mutation_state,
         )
 
     @staticmethod
