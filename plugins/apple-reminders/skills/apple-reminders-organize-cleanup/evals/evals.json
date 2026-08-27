@@ -60,6 +60,17 @@
         "Does not run a delete batch.",
         "Does not use title-only matching."
       ]
+    },
+    {
+      "id": 7,
+      "category": "unsupported_edge",
+      "prompt": "현재 화면 맨 위 4개를 지웠다가 복구하고, 그 미리알림들의 사진을 하나로 모아줘.",
+      "expected_output": "Rejects current UI order as unobservable, resolves only an explicit API scope/sort to exact IDs, identifies that public restore and attachment export/copy are unavailable, and performs dependency-first consolidation only from exact local image files. It verifies the destination before deleting sources one by one, or stops before deletion and records a macOS-only follow-up.",
+      "assertions": [
+        "Does not map UI-relative top items to the default API order.",
+        "Does not delete a source before all required destination attachments are verified.",
+        "Does not claim Recently Deleted or restore behavior was observed."
+      ]
     }
   ]
 }

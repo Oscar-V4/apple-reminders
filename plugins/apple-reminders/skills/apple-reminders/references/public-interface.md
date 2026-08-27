@@ -10,7 +10,7 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 - `read_reminder {reminder_id}`: return one exact Core projection and opaque `rev1` reference.
 - `create_reminder {list_id, title, idempotency_key, ...fields}`: create once and return final exact state plus a fresh reference when verified.
 - `change_reminder {reference, action}`: patch fields, set completion, or move to another list.
-- `delete_reminder {reference}`: delete through EventKit and require exact local-absence evidence.
+- `delete_reminder {reference}`: delete through EventKit and require exact local-absence evidence. This is a terminal operation on the public surface; there is no public undo, restore, Recently Deleted inspection, or recovery token.
 - `ensure_reminder_list {source_id, name, idempotency_key}`: return an exact existing list or create it in that account. Color and emblem are not public fields.
 
 `change_reminder.action` is exactly one of:
@@ -22,6 +22,12 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 ```
 
 Omitted patch fields remain unchanged. `null` clears only fields whose input schema permits null; inspect the live tool schema instead of assuming clear behavior.
+
+## Selection, sorting, and pagination
+
+- `fetch_reminders.sort` supports `due`, `modified`, and `title`. These are API result orders, not evidence of the current Reminders UI order or manual arrangement.
+- Resolve “top N” only from one explicit bounded API snapshot with exact scope, sort, limit, and returned IDs. If the user means currently visible or selected UI rows, exact selection is unsupported by the public interface.
+- A cursor is opaque and valid only with the original filters, sort, and limit. Never combine pages that were fetched under different arguments or mutate items that were outside the reviewed snapshot.
 
 ## Native Extension
 
@@ -42,6 +48,8 @@ Attachment actions are:
 
 Native mutation starts by revalidating the opaque Core reference, then captures its private concurrency value internally. Callers never choose between EventKit and private revisions.
 
+Attachment inspection does not export file bytes. Image attach/replace requires an exact existing absolute local PNG/JPEG path; the public surface does not download, export, or copy an existing image attachment between reminders. Any consolidation workflow must complete and verify destination attachments before deleting a source reminder.
+
 ## Diagnostics
 
 `diagnose_reminders {scope?, detail_level?}` runs one content-free diagnosis and reports the requested area. Use it only after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, and `packaging`.
@@ -59,4 +67,4 @@ Only `unchanged` and `verified` may include a writable `rev1` reference. Never d
 
 ## Withheld from 0.3
 
-Native flag mutation, exact UI selection, unused-label row deletion, attachment repair apply, backup/Snapshot apply, restore, and log purge are not public tools. A user request for one of these may receive a read-only diagnosis or proposal, but not an adapter/SQLite/AppleScript fallback write.
+Native flag mutation, exact UI selection or ordering, list/section rename or deletion, unused-label row deletion, attachment export/copy, attachment repair apply, backup/Snapshot apply, reminder restore, Recently Deleted inspection/recovery, and log purge are not public tools. A user request for one of these may receive a read-only diagnosis or proposal, but not an adapter/SQLite/AppleScript/UI-automation fallback write.
