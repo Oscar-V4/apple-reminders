@@ -45,7 +45,7 @@ from v2_contract import (  # noqa: E402
 
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.3.1"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     LATEST_PROTOCOL_VERSION,
