@@ -12,10 +12,10 @@ Try prompts such as:
 - `쇼핑 목록에 우유 사기를 추가해줘.`
 - `이 리마인더를 완료하고 다시 읽어서 확인해줘.`
 
-This repository is a release candidate for its first 0.3 public beta; the tag
-does not exist yet. The MCP and adapters run locally, but results are returned
-to Codex as described in [PRIVACY.md](PRIVACY.md). This is an independent
-community project, not an Apple or OpenAI product or endorsed integration.
+This repository hosts the 0.3 public beta. The MCP and adapters run locally,
+but results are returned to Codex as described in [PRIVACY.md](PRIVACY.md).
+This is an independent community project, not an Apple or OpenAI product or
+endorsed integration.
 
 ## Requirements
 
@@ -48,9 +48,7 @@ to content-free packaging diagnosis instead of asking for a blind retry.
 
 ## Quick Start
 
-The commands below target the future tagged 0.3.0 repo-marketplace release.
-Until that tag exists, treat this repository as development source rather than
-a finished installer.
+Install the pinned 0.3.0 repo-marketplace release:
 
 ```bash
 codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
@@ -63,6 +61,11 @@ Start a new Codex task so that it loads the installed skills and tools, then try
 오늘 할 일 보여줘.
 쇼핑 목록에 우유 사기를 추가해줘.
 ```
+
+This beta has passed current-Mac live Reminders and iCloud attachment checks,
+but first-use permission behavior on a genuinely fresh macOS permission subject
+remains follow-up validation. Report any unexpected permission prompt or
+reauthorization requirement through the repository issue tracker.
 
 ## First permission
 
