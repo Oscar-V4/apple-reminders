@@ -602,6 +602,13 @@ class NativeFacade:
             "recovery": recovery,
         }
         self._copy_receipt_extras(raw, result)
+        self._finalize_pending_receipt(
+            result,
+            next_tool=None,
+            next_message=(
+                "Inspect this exact list before attempting to create the section again."
+            ),
+        )
         return result
 
     def _inspect(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -804,6 +811,14 @@ class NativeFacade:
                 target,
                 exc.reason_code,
             )
+        except Exception:
+            if outcome.mutation_state not in {"committed", "unknown"}:
+                self._references.invalidate_reference(reference)
+            return self._unknown_native_result(
+                public_operation,
+                target,
+                "invalid_native_mutation_receipt",
+            )
 
         before = self._native_state(
             tool_name,
@@ -893,20 +908,13 @@ class NativeFacade:
             "recovery": recovery,
         }
         self._copy_receipt_extras(receipt, result)
-        if result["status"] == "committed_verification_pending":
-            result.setdefault("warnings", []).append(
-                {
-                    "code": "verification_pending",
-                    "message": "The native call may have committed; read before retrying.",
-                }
-            )
-            result["warnings"] = result["warnings"][:20]
-            result["next_action"] = {
-                "kind": "fresh_read",
-                "tool": "read_reminder",
-                "retry_original_once": False,
-                "message": "Read the exact Reminder again before attempting another change.",
-            }
+        self._finalize_pending_receipt(
+            result,
+            next_tool="read_reminder",
+            next_message=(
+                "Read the exact Reminder again before attempting another change."
+            ),
+        )
         action_key = action.get("idempotency_key")
         if isinstance(action_key, str):
             result["idempotency_key_hash"] = hashlib.sha256(
@@ -1142,6 +1150,24 @@ class NativeFacade:
                 "invalid_native_receipt_objects",
                 "Native mutation receipt objects are missing or invalid.",
             )
+        if "warnings" in receipt:
+            warnings = receipt["warnings"]
+            if not isinstance(warnings, list) or any(
+                not isinstance(item, Mapping)
+                and not (isinstance(item, str) and bool(item))
+                for item in warnings
+            ):
+                raise FacadeError(
+                    "schema_mismatch",
+                    "invalid_native_receipt_warnings",
+                    "Native mutation receipt warnings are invalid.",
+                )
+        if "error" in receipt and not isinstance(receipt["error"], Mapping):
+            raise FacadeError(
+                "schema_mismatch",
+                "invalid_native_receipt_error",
+                "Native mutation receipt error is invalid.",
+            )
         if status in {"unchanged", "verified"} and not receipt["after"]:
             raise FacadeError(
                 "schema_mismatch",
@@ -1209,11 +1235,82 @@ class NativeFacade:
 
     @staticmethod
     def _copy_receipt_extras(raw: Mapping[str, Any], result: dict[str, Any]) -> None:
-        warnings = [item for value in raw.get("warnings", []) if (item := _warning(value))]
+        raw_warnings = raw.get("warnings", [])
+        warnings = (
+            [item for value in raw_warnings if (item := _warning(value))]
+            if isinstance(raw_warnings, list)
+            else []
+        )
         if warnings:
             result["warnings"] = warnings[:20]
-        if result["status"] in FAILURE_STATUSES or "error" in raw:
+        if result["status"] in FAILURE_STATUSES or (
+            "error" in raw and isinstance(raw.get("error"), Mapping)
+        ):
             result["error"] = _normalized_error(raw.get("error"))
+
+    @staticmethod
+    def _finalize_pending_receipt(
+        result: dict[str, Any],
+        *,
+        next_tool: str | None,
+        next_message: str,
+    ) -> None:
+        if result.get("status") != "committed_verification_pending":
+            return
+        warnings = result.setdefault("warnings", [])
+        if not any(
+            isinstance(item, Mapping) and item.get("code") == "verification_pending"
+            for item in warnings
+        ):
+            warnings.append(
+                {
+                    "code": "verification_pending",
+                    "message": "The native call may have committed; read before retrying.",
+                }
+            )
+        result["warnings"] = warnings[:20]
+        current_error = result.get("error")
+        if (
+            not isinstance(current_error, Mapping)
+            or current_error.get("code") != "sync_pending"
+        ):
+            causal_warning = next(
+                (
+                    item
+                    for item in result["warnings"]
+                    if isinstance(item, Mapping)
+                    and str(item.get("code") or "").endswith("_pending")
+                ),
+                {
+                    "code": "native_verification_pending",
+                    "message": (
+                        "The native call may have committed; read before retrying."
+                    ),
+                },
+            )
+            reason_code = causal_warning.get("code")
+            message = causal_warning.get("message")
+            retryable = True
+            if isinstance(current_error, Mapping):
+                reason_code = current_error.get("reason_code") or reason_code
+                message = current_error.get("message") or message
+                retryable = current_error.get("retryable") is True
+            result["error"] = _error(
+                "sync_pending",
+                str(reason_code or "native_verification_pending"),
+                str(
+                    message
+                    or "The native call may have committed; read before retrying."
+                ),
+                retryable=retryable,
+            )
+        if next_tool is not None:
+            result["next_action"] = {
+                "kind": "fresh_read",
+                "tool": next_tool,
+                "retry_original_once": False,
+                "message": next_message,
+            }
 
 
 __all__ = ["NativeFacade", "ReferencePort"]

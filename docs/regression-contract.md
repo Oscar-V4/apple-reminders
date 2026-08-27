@@ -67,6 +67,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
 12. Receipts preserve `unchanged`, `verified`,
     `committed_verification_pending`, `partial_success`,
     `failed_no_mutation`, and `failed_manual_repair_required` distinctions.
+    Every verification-pending public Receipt carries a structured
+    `sync_pending` error plus safe read-before-retry recovery; reminder-scoped
+    flows also provide a public fresh-read next action. It never degrades into
+    an outer contract failure or authorizes an automatic mutation retry.
+    Malformed optional fields after dispatch preserve an unknown possible
+    write rather than becoming `failed_no_mutation`.
 13. The release package resolves only bundled backends and excludes tests,
     databases, backups, caches, screenshots, and other local artifacts.
 

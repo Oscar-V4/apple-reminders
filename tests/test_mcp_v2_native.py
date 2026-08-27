@@ -180,6 +180,56 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["warnings"][0]["code"], "verification_pending")
         validate_public_result("create_reminder_section", result, "unknown")
 
+    def test_pending_section_receipt_preserves_identity_and_causal_error(self) -> None:
+        backend = Backend()
+        receipt = mutation_payload(
+            "create_section",
+            status="committed_verification_pending",
+            after={
+                "section": {
+                    "id": "SECTION-1",
+                    "name": "Next",
+                    "list_id": "LIST-1",
+                    "list_title": "Work",
+                    "order": 0,
+                }
+            },
+            recovery={
+                "semantics": "inspect_exact_list_before_retry",
+                "automatic_retry_safe": False,
+            },
+        )
+        receipt["verification"] = {
+            "state": "pending",
+            "write_performed": True,
+            "final_read": False,
+        }
+        receipt["warnings"] = [
+            {
+                "code": "journal_write_failed",
+                "message": "The audit journal could not be written.",
+            },
+            {
+                "code": "section_sync_pending",
+                "message": "The section exists but its sync read-back is pending.",
+            },
+        ]
+        backend.preview_payloads["create_section"] = receipt
+        facade = self.make_facade(backend)
+
+        result = facade.call(
+            "create_reminder_section", {"list_id": "LIST-1", "name": "Next"}
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(
+            result["target"], {"list_id": "LIST-1", "section_id": "SECTION-1"}
+        )
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(result["error"]["reason_code"], "section_sync_pending")
+        self.assertNotIn("next_action", result)
+        validate_public_result("create_reminder_section", result, "unknown")
+
     def test_create_section_malformed_post_dispatch_reply_is_pending(self) -> None:
         backend = Backend()
         backend.preview_payloads["create_section"] = {"ok": True, "status": "verified"}
@@ -459,6 +509,115 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+    def test_pending_native_receipt_without_error_uses_warning_as_structured_error(
+        self,
+    ) -> None:
+        backend = Backend()
+        references = References()
+        receipt = mutation_payload(
+            "attach_image",
+            status="committed_verification_pending",
+        )
+        receipt["warnings"] = [
+            {
+                "code": "journal_write_failed",
+                "message": "The audit journal could not be written.",
+            },
+            {
+                "code": "mobile_visibility_pending",
+                "message": "The native image exists but mobile visibility is pending.",
+            }
+        ]
+        backend.native_mutation_payloads["attach_image"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+        reference = f"rev1.{'x' * 32}"
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": reference,
+                "action": {
+                    "kind": "attach_image",
+                    "image_path": "/tmp/synthetic.png",
+                    "idempotency_key": "attachment-contract-repro",
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(
+            result["error"]["reason_code"], "mobile_visibility_pending"
+        )
+        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(references.invalidated, [reference])
+        validate_public_result("change_reminder_attachment", result, "unknown")
+
+    def test_pending_native_receipt_without_warning_uses_stable_fallback(self) -> None:
+        backend = Backend()
+        references = References()
+        backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+            receipt=mutation_payload(
+                "add_tag",
+                status="committed_verification_pending",
+                recovery={
+                    "semantics": "read_before_retry",
+                    "automatic_retry_safe": False,
+                },
+            ),
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "organize_reminder",
+            {
+                "reference": f"rev1.{'x' * 32}",
+                "action": {"kind": "add_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(result["error"]["reason_code"], "verification_pending")
+        self.assertEqual(result["next_action"]["tool"], "read_reminder")
+        self.assertFalse(result["next_action"]["retry_original_once"])
+        validate_public_result("organize_reminder", result, "unknown")
+
+    def test_pending_native_receipt_normalizes_non_sync_error_code(self) -> None:
+        backend = Backend()
+        references = References()
+        receipt = mutation_payload(
+            "add_tag",
+            status="committed_verification_pending",
+            recovery={
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+        )
+        receipt["error"] = {}
+        backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "organize_reminder",
+            {
+                "reference": f"rev1.{'x' * 32}",
+                "action": {"kind": "add_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(result["error"]["reason_code"], "backend_error")
+        self.assertFalse(result["error"]["retryable"])
+        validate_public_result("organize_reminder", result, "unknown")
+
     def test_manual_repair_receipt_survives_the_public_native_facade(self) -> None:
         backend = Backend()
         references = References()
@@ -547,6 +706,53 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertEqual(result["error"]["reason_code"], "invalid_native_mutation_outcome")
         validate_public_result("organize_reminder", result, "unknown")
+
+    def test_malformed_optional_post_dispatch_receipt_fields_remain_unknown(
+        self,
+    ) -> None:
+        cases = (
+            ("warnings", None, "invalid_native_receipt_warnings"),
+            ("warnings", 1, "invalid_native_receipt_warnings"),
+            ("error", None, "invalid_native_receipt_error"),
+        )
+        for field, value, reason_code in cases:
+            with self.subTest(field=field, value=value):
+                backend = Backend()
+                references = References()
+                receipt = mutation_payload(
+                    "add_tag",
+                    status="committed_verification_pending",
+                    recovery={
+                        "semantics": "read_before_retry",
+                        "automatic_retry_safe": False,
+                    },
+                )
+                receipt[field] = value
+                backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+                    receipt=receipt,
+                    mutation_state="unknown",
+                )
+                facade = self.make_facade(backend, references=references)
+                reference = f"rev1.{'x' * 32}"
+
+                result = facade.call(
+                    "organize_reminder",
+                    {
+                        "reference": reference,
+                        "action": {"kind": "add_tag", "tag": "next"},
+                    },
+                )
+
+                self.assertEqual(references.invalidated, [reference])
+                self.assertEqual(
+                    result["status"], "committed_verification_pending"
+                )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["error"]["code"], "sync_pending")
+                self.assertEqual(result["error"]["reason_code"], reason_code)
+                self.assertIsNone(result["verification"]["write_performed"])
+                self.assertFalse(result["recovery"]["automatic_retry_safe"])
+                validate_public_result("organize_reminder", result, "unknown")
 
     def test_committed_native_write_with_failed_final_read_is_pending(self) -> None:
         backend = Backend()

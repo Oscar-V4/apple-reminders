@@ -1393,13 +1393,146 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertTrue(raised.exception.details["partial_failure"])
         self.assertIn("delete_attachment", raised.exception.details["cleanup_command"])
 
+    def test_helper_attach_waits_through_delayed_mobile_visibility(self) -> None:
+        attachment_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        row = {
+            "Z_PK": 11,
+            "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT,
+            "ZCKIDENTIFIER": attachment_id,
+            "ZCKCLOUDSTATE": 7,
+            "ZREMINDER2": 1,
+            "Z_FOK_REMINDER1": 1024,
+            "ZFILENAME": "new.png",
+            "ZSHA512SUM": "sha",
+            "ZUTI": "public.png",
+            "ZFILESIZE": 12,
+            "ZWIDTH": 100,
+            "ZHEIGHT": 50,
+            "ZURL": None,
+            "ZHOSTURL": None,
+            "ZMARKEDFORDELETION": 0,
+            "HAS_SERVER_RECORD": 1,
+            "SERVER_RECORD_BYTES": 2048,
+            "ZINCLOUD": 0,
+            "ZCURRENTLOCALVERSION": 1,
+            "ZLATESTVERSIONSYNCEDTOCLOUD": 0,
+        }
+        clock = {"now": 0.0}
+        calls = {"rows": 0}
+
+        def rows(*_: object, **__: object) -> list[dict[str, object]]:
+            calls["rows"] += 1
+            if calls["rows"] == 1:
+                return []
+            current = dict(row)
+            if clock["now"] >= 7.0:
+                current.update(
+                    {
+                        "ZINCLOUD": 1,
+                        "ZCURRENTLOCALVERSION": 2,
+                        "ZLATESTVERSIONSYNCEDTOCLOUD": 2,
+                    }
+                )
+            return [current]
+
+        def advance(seconds: float) -> None:
+            clock["now"] += seconds
+
+        con = mock.Mock()
+        con.execute.return_value.fetchone.return_value = (
+            0,
+            "main",
+            "/tmp/reminders.sqlite",
+        )
+        fresh = mock.Mock()
+        proc = subprocess.CompletedProcess(
+            ["remkit_attach_image", "REM-1", "/tmp/image.png"],
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "attachment_id": attachment_id,
+                    "attachment_transport": "data",
+                    "image_uti": "public.png",
+                }
+            ),
+            stderr="",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "image.png"
+            image.write_bytes(b"synthetic")
+            with (
+                mock.patch.object(
+                    reminders_adapter,
+                    "active_attachment_rows",
+                    side_effect=rows,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "reminderkit_attach_helper",
+                    return_value=Path("/tmp/remkit_attach_image"),
+                ),
+                mock.patch.object(
+                    reminders_adapter.subprocess,
+                    "run",
+                    return_value=proc,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "connect_read_only",
+                    return_value=fresh,
+                ),
+                mock.patch.object(
+                    reminders_adapter.time,
+                    "time",
+                    side_effect=lambda: clock["now"],
+                ),
+                mock.patch.object(
+                    reminders_adapter.time,
+                    "sleep",
+                    side_effect=advance,
+                ),
+            ):
+                result = reminders_adapter.attach_image_reminderkit_record(
+                    con,
+                    {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
+                    image,
+                )
+
+        self.assertTrue(result["attached"])
+        self.assertTrue(result["sync"]["mobile_visible_likely"])
+        self.assertGreaterEqual(clock["now"], 7.0)
+        fresh.close.assert_called()
+
     def test_helper_attach_rejects_unrenderable_evidence(self) -> None:
         """Cloud evidence cannot bless the wrong transport or a mismatched UTI."""
         cases = (
-            ("url_transport", "url", "public.png", "attachment_transport", "url"),
-            ("uti_mismatch", "data", "public.jpeg", "stored_image_uti", "public.png"),
+            (
+                "url_transport",
+                "url",
+                "public.png",
+                "attachment_transport",
+                "url",
+                "native_image_transport_mismatch",
+            ),
+            (
+                "uti_mismatch",
+                "data",
+                "public.jpeg",
+                "stored_image_uti",
+                "public.png",
+                "native_image_content_type_mismatch",
+            ),
         )
-        for name, transport, helper_uti, detail_key, detail_value in cases:
+        for (
+            name,
+            transport,
+            helper_uti,
+            detail_key,
+            detail_value,
+            reason_code,
+        ) in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 db = Path(tmp) / "reminders.sqlite"
                 image = Path(tmp) / "browser-capture.png"
@@ -1489,6 +1622,8 @@ class AttachmentSyncTests(unittest.TestCase):
                     con.close()
 
                 self.assertEqual(raised.exception.code, "sync_pending")
+                self.assertEqual(raised.exception.reason_code, reason_code)
+                self.assertFalse(raised.exception.retryable)
                 self.assertTrue(raised.exception.details["partial_failure"])
                 self.assertEqual(raised.exception.details[detail_key], detail_value)
                 self.assertIn(
@@ -1664,6 +1799,85 @@ class AttachmentSyncTests(unittest.TestCase):
             receipt["recovery"]["semantics"],
             "inspect_reminder_attachments_before_retry",
         )
+        self.assertEqual(receipt["error"]["code"], "sync_pending")
+        self.assertEqual(receipt["error"]["reason_code"], "sync_pending")
+        self.assertTrue(receipt["error"]["retryable"])
+
+    def test_attach_image_verification_errors_preserve_reason_and_retryability(
+        self,
+    ) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        args = argparse.Namespace(
+            db="/tmp/reminders.sqlite",
+            id=reminder_id,
+            title=None,
+            list=None,
+            image="/tmp/example.png",
+            backend="reminderkit",
+            if_version=3,
+            idempotency_key=None,
+        )
+        con = mock.Mock()
+        reminder = {
+            "Z_PK": 1,
+            "ZCKIDENTIFIER": reminder_id,
+            "Z_OPT": 3,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZMARKEDFORDELETION": 0,
+        }
+        cases = (
+            ("native_image_transport_mismatch", False),
+            ("native_image_content_type_mismatch", False),
+            ("mobile_visibility_pending", True),
+        )
+        for reason_code, retryable in cases:
+            with self.subTest(reason_code=reason_code):
+                pending = reminders_adapter.AttachmentVerificationError(
+                    "Image attachment verification did not complete",
+                    row={"Z_PK": 2},
+                    attachment={"id": "ATTACHMENT-1"},
+                    reason_code=reason_code,
+                    retryable=retryable,
+                    partial_failure=True,
+                )
+
+                with (
+                    mock.patch.object(
+                        reminders_adapter,
+                        "resolve_database",
+                        return_value=Path("/tmp/reminders.sqlite"),
+                    ),
+                    mock.patch.object(reminders_adapter, "connect", return_value=con),
+                    mock.patch.object(
+                        reminders_adapter,
+                        "require_command_capability",
+                        return_value={"supported": True},
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "find_reminder", return_value=reminder
+                    ),
+                    mock.patch.object(
+                        reminders_adapter,
+                        "attach_image_reminderkit_record",
+                        side_effect=pending,
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "reread_reminder", return_value=reminder
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "log_action", return_value=None
+                    ),
+                ):
+                    receipt = reminders_adapter.attach_image_once(args)
+
+                self.assertEqual(
+                    receipt["status"], "committed_verification_pending"
+                )
+                self.assertEqual(receipt["error"]["code"], "sync_pending")
+                self.assertEqual(receipt["error"]["reason_code"], reason_code)
+                self.assertIs(receipt["error"]["retryable"], retryable)
+                self.assertEqual(receipt["warnings"][0]["code"], reason_code)
 
     def test_image_size_wraps_sips_timeout_as_adapter_error(self) -> None:
         image = Path("/tmp/example.png")

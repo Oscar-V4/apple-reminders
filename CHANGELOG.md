@@ -21,6 +21,19 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   this removes a reproducible 30-second pending result. Unknown native removal
   outcomes now require a fresh inspection and never trigger an automatic
   compensation that could remove both the old and replacement images.
+- Keep native section and reminder-change Receipts contract-valid when
+  verification is still pending: every such result now includes a structured
+  `sync_pending` error and safe read-before-retry recovery instead of
+  collapsing into a generic public-result contract failure. Unrelated journal
+  warnings cannot replace the causal pending reason.
+- Distinguish non-retryable native image transport or content-type mismatches
+  from retryable iCloud visibility convergence in machine-readable errors.
+- Treat malformed optional fields in a post-dispatch native Receipt as an
+  unknown possible write. A damaged warning or error field can no longer fall
+  through to a false `failed_no_mutation` result.
+- Extend the bounded native attachment verification window from six to ten
+  seconds after a live attachment became mobile-visible after roughly seven
+  seconds. The mutation is still never retried automatically.
 
 ### Changed
 
