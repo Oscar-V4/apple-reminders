@@ -256,7 +256,16 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
         "change_reminder_attachment",
     }:
         data: dict[str, Any] = {"fixture": name}
-        if name == "read_reminder":
+        if name == "request_reminders_access":
+            data = {
+                "authorization_before": "full_access",
+                "authorization": "full_access",
+                "request_attempted": True,
+                "prompt_expected": False,
+                "prompt_observed": None,
+                "prompted_explicitly": True,
+            }
+        elif name == "read_reminder":
             data = {
                 "reminder": {
                     "id": arguments["reminder_id"],
@@ -511,6 +520,12 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(
             {tool["name"] for tool in responses[1]["result"]["tools"]},
             PUBLIC_TOOLS,
+        )
+        self.assertTrue(
+            all(
+                isinstance(tool.get("title"), str) and tool["title"].strip()
+                for tool in responses[1]["result"]["tools"]
+            )
         )
         self.assertEqual(responses[2]["result"], {})
 

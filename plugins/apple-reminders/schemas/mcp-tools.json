@@ -3,6 +3,7 @@
   "tools": [
     {
       "name": "request_reminders_access",
+      "title": "Request Reminders access",
       "description": "Explicitly request full macOS Reminders access through EventKit. This may display the system permission prompt but does not read or change Reminder content.",
       "inputSchema": {
         "type": "object",
@@ -18,6 +19,7 @@
     },
     {
       "name": "list_reminder_lists",
+      "title": "List reminder lists",
       "description": "List a bounded set of Apple Reminder Lists through EventKit, including exact account identity so duplicate display names remain distinguishable.",
       "inputSchema": {
         "type": "object",
@@ -49,6 +51,7 @@
     },
     {
       "name": "fetch_reminders",
+      "title": "Fetch reminders",
       "description": "Fetch one semantically bounded page of Reminders through EventKit. Incomplete reads require list_ids or a due range of at most 366 days; completed reads always require a completion range of at most 90 days. Cursors are opaque and bound to the original filters, sort, and page size.",
       "inputSchema": {
         "type": "object",
@@ -189,6 +192,7 @@
     },
     {
       "name": "read_reminder",
+      "title": "Read reminder",
       "description": "Read one exact Reminder and return its full Core projection plus one opaque rev1 Reference for guarded changes.",
       "inputSchema": {
         "type": "object",
@@ -213,6 +217,7 @@
     },
     {
       "name": "create_reminder",
+      "title": "Create reminder",
       "description": "Create one Reminder in an exact writable Reminder List. Typed due dates, alarms, recurrence, URL visibility, and create idempotency retain their existing behavior.",
       "inputSchema": {
         "type": "object",
@@ -583,6 +588,7 @@
     },
     {
       "name": "change_reminder",
+      "title": "Change reminder",
       "description": "Change public Reminder fields, completion state, or Reminder List membership through one closed action and one opaque fresh Reference.",
       "inputSchema": {
         "type": "object",
@@ -1034,6 +1040,7 @@
     },
     {
       "name": "delete_reminder",
+      "title": "Delete reminder",
       "description": "Delete one exact Reminder through EventKit native deletion using a fresh opaque Reference, then verify local absence without claiming UI observation.",
       "inputSchema": {
         "type": "object",
@@ -1064,6 +1071,7 @@
     },
     {
       "name": "inspect_reminder_native",
+      "title": "Inspect reminder details",
       "description": "Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
       "inputSchema": {
         "type": "object",
@@ -1239,6 +1247,7 @@
     },
     {
       "name": "ensure_reminder_list",
+      "title": "Ensure reminder list",
       "description": "Return an existing Reminder List or create exactly one within an exact account identity. The idempotency key prevents duplicate creation after an unknown outcome.",
       "inputSchema": {
         "type": "object",
@@ -1276,6 +1285,7 @@
     },
     {
       "name": "create_reminder_section",
+      "title": "Create reminder section",
       "description": "Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
       "inputSchema": {
         "type": "object",
@@ -1306,6 +1316,7 @@
     },
     {
       "name": "organize_reminder",
+      "title": "Organize reminder",
       "description": "Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
       "inputSchema": {
         "type": "object",
@@ -1395,6 +1406,7 @@
     },
     {
       "name": "change_reminder_attachment",
+      "title": "Change reminder attachment",
       "description": "Attach, replace, or delete one exact image or URL attachment through a closed action. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
       "inputSchema": {
         "type": "object",
@@ -1556,6 +1568,7 @@
     },
     {
       "name": "diagnose_reminders",
+      "title": "Diagnose Reminders",
       "description": "Run one content-free diagnosis and report the requested area, defaulting to a small Core summary. Static private-framework path absence is inconclusive.",
       "inputSchema": {
         "type": "object",

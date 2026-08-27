@@ -57,7 +57,16 @@ MUTATION_CASES = {
 
 def read_success(tool_name: str) -> dict[str, object]:
     data: dict[str, object] = {"available": True}
-    if tool_name == "list_reminder_lists":
+    if tool_name == "request_reminders_access":
+        data = {
+            "authorization_before": "full_access",
+            "authorization": "full_access",
+            "request_attempted": True,
+            "prompt_expected": False,
+            "prompt_observed": None,
+            "prompted_explicitly": True,
+        }
+    elif tool_name == "list_reminder_lists":
         data = {"items": [], "returned": 0, "truncated": False}
     elif tool_name == "fetch_reminders":
         data = {"items": [], "returned": 0, "has_more": False}
@@ -110,12 +119,22 @@ def read_failure(tool_name: str, code: str = "invalid_input") -> dict[str, objec
         "error": error_payload(code),
     }
     if code == "permission_denied":
-        payload["next_action"] = {
-            "kind": "request_access",
-            "tool": "request_reminders_access",
-            "retry_original_once": True,
-            "message": "Request access and retry once.",
-        }
+        if tool_name == "request_reminders_access":
+            payload["data"] = {
+                "authorization_before": "not_determined",
+                "authorization": "denied",
+                "request_attempted": True,
+                "prompt_expected": True,
+                "prompt_observed": None,
+                "prompted_explicitly": True,
+            }
+        else:
+            payload["next_action"] = {
+                "kind": "request_access",
+                "tool": "request_reminders_access",
+                "retry_original_once": True,
+                "message": "Request access and retry once.",
+            }
     return payload
 
 
@@ -509,7 +528,8 @@ class PublicV2ResultContractTests(unittest.TestCase):
             "request_reminders_access",
             read_failure("request_reminders_access", "permission_denied"),
         )
-        self.assertEqual(permission["next_action"]["kind"], "request_access")
+        self.assertNotIn("next_action", permission)
+        self.assertEqual(permission["data"]["authorization"], "denied")
 
         stale = validate_public_result(
             "change_reminder",
@@ -534,6 +554,51 @@ class PublicV2ResultContractTests(unittest.TestCase):
             validate_public_result("fetch_reminders", rate_limited)["operation"],
             "fetch_reminders",
         )
+
+    def test_access_result_shape_is_closed_and_never_self_retries(self) -> None:
+        observed = read_success("request_reminders_access")
+        observed["data"]["prompt_observed"] = True  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("request_reminders_access", observed)
+        self.assertEqual(raised.exception.code, "invalid_read_envelope")
+
+        missing_receipt = read_failure(
+            "request_reminders_access", "permission_denied"
+        )
+        del missing_receipt["data"]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("request_reminders_access", missing_receipt)
+        self.assertEqual(raised.exception.code, "incomplete_failure")
+
+        self_retry = read_failure("request_reminders_access", "permission_denied")
+        self_retry["next_action"] = {
+            "kind": "request_access",
+            "tool": "request_reminders_access",
+            "retry_original_once": True,
+            "message": "Try the same request again.",
+        }
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("request_reminders_access", self_retry)
+        self.assertEqual(raised.exception.code, "invalid_next_action")
+
+        contradictory_denial = read_failure(
+            "request_reminders_access", "permission_denied"
+        )
+        contradictory_denial["data"]["authorization"] = "full_access"  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result(
+                "request_reminders_access", contradictory_denial
+            )
+        self.assertEqual(raised.exception.code, "invalid_read_envelope")
+
+        diagnose = read_failure("request_reminders_access", "unexpected_error")
+        diagnose["next_action"] = {
+            "kind": "diagnose",
+            "tool": "diagnose_reminders",
+            "retry_original_once": False,
+            "message": "Inspect the local helper build before retrying.",
+        }
+        validate_public_result("request_reminders_access", diagnose)
 
     def test_read_and_mutation_envelopes_are_closed_and_distinct(self) -> None:
         read = read_success("list_reminder_lists")

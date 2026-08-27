@@ -587,7 +587,10 @@ def _validate_next_action(
     mutation_state: str | None,
 ) -> None:
     if value is None:
-        if error_code == "permission_denied":
+        if (
+            error_code == "permission_denied"
+            and tool_name != "request_reminders_access"
+        ):
             _fail(
                 "incomplete_failure",
                 "$.next_action",
@@ -601,6 +604,17 @@ def _validate_next_action(
             "invalid_next_action",
             "$.next_action",
             "next_action must be an object",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if (
+        tool_name == "request_reminders_access"
+        and value.get("tool") == "request_reminders_access"
+    ):
+        _fail(
+            "invalid_next_action",
+            "$.next_action",
+            "the access tool must not direct callers back to itself",
             tool_name=tool_name,
             mutation_state=mutation_state,
         )
@@ -699,6 +713,108 @@ def _validate_direct_reference(
         )
 
 
+def _validate_access_request_data(
+    value: Any,
+    *,
+    tool_name: str,
+    mutation_state: str | None,
+) -> None:
+    path = "$.data"
+    if not isinstance(value, Mapping):
+        _fail(
+            "invalid_read_envelope",
+            path,
+            "access-request data must be an object",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    _closed_fields(
+        value,
+        required={
+            "authorization_before",
+            "authorization",
+            "request_attempted",
+            "prompt_expected",
+            "prompt_observed",
+            "prompted_explicitly",
+        },
+        allowed={
+            "authorization_before",
+            "authorization",
+            "request_attempted",
+            "prompt_expected",
+            "prompt_observed",
+            "prompted_explicitly",
+        },
+        path=path,
+        tool_name=tool_name,
+        mutation_state=mutation_state,
+        missing_code="invalid_read_envelope",
+    )
+    authorization_states = {
+        "not_determined",
+        "restricted",
+        "denied",
+        "full_access",
+        "write_only",
+        "unknown",
+    }
+    authorization_before = value.get("authorization_before")
+    authorization = value.get("authorization")
+    prompt_expected = value.get("prompt_expected")
+    if authorization_before not in authorization_states:
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.authorization_before",
+            "authorization_before is unsupported",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if authorization not in authorization_states:
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.authorization",
+            "authorization is unsupported",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if value.get("request_attempted") is not True:
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.request_attempted",
+            "request_attempted must be true",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if value.get("prompt_observed") is not None:
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.prompt_observed",
+            "prompt_observed must be null because the process cannot observe system UI",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if (
+        not isinstance(prompt_expected, bool)
+        or prompt_expected != (authorization_before == "not_determined")
+    ):
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.prompt_expected",
+            "prompt_expected must match the pre-request authorization state",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    if value.get("prompted_explicitly") is not True:
+        _fail(
+            "invalid_read_envelope",
+            f"{path}.prompted_explicitly",
+            "the deprecated compatibility flag must be true",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+
+
 def _validate_read_result(
     tool_name: str,
     result: dict[str, Any],
@@ -739,6 +855,20 @@ def _validate_read_result(
                 tool_name=tool_name,
                 mutation_state=mutation_state,
             )
+        if tool_name == "request_reminders_access":
+            _validate_access_request_data(
+                result.get("data"),
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+            if result["data"].get("authorization") != "full_access":
+                _fail(
+                    "invalid_read_envelope",
+                    "$.data.authorization",
+                    "verified access requires full_access after the request",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                )
         _validate_warnings(
             result.get("warnings"),
             required=False,
@@ -809,7 +939,11 @@ def _validate_read_result(
     _closed_fields(
         result,
         required=READ_BASE_FIELDS | {"error"},
-        allowed=READ_FAILURE_FIELDS,
+        allowed=(
+            READ_FAILURE_FIELDS | {"data"}
+            if tool_name == "request_reminders_access"
+            else READ_FAILURE_FIELDS
+        ),
         path="$",
         tool_name=tool_name,
         mutation_state=mutation_state,
@@ -817,6 +951,31 @@ def _validate_read_result(
     error = _validate_error(
         result.get("error"), tool_name=tool_name, mutation_state=mutation_state
     )
+    if tool_name == "request_reminders_access":
+        if error["code"] == "permission_denied" and "data" not in result:
+            _fail(
+                "incomplete_failure",
+                "$.data",
+                "permission denial must preserve the access-request receipt",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+        if "data" in result:
+            _validate_access_request_data(
+                result.get("data"),
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+        if error["code"] == "permission_denied" and result["data"].get(
+            "authorization"
+        ) not in {"restricted", "denied", "write_only"}:
+            _fail(
+                "invalid_read_envelope",
+                "$.data.authorization",
+                "permission denial requires a final non-full permission state",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
     _validate_warnings(
         result.get("warnings"),
         required=False,

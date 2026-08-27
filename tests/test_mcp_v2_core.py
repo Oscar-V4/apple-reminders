@@ -333,7 +333,11 @@ class V2CoreFacadeTests(unittest.TestCase):
                 "status": "verified",
                 "operation": "request_access",
                 "data": {
+                    "authorization_before": "full_access",
                     "authorization": "full_access",
+                    "request_attempted": True,
+                    "prompt_expected": False,
+                    "prompt_observed": None,
                     "prompted_explicitly": True,
                 },
             },
@@ -344,7 +348,111 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(eventkit.calls, [("request_access", {}, False)])
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["operation"], "request_reminders_access")
-        self.assertEqual(result["data"]["authorization"], "full_access")
+        self.assertEqual(
+            result["data"],
+            {
+                "authorization_before": "full_access",
+                "authorization": "full_access",
+                "request_attempted": True,
+                "prompt_expected": False,
+                "prompt_observed": None,
+                "prompted_explicitly": True,
+            },
+        )
+        self.assertTrue(result["data"]["prompted_explicitly"])
+
+    def test_request_access_rejects_inconsistent_prompt_expectation(self) -> None:
+        for authorization_before, prompt_expected in (
+            ("full_access", True),
+            ("not_determined", False),
+        ):
+            with self.subTest(
+                authorization_before=authorization_before,
+                prompt_expected=prompt_expected,
+            ):
+                eventkit = FakeEventKit()
+                eventkit.queue(
+                    "request_access",
+                    {
+                        "schema_version": 1,
+                        "ok": True,
+                        "status": "verified",
+                        "operation": "request_access",
+                        "data": {
+                            "authorization_before": authorization_before,
+                            "authorization": "full_access",
+                            "request_attempted": True,
+                            "prompt_expected": prompt_expected,
+                            "prompt_observed": None,
+                            "prompted_explicitly": True,
+                        },
+                    },
+                )
+
+                result = facade(eventkit).request_reminders_access({})
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["reason_code"], "invalid_access_response")
+
+    def test_request_access_denial_preserves_receipt_without_self_retry(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "request_access",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "request_access",
+                "error": {
+                    "code": "permission_denied",
+                    "reason_code": "reminders_access_denied",
+                    "message": "Reminders access was not granted",
+                    "retryable": False,
+                    "details": {
+                        "authorization_before": "not_determined",
+                        "authorization": "denied",
+                        "request_attempted": True,
+                        "prompt_expected": True,
+                        "prompt_observed": None,
+                        "prompted_explicitly": True,
+                    },
+                },
+            },
+            is_error=True,
+        )
+
+        result = facade(eventkit).request_reminders_access({})
+
+        self.assertEqual(result["error"]["code"], "permission_denied")
+        self.assertEqual(result["data"]["authorization"], "denied")
+        self.assertTrue(result["data"]["prompt_expected"])
+        self.assertNotIn("next_action", result)
+        validate_public_result("request_reminders_access", result)
+
+    def test_request_access_rejects_verified_non_full_access(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "request_access",
+            {
+                "schema_version": 1,
+                "ok": True,
+                "status": "verified",
+                "operation": "request_access",
+                "data": {
+                    "authorization_before": "not_determined",
+                    "authorization": "denied",
+                    "request_attempted": True,
+                    "prompt_expected": True,
+                    "prompt_observed": None,
+                    "prompted_explicitly": True,
+                },
+            },
+        )
+
+        result = facade(eventkit).request_reminders_access({})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["reason_code"], "invalid_access_response")
 
     def test_ensure_list_uses_exact_source_and_replays_idempotently(self) -> None:
         eventkit = FakeEventKit()

@@ -42,7 +42,7 @@ SCHEMA_PATH = SCRIPT_DIR / "eventkit_bridge_schema.json"
 DEFAULT_CACHE_ROOT = Path.home() / "Library/Caches/apple-reminders-codex/eventkit-bridge"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_NOTES_CHARS = 100_000
-NATIVE_TIMEOUT_SECONDS = 45
+NATIVE_TIMEOUT_SECONDS = 70
 HELPER_BUNDLE_IDENTIFIER = "com.codex.apple-reminders.eventkit-bridge"
 
 OPERATIONS = {

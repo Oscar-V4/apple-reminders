@@ -73,7 +73,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
     an outer contract failure or authorizes an automatic mutation retry.
     Malformed optional fields after dispatch preserve an unknown possible
     write rather than becoming `failed_no_mutation`.
-13. The release package resolves only bundled backends and excludes tests,
+13. The explicit access result preserves pre/post authorization,
+    `request_attempted`, `prompt_expected`, and an unobservable
+    `prompt_observed: null` on success and permission denial. It never claims
+    that macOS UI was observed, never verifies a non-full final state, and
+    never directs the access tool back to itself.
+14. The release package resolves only bundled backends and excludes tests,
     databases, backups, caches, screenshots, and other local artifacts.
 
 ## Deliberately withheld behavior
