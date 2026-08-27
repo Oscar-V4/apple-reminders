@@ -69,7 +69,10 @@ class WorkflowHardeningTests(unittest.TestCase):
         destructive = organize.index("Delete each exact source one at a time")
         self.assertLess(non_destructive, destructive)
         self.assertIn("stop before deleting or changing the source reminders", attachment)
-        self.assertIn("public tools do not download, export, or copy image bytes", attachment)
+        self.assertIn(
+            "public tools do not download, export, or copy image bytes",
+            attachment.lower(),
+        )
         self.assertIn("before deleting a source reminder", public_interface)
         self.assertNotIn("recoverable object lifecycle", attachment)
 
