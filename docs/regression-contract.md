@@ -46,7 +46,14 @@ even though optional MCP `outputSchema` descriptors are omitted from
    PNG/JPEG UTI from decoded bytes rather than a filename suffix, and require
    the stored UTI to match native helper read-back. CloudKit evidence can be
    described as likely mobile visibility, never direct iPhone-screen
-   confirmation.
+   confirmation. Image replacement and deletion use a ReminderKit
+   `removeAttachment:` save with no direct SQLite connection held open; success
+   requires the old exact attachment to be detached from the exact Reminder,
+   and the replacement to remain active. Release verification additionally
+   observes the native UI showing one image after replacement and none after
+   deletion. Native attach holds no SQLite write transaction. An unknown
+   removal outcome performs no compensation and requires a fresh inspection
+   before retry.
 8. URL attachment replacement/deletion preserves the observed native tombstone
    and ordering behavior and rejects duplicate or stale changes before
    mutation.

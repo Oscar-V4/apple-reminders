@@ -71,6 +71,8 @@ URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
 SUBPROCESS_TIMEOUT_SECONDS = 30
 ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 6
+REMINDERKIT_REMOVAL_SETTLE_SECONDS = 0.5
+REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS = 10
 SECTION_SYNC_VERIFY_TIMEOUT_SECONDS = 10
 JOURNAL_MAX_BYTES = 1_000_000
 JOURNAL_RETENTION_DAYS = 30
@@ -428,6 +430,18 @@ def connect(db: Path) -> sqlite3.Connection:
     uri = f"file:{urllib.parse.quote(str(path.resolve()))}?mode=rw"
     con = sqlite3.connect(uri, uri=True)
     con.row_factory = sqlite3.Row
+    con.execute("pragma busy_timeout=5000")
+    return con
+
+
+def connect_read_only(db: Path) -> sqlite3.Connection:
+    path = Path(db).expanduser()
+    if not path.exists():
+        raise AdapterError(f"Reminders database not found: {path}")
+    uri = f"file:{urllib.parse.quote(str(path.resolve()))}?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    con.row_factory = sqlite3.Row
+    con.execute("pragma query_only=on")
     con.execute("pragma busy_timeout=5000")
     return con
 
@@ -1920,7 +1934,7 @@ def attach_image_reminderkit_record(
     selected: dict[str, Any] | None = None
     deadline = time.time() + ATTACHMENT_VERIFY_TIMEOUT_SECONDS
     while True:
-        fresh = connect(db_path)
+        fresh = connect_read_only(db_path)
         try:
             rows = active_attachment_rows(fresh, reminder["Z_PK"], attachment_ent=IMAGE_ATTACHMENT_ENT)
         finally:
@@ -2020,6 +2034,205 @@ def attach_image_reminderkit_record(
         "helper": payload,
         "sync": attachment.get("sync", {}),
         "_row": selected,
+    }
+
+
+def remove_image_reminderkit_record(
+    db_path: Path,
+    reminder: dict[str, Any],
+    attachment: dict[str, Any],
+) -> dict[str, Any]:
+    if int(attachment.get("Z_ENT", -1)) != IMAGE_ATTACHMENT_ENT:
+        raise AdapterError(
+            "ReminderKit image removal requires an exact image attachment",
+            code="invalid_input",
+        )
+    try:
+        reminder_id = normalize_uuid(str(reminder.get("ZCKIDENTIFIER") or ""))
+        attachment_id = normalize_uuid(str(attachment.get("ZCKIDENTIFIER") or ""))
+        attachment_pk = int(attachment["Z_PK"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError(
+            "ReminderKit image removal requires exact reminder and attachment ids",
+            code="invalid_input",
+        ) from exc
+    before = attachment_payload(attachment)
+    cloud_state_pk = attachment.get("ZCKCLOUDSTATE")
+    db_path = Path(db_path).expanduser().resolve()
+    helper = reminderkit_attach_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), "remove", reminder_id, attachment_id],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit image removal timed out",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        raise AdapterError(
+            "ReminderKit image removal returned no result",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_returncode=proc.returncode,
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit image removal returned invalid JSON",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_output_present=bool(raw or proc.stderr.strip()),
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AdapterError(
+            "ReminderKit image removal returned a non-object result",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+    if proc.returncode != 0 or payload.get("ok") is not True:
+        mutation_attempted = payload.get("mutation_attempted") is True
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = payload.get("error") or "ReminderKit image removal failed"
+        if detail:
+            message = f"{message}: {detail}"
+        raise AdapterError(
+            message,
+            code="sync_pending" if mutation_attempted else "unexpected_error",
+            partial_failure=mutation_attempted,
+            mutation_outcome_unknown=mutation_attempted,
+        )
+    try:
+        reported_reminder_id = normalize_uuid(
+            str(payload.get("reminder_id") or "")
+        )
+        reported_attachment_id = normalize_uuid(
+            str(payload.get("attachment_id") or "")
+        )
+    except (TypeError, ValueError):
+        reported_reminder_id = None
+        reported_attachment_id = None
+    if (
+        payload.get("operation") != "remove_attachment"
+        or reported_reminder_id != reminder_id
+        or reported_attachment_id != attachment_id
+    ):
+        raise AdapterError(
+            "ReminderKit image removal returned mismatched read-back identity",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+
+    if REMINDERKIT_REMOVAL_SETTLE_SECONDS > 0:
+        time.sleep(REMINDERKIT_REMOVAL_SETTLE_SECONDS)
+    row_deleted = False
+    exact_row_identity = False
+    detached_from_reminder = False
+    cloud_state_tombstone_retained: bool | None = None
+    cloud_state_verified = cloud_state_pk is None
+    deadline = time.monotonic() + REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS
+    try:
+        while True:
+            fresh = connect_read_only(db_path)
+            try:
+                remaining = fresh.execute(
+                    """
+                    select Z_PK,Z_ENT,ZCKIDENTIFIER,ZCKCLOUDSTATE,ZREMINDER2
+                    from ZREMCDOBJECT where Z_PK=?
+                    """,
+                    (attachment_pk,),
+                ).fetchone()
+                linked_duplicate = fresh.execute(
+                    """
+                    select Z_PK from ZREMCDOBJECT
+                    where ZCKIDENTIFIER=? and ZREMINDER2=?
+                    limit 1
+                    """,
+                    (attachment_id, reminder["Z_PK"]),
+                ).fetchone()
+                cloud_state = (
+                    fresh.execute(
+                        """
+                        select Z_PK,ZOBJECT,Z13_OBJECT
+                        from ZREMCKCLOUDSTATE where Z_PK=?
+                        """,
+                        (cloud_state_pk,),
+                    ).fetchone()
+                    if cloud_state_pk is not None
+                    else None
+                )
+            finally:
+                fresh.close()
+            row_deleted = remaining is None
+            if row_deleted:
+                exact_row_identity = True
+            else:
+                try:
+                    stored_attachment_id = normalize_uuid(
+                        str(remaining["ZCKIDENTIFIER"] or "")
+                    )
+                except (TypeError, ValueError):
+                    stored_attachment_id = None
+                exact_row_identity = (
+                    remaining["Z_PK"] == attachment_pk
+                    and remaining["Z_ENT"] == IMAGE_ATTACHMENT_ENT
+                    and stored_attachment_id == attachment_id
+                    and remaining["ZCKCLOUDSTATE"] == cloud_state_pk
+                )
+            detached_from_reminder = linked_duplicate is None
+            if cloud_state_pk is None:
+                cloud_state_tombstone_retained = None
+                cloud_state_verified = True
+            else:
+                cloud_state_tombstone_retained = bool(
+                    cloud_state
+                    and cloud_state["ZOBJECT"] == attachment_pk
+                    and cloud_state["Z13_OBJECT"] == IMAGE_ATTACHMENT_ENT
+                )
+                cloud_state_verified = cloud_state_tombstone_retained
+            if exact_row_identity and detached_from_reminder and cloud_state_verified:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    except Exception as exc:
+        raise AdapterError(
+            "ReminderKit image removal committed but native read-back failed",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        ) from exc
+    if not exact_row_identity or not detached_from_reminder or not cloud_state_verified:
+        raise AdapterError(
+            "ReminderKit image removal committed but native read-back was inconclusive",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            row_deleted=row_deleted,
+            exact_row_identity=exact_row_identity,
+            detached_from_reminder=detached_from_reminder,
+            cloud_state_tombstone_retained=cloud_state_tombstone_retained,
+        )
+    return {
+        **before,
+        "row_deleted": row_deleted,
+        "detached_from_reminder": True,
+        "cloud_state_tombstone_retained": cloud_state_tombstone_retained,
+        "native_reminderkit": True,
+        "helper": payload,
     }
 
 
@@ -5491,21 +5704,6 @@ def attach_url_record(
     return {"attached": True, "attachment": attachment_payload(row), "url": normalized}
 
 
-def soft_delete_attachment_record(
-    con: sqlite3.Connection,
-    reminder: dict[str, Any],
-    attachment: dict[str, Any],
-) -> dict[str, Any]:
-    now = core_now()
-    con.execute(
-        "update ZREMCDOBJECT set ZMARKEDFORDELETION=1,Z_OPT=coalesce(Z_OPT,0)+1 where Z_PK=?",
-        (attachment["Z_PK"],),
-    )
-    bump_cloud_state(con, attachment.get("ZCKCLOUDSTATE"), now)
-    touch_reminder(con, reminder, now)
-    return attachment_payload({**attachment, "ZMARKEDFORDELETION": 1})
-
-
 def delete_url_attachment_record(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
@@ -5575,11 +5773,14 @@ def delete_attachment_record(
 ) -> tuple[dict[str, Any], str]:
     if int(attachment["Z_ENT"]) == URL_ATTACHMENT_ENT:
         return delete_url_attachment_record(con, reminder, attachment), "row_deleted"
-    return soft_delete_attachment_record(con, reminder, attachment), "soft_deleted"
+    raise AdapterError(
+        "Image attachment removal requires a closed SQLite connection",
+        code="unsupported_capability",
+    )
 
 
 def compensate_new_attachment(
-    con: sqlite3.Connection,
+    db_path: Path,
     reminder: dict[str, Any],
     result: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -5588,48 +5789,53 @@ def compensate_new_attachment(
     row = result.get("_row")
     if not isinstance(row, dict):
         return None
-    con.rollback()
-    con.execute("begin immediate")
-    try:
-        deleted = soft_delete_attachment_record(con, reminder, row)
-        con.commit()
-        return deleted
-    except Exception:
-        con.rollback()
-        raise
+    return remove_image_reminderkit_record(db_path, reminder, row)
 
 
 def attachment_replacement_readback(
     con: sqlite3.Connection,
     *,
+    reminder_pk: int,
     old_attachment_pk: int,
-    old_attachment_ent: int,
     new_attachment_pk: int,
     expected_new_order: int | None = None,
     verify_new_order: bool = False,
 ) -> dict[str, bool | str]:
     old_state = con.execute(
-        "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
+        "select ZMARKEDFORDELETION,ZREMINDER2 from ZREMCDOBJECT where Z_PK=?",
         (old_attachment_pk,),
     ).fetchone()
     new_state = con.execute(
         """
         select Z_FOK_REMINDER1 from ZREMCDOBJECT
-        where Z_PK=? and coalesce(ZMARKEDFORDELETION,0)=0
+        where Z_PK=? and ZREMINDER2=? and coalesce(ZMARKEDFORDELETION,0)=0
         """,
-        (new_attachment_pk,),
+        (new_attachment_pk, reminder_pk),
     ).fetchone()
     old_row_deleted = old_state is None
     old_soft_deleted = bool(old_state and old_state["ZMARKEDFORDELETION"])
-    old_removed = old_row_deleted if old_attachment_ent == URL_ATTACHMENT_ENT else old_soft_deleted
+    old_detached = old_row_deleted or (
+        old_state is not None and old_state["ZREMINDER2"] != reminder_pk
+    )
+    old_removed = old_detached
     order_preserved = not verify_new_order or (
         new_state is not None and new_state["Z_FOK_REMINDER1"] == expected_new_order
     )
+    old_removal = (
+        "row_deleted"
+        if old_row_deleted
+        else "detached"
+        if old_detached
+        else "soft_deleted"
+        if old_soft_deleted
+        else "active"
+    )
     return {
         "old_attachment_removed": old_removed,
-        "old_attachment_removal": "row_deleted" if old_row_deleted else "soft_deleted",
+        "old_attachment_removal": old_removal,
         "old_attachment_row_deleted": old_row_deleted,
         "old_attachment_soft_deleted": old_soft_deleted,
+        "old_attachment_detached_from_reminder": old_detached,
         "new_attachment_active": new_state is not None,
         "replacement_order_preserved": order_preserved,
     }
@@ -5663,7 +5869,10 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                     "mobile_visible_likely": True,
                     "sync_status": "verified_mobile_visible",
                 }
-                recovery = {"semantics": "soft_delete_attachment"}
+                recovery = {
+                    "semantics": "delete_attachment_with_fresh_reference",
+                    "automatic_restore_available": False,
+                }
                 pending_warning = None
             except AttachmentVerificationError as exc:
                 result = exc.compensation_result()
@@ -5732,7 +5941,10 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                 "mobile_visible_likely": False,
                 "sync_status": "local_only",
             }
-            recovery = {"semantics": "soft_delete_attachment"}
+            recovery = {
+                "semantics": "delete_attachment_with_fresh_reference",
+                "automatic_restore_available": False,
+            }
             pending_warning = {
                 "code": "local_only_attachment",
                 "message": result["warning"],
@@ -5982,7 +6194,7 @@ def repair_candidate_digest(candidates: list[dict[str, Any]]) -> str:
 def cmd_repair_attachments(args: argparse.Namespace) -> int:
     operation_id = new_operation_id()
     db = resolve_database(args.db, write=args.apply)
-    con = connect(db)
+    con: sqlite3.Connection | None = connect(db)
     try:
         capabilities = attachment_sync_capabilities(con)
         if args.apply and not capabilities["available"]:
@@ -6074,6 +6286,7 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
         repaired: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
         blocked_reminder_ids: set[str] = set()
+        stop_after_unresolved_mutation = False
         expected_reminder_versions: dict[str, int] = {}
         for item in selected:
             reminder_id = item["reminder"]["id"]
@@ -6107,7 +6320,10 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 )
                 continue
             source = sources[0]
-            if reminder_id in blocked_reminder_ids:
+            if (
+                stop_after_unresolved_mutation
+                or reminder_id in blocked_reminder_ids
+            ):
                 failed.append(
                     {
                         "reminder": item["reminder"],
@@ -6138,10 +6354,26 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 except AttachmentVerificationError as attach_exc:
                     new_result = attach_exc.compensation_result()
                     raise
-                con.execute("begin immediate")
-                deleted = soft_delete_attachment_record(con, reminder, item["_row"])
-                con.commit()
+                con.close()
+                con = None
+                try:
+                    deleted = remove_image_reminderkit_record(
+                        db,
+                        reminder,
+                        item["_row"],
+                    )
+                except Exception:
+                    raise
                 item_committed = True
+                try:
+                    con = connect(db)
+                except Exception as exc:
+                    raise AdapterError(
+                        "Attachment repair committed but final store read-back failed",
+                        code="sync_pending",
+                        partial_failure=True,
+                        native_removal_verified=True,
+                    ) from exc
                 refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
                 expected_reminder_versions[item["reminder"]["id"]] = refreshed_reminder[
                     "Z_OPT"
@@ -6166,7 +6398,8 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 )
                 repaired.append(result)
             except Exception as exc:
-                con.rollback()
+                if con is not None:
+                    con.rollback()
                 compensation = None
                 compensation_error = None
                 error_details = exc.details if isinstance(exc, AdapterError) else {}
@@ -6174,9 +6407,33 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                 mutation_outcome_unknown = (
                     error_details.get("mutation_outcome_unknown") is True
                 )
-                if not item_committed and reminder is not None and new_result is not None:
+                if (
+                    not item_committed
+                    and not mutation_outcome_unknown
+                    and reminder is not None
+                    and new_result is not None
+                ):
                     try:
-                        compensation = compensate_new_attachment(con, reminder, new_result)
+                        if con is not None:
+                            con.close()
+                            con = None
+                        try:
+                            compensation = compensate_new_attachment(
+                                db,
+                                reminder,
+                                new_result,
+                            )
+                        except Exception:
+                            raise
+                        try:
+                            con = connect(db)
+                        except Exception as reconnect_exc:
+                            raise AdapterError(
+                                "Compensation was attempted but final store read-back failed",
+                                code="sync_pending",
+                                partial_failure=True,
+                                mutation_outcome_unknown=True,
+                            ) from reconnect_exc
                         if compensation is not None:
                             refreshed_reminder = reread_reminder(con, reminder["Z_PK"])
                             expected_reminder_versions[item["reminder"]["id"]] = (
@@ -6191,6 +6448,8 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                     compensation is None or compensation_error is not None
                 ):
                     blocked_reminder_ids.add(reminder_id)
+                if partial_failure and con is None:
+                    stop_after_unresolved_mutation = True
                 failed.append(
                     {
                         "reminder": item["reminder"],
@@ -6268,7 +6527,8 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
         )
         return 0 if not failed else 1
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def cmd_delete_attachment(args: argparse.Namespace) -> int:
@@ -6279,7 +6539,8 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
     )
     db = resolve_database(args.db, write=True)
     operation_id = new_operation_id()
-    con = connect(db)
+    con: sqlite3.Connection | None = connect(db)
+    native_removal_verified = False
     try:
         capability = require_command_capability(con, "attachment_mutation_db")
         con.execute("begin immediate")
@@ -6306,7 +6567,28 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
                 candidates=candidates,
             )
         before_attachment = attachment_payload(selected)
-        deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
+        if int(selected["Z_ENT"]) == IMAGE_ATTACHMENT_ENT:
+            con.rollback()
+            con.close()
+            con = None
+            try:
+                deleted = remove_image_reminderkit_record(db, reminder, selected)
+            except Exception:
+                raise
+            native_removal_verified = True
+            try:
+                con = connect(db)
+            except Exception as exc:
+                raise AdapterError(
+                    "Image removal was verified but final store read-back failed",
+                    code="sync_pending",
+                    partial_failure=True,
+                    mutation_outcome_unknown=True,
+                    native_removal_verified=True,
+                ) from exc
+            deletion_mode = "native_detached"
+        else:
+            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
         refreshed_attachment = con.execute(
             "select ZMARKEDFORDELETION from ZREMCDOBJECT where Z_PK=?",
             (selected["Z_PK"],),
@@ -6314,7 +6596,14 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
         attachment_removed = (
             refreshed_attachment is None
             if deletion_mode == "row_deleted"
-            else bool(refreshed_attachment and refreshed_attachment["ZMARKEDFORDELETION"])
+            else (
+                deleted.get("detached_from_reminder") is True
+                if deletion_mode == "native_detached"
+                else bool(
+                    refreshed_attachment
+                    and refreshed_attachment["ZMARKEDFORDELETION"]
+                )
+            )
         )
         if not attachment_removed:
             raise AdapterError("Attachment deletion could not be read back", code="schema_mismatch")
@@ -6333,7 +6622,11 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
                 status="verified",
                 operation="delete_attachment",
                 operation_id=operation_id,
-                backend="sqlite_private",
+                backend=(
+                    "reminderkit"
+                    if before_attachment.get("type") == "image"
+                    else "sqlite_private"
+                ),
                 target={
                     "id": reminder_url(reminder["ZCKIDENTIFIER"]),
                     "attachment_id": before_attachment["id"],
@@ -6345,9 +6638,12 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
                     "attachment_removed": True,
                     "attachment_row_deleted": deletion_mode == "row_deleted",
                     "attachment_soft_deleted": deletion_mode == "soft_deleted",
+                    "attachment_detached_from_reminder": deletion_mode
+                    == "native_detached",
                     "cloud_state_tombstone_retained": deleted.get(
                         "cloud_state_tombstone_retained"
                     ),
+                    "native_reminderkit": deleted.get("native_reminderkit"),
                 },
                 recovery={
                     "semantics": (
@@ -6362,11 +6658,22 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    except Exception:
-        con.rollback()
+    except Exception as exc:
+        if con is not None:
+            con.rollback()
+        if native_removal_verified:
+            raise AdapterError(
+                "Image removal was verified but final receipt read-back failed",
+                code="sync_pending",
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+                native_removal_verified=True,
+                original_error=f"{type(exc).__name__}: {exc}",
+            ) from exc
         raise
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
@@ -6381,7 +6688,7 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
         raise AdapterError("replace_attachment requires exactly one of --image or --url")
     replacement_type = "image" if args.image else "url"
     selector_type = args.type or replacement_type
-    con = connect(db)
+    con: sqlite3.Connection | None = connect(db)
     reminder = None
     new_result = None
     capability: dict[str, Any] = {}
@@ -6389,6 +6696,7 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
     old_attachment: dict[str, Any] = {}
     new_attachment: dict[str, Any] = {}
     committed = False
+    native_removal_verified = False
     try:
         capability = require_command_capability(con, "attachment_mutation_db")
         if args.url:
@@ -6444,9 +6752,29 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
                 raise
             new_attachment = new_result.get("attachment") or {}
             if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
-                raise AdapterError("Replacement source is the same as the selected existing attachment")
-            con.execute("begin immediate")
-            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
+                raise AdapterError(
+                    "Replacement result reused the selected attachment identity",
+                    code="sync_pending",
+                    partial_failure=True,
+                    mutation_outcome_unknown=True,
+                )
+            con.close()
+            con = None
+            try:
+                deleted = remove_image_reminderkit_record(db, reminder, selected)
+            except Exception:
+                raise
+            native_removal_verified = True
+            try:
+                con = connect(db)
+            except Exception as exc:
+                raise AdapterError(
+                    "Image replacement committed but final store read-back failed",
+                    code="sync_pending",
+                    partial_failure=True,
+                    mutation_outcome_unknown=True,
+                    native_removal_verified=True,
+                ) from exc
         else:
             new_result = attach_url_record(
                 con,
@@ -6457,25 +6785,28 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             )
             new_attachment = new_result.get("attachment") or {}
             if int(new_attachment.get("pk", -1)) == int(selected["Z_PK"]):
-                raise AdapterError("Replacement source is the same as the selected existing attachment")
-            deleted, deletion_mode = delete_attachment_record(con, reminder, selected)
-        con.commit()
-        committed = True
+                raise AdapterError(
+                    "Replacement result reused the selected attachment identity",
+                    code="sync_pending",
+                    partial_failure=True,
+                    mutation_outcome_unknown=True,
+                )
+            deleted, _ = delete_attachment_record(con, reminder, selected)
+        if args.image:
+            committed = True
+        else:
+            con.commit()
+            committed = True
         readback = attachment_replacement_readback(
             con,
+            reminder_pk=reminder["Z_PK"],
             old_attachment_pk=selected["Z_PK"],
-            old_attachment_ent=int(selected["Z_ENT"]),
             new_attachment_pk=int(new_attachment.get("pk")),
             expected_new_order=(selected.get("Z_FOK_REMINDER1") if args.url else None),
             verify_new_order=bool(args.url),
         )
         replacement_verified = (
-            bool(
-                readback.get(
-                    "old_attachment_removed",
-                    readback.get("old_attachment_soft_deleted"),
-                )
-            )
+            bool(readback.get("old_attachment_removed"))
             and bool(readback.get("new_attachment_active"))
             and readback.get("replacement_order_preserved") is not False
         )
@@ -6551,13 +6882,110 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             capability=capability,
         )
     except Exception as exc:
-        con.rollback()
+        if con is not None:
+            con.rollback()
+        error_details = exc.details if isinstance(exc, AdapterError) else {}
+        mutation_outcome_unknown = (
+            error_details.get("mutation_outcome_unknown") is True
+        )
+        if committed or native_removal_verified:
+            public_new_result = dict(new_result or {})
+            public_new_result.pop("_row", None)
+            return operation_receipt(
+                status="committed_verification_pending",
+                operation="replace_attachment",
+                operation_id=operation_id,
+                backend="reminderkit" if args.image else "sqlite_private",
+                target={
+                    "id": reminder.get("ZCKIDENTIFIER") if reminder else args.id,
+                    "old_attachment_id": old_attachment.get("id"),
+                    "new_attachment_id": new_attachment.get("id"),
+                },
+                before={"reminder": before_reminder, "attachment": old_attachment},
+                after={
+                    "new_attachment": public_new_result,
+                    "old_attachment": deleted,
+                },
+                verification={
+                    "state": "pending",
+                    "write_performed": True,
+                    "replacement_committed": True,
+                    "native_removal_verified": native_removal_verified,
+                },
+                recovery={
+                    "semantics": "inspect_attachments_before_retry",
+                    "automatic_retry_safe": False,
+                },
+                error={
+                    "code": "sync_pending",
+                    "message": (
+                        "Attachment replacement committed but final read-back "
+                        "failed; inspect exact attachments before any retry."
+                    ),
+                    "original_error": f"{type(exc).__name__}: {exc}",
+                },
+                capability=capability,
+            )
+        if args.image and not committed and mutation_outcome_unknown:
+            public_new_result = dict(new_result or {})
+            public_new_result.pop("_row", None)
+            new_attachment_id = (
+                new_result.get("attachment", {}).get("id")
+                if new_result is not None
+                else None
+            )
+            return operation_receipt(
+                status="committed_verification_pending",
+                operation="replace_attachment",
+                operation_id=operation_id,
+                backend="reminderkit",
+                target={
+                    "id": reminder.get("ZCKIDENTIFIER") if reminder else args.id,
+                    "old_attachment_id": old_attachment.get("id"),
+                    "new_attachment_id": new_attachment_id,
+                },
+                before={"reminder": before_reminder, "attachment": old_attachment},
+                after={
+                    "new_attachment": public_new_result,
+                    "old_attachment_state": "unknown",
+                },
+                verification={
+                    "state": "pending",
+                    "write_performed": None,
+                    "replacement_committed": None,
+                    "mutation_outcome_unknown": True,
+                    "native_removal_verified": error_details.get(
+                        "native_removal_verified"
+                    )
+                    is True,
+                },
+                recovery={
+                    "semantics": "inspect_attachments_before_retry",
+                    "automatic_retry_safe": False,
+                },
+                error={
+                    "code": exc.code
+                    if isinstance(exc, AdapterError)
+                    else "sync_pending",
+                    "message": (
+                        "Image replacement outcome is unknown; inspect exact "
+                        "attachments before any retry."
+                    ),
+                    "original_error": f"{type(exc).__name__}: {exc}",
+                },
+                capability=capability,
+            )
         if args.image and not committed and reminder is not None and new_result is not None:
             public_new_result = dict(new_result)
             public_new_result.pop("_row", None)
             new_attachment_id = new_result.get("attachment", {}).get("id")
             try:
-                compensated = compensate_new_attachment(con, reminder, new_result)
+                if con is not None:
+                    con.rollback()
+                    con.close()
+                    con = None
+                compensated = compensate_new_attachment(db, reminder, new_result)
+                con = connect(db)
             except Exception as cleanup_exc:
                 return operation_receipt(
                     status="failed_manual_repair_required",
@@ -6628,7 +7056,8 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             )
         raise
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def cmd_replace_attachment(args: argparse.Namespace) -> int:

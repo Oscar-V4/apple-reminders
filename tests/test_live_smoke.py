@@ -29,9 +29,15 @@ REF_5 = "rev1." + "E" * 32
 REF_6 = "rev1." + "F" * 32
 REF_7 = "rev1." + "G" * 32
 REF_8 = "rev1." + "H" * 32
+REF_9 = "rev1." + "I" * 32
+REF_10 = "rev1." + "J" * 32
+REF_11 = "rev1." + "K" * 32
+REF_12 = "rev1." + "L" * 32
 LIST_ID = "LIST-ID-SECRET"
 SECTION_ID = "SECTION-ID-SECRET"
 REMINDER_ID = "REMINDER-ID-SECRET"
+OLD_IMAGE_ID = "ATTACHMENT-ID-SECRET"
+NEW_IMAGE_ID = "REPLACEMENT-ID-SECRET"
 
 
 class SequenceClient:
@@ -44,7 +50,11 @@ class SequenceClient:
         expected_name, response = self.responses.pop(0)
         if name != expected_name:
             raise AssertionError(f"expected {expected_name}, got {name}")
-        if name == "change_reminder_attachment":
+        action = arguments.get("action", {})
+        if name == "change_reminder_attachment" and action.get("kind") in {
+            "attach_image",
+            "replace_image",
+        }:
             image = Path(arguments["action"]["image_path"])
             if not image.is_file() or not image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
                 raise AssertionError("the harness did not create a synthetic PNG")
@@ -194,7 +204,14 @@ def successful_responses():
                 "status": "verified",
                 "after": {
                     "reference": REF_7,
-                    "attachments": [{"id": "ATTACHMENT-ID-SECRET", "type": "image"}],
+                    "attachments": [
+                        {
+                            "id": "URL-ATTACHMENT-ID-SECRET",
+                            "type": "url",
+                            "url": "https://example.com/apple-reminders-live-smoke",
+                        },
+                        {"id": OLD_IMAGE_ID, "type": "image"},
+                    ],
                 },
             },
         ),
@@ -214,12 +231,95 @@ def successful_responses():
                             "sync": {"fields_available": False},
                         },
                         {
-                            "id": "ATTACHMENT-ID-SECRET",
+                            "id": OLD_IMAGE_ID,
                             "type": "image",
                             "sync": {"mobile_visible_likely": True},
                         },
                     ],
                     "sync": {"fields_available": False},
+                    "truncated": False,
+                },
+            },
+        ),
+        (
+            "change_reminder_attachment",
+            {
+                "ok": True,
+                "status": "verified",
+                "after": {
+                    "reference": REF_9,
+                    "attachments": [
+                        {
+                            "id": "URL-ATTACHMENT-ID-SECRET",
+                            "type": "url",
+                            "url": "https://example.com/apple-reminders-live-smoke",
+                        },
+                        {"id": NEW_IMAGE_ID, "type": "image"},
+                    ],
+                },
+            },
+        ),
+        (
+            "inspect_reminder_native",
+            {
+                "ok": True,
+                "status": "verified",
+                "data": {
+                    "reference": REF_10,
+                    "section": {"id": SECTION_ID},
+                    "attachments": [
+                        {
+                            "id": "URL-ATTACHMENT-ID-SECRET",
+                            "type": "url",
+                            "url": "https://example.com/apple-reminders-live-smoke",
+                            "sync": {"fields_available": False},
+                        },
+                        {
+                            "id": NEW_IMAGE_ID,
+                            "type": "image",
+                            "sync": {"mobile_visible_likely": True},
+                        },
+                    ],
+                    "sync": {"fields_available": False},
+                    "truncated": False,
+                },
+            },
+        ),
+        (
+            "change_reminder_attachment",
+            {
+                "ok": True,
+                "status": "verified",
+                "after": {
+                    "reference": REF_11,
+                    "attachments": [
+                        {
+                            "id": "URL-ATTACHMENT-ID-SECRET",
+                            "type": "url",
+                            "url": "https://example.com/apple-reminders-live-smoke",
+                        }
+                    ],
+                },
+            },
+        ),
+        (
+            "inspect_reminder_native",
+            {
+                "ok": True,
+                "status": "verified",
+                "data": {
+                    "reference": REF_12,
+                    "section": {"id": SECTION_ID},
+                    "attachments": [
+                        {
+                            "id": "URL-ATTACHMENT-ID-SECRET",
+                            "type": "url",
+                            "url": "https://example.com/apple-reminders-live-smoke",
+                            "sync": {"fields_available": False},
+                        }
+                    ],
+                    "sync": {"fields_available": False},
+                    "truncated": False,
                 },
             },
         ),
@@ -334,6 +434,10 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
                 "organize_reminder",
                 "change_reminder_attachment",
                 "inspect_reminder_native",
+                "change_reminder_attachment",
+                "inspect_reminder_native",
+                "change_reminder_attachment",
+                "inspect_reminder_native",
                 "delete_reminder",
                 "read_reminder",
             ],
@@ -348,7 +452,11 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         move_arguments = client.calls[12][1]
         attach_arguments = client.calls[13][1]
         inspect_arguments = client.calls[14][1]
-        delete_arguments = client.calls[15][1]
+        replace_arguments = client.calls[15][1]
+        inspect_replaced_arguments = client.calls[16][1]
+        delete_image_arguments = client.calls[17][1]
+        inspect_deleted_arguments = client.calls[18][1]
+        delete_arguments = client.calls[19][1]
         self.assertEqual(
             fetch_arguments,
             {"list_ids": [LIST_ID], "status": "incomplete", "limit": 5, "sort": "modified"},
@@ -360,9 +468,28 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         self.assertEqual(move_arguments["reference"], REF_5)
         self.assertEqual(attach_arguments["reference"], REF_6)
         self.assertEqual(inspect_arguments["reference"], REF_7)
-        self.assertEqual(delete_arguments["reference"], REF_8)
+        self.assertEqual(replace_arguments["reference"], REF_8)
+        self.assertEqual(
+            replace_arguments["action"]["attachment_id"], OLD_IMAGE_ID
+        )
+        self.assertEqual(inspect_replaced_arguments["reference"], REF_9)
+        self.assertEqual(delete_image_arguments["reference"], REF_10)
+        self.assertEqual(
+            delete_image_arguments["action"],
+            {"kind": "delete", "attachment_id": NEW_IMAGE_ID},
+        )
+        self.assertEqual(inspect_deleted_arguments["reference"], REF_11)
+        self.assertEqual(delete_arguments["reference"], REF_12)
         self.assertEqual(
             inspect_arguments["include"],
+            ["section", "attachments", "sync"],
+        )
+        self.assertEqual(
+            inspect_replaced_arguments["include"],
+            ["section", "attachments", "sync"],
+        )
+        self.assertEqual(
+            inspect_deleted_arguments["include"],
             ["section", "attachments", "sync"],
         )
         cleanup.assert_called_once_with(
@@ -376,7 +503,8 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             SECTION_ID,
             REMINDER_ID,
             REF_1,
-            "ATTACHMENT-ID-SECRET",
+            OLD_IMAGE_ID,
+            NEW_IMAGE_ID,
             "URL-ATTACHMENT-ID-SECRET",
             "Codex synthetic live smoke reminder",
             "https://example.com/apple-reminders-live-smoke",
@@ -476,6 +604,106 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
                 )
                 cleanup.assert_called_once_with(
                     "Codex-Apple-Reminders-Live-Smoke-nativeproof", LIST_ID
+                )
+
+    def test_harness_rejects_replacement_that_keeps_the_old_image(self) -> None:
+        responses = deepcopy(successful_responses())
+        responses[15][1]["after"]["attachments"].append(
+            {"id": OLD_IMAGE_ID, "type": "image"}
+        )
+        output = io.StringIO()
+
+        with self.assertRaises(live_smoke.SmokeFailure):
+            live_smoke.run_public_mcp_smoke(
+                SequenceClient(responses),
+                source_id="SOURCE-ID-SECRET",
+                cleanup=mock.Mock(return_value=True),
+                stdout=output,
+                list_name_factory=lambda: (
+                    "Codex-Apple-Reminders-Live-Smoke-replaceduplicate"
+                ),
+            )
+
+        self.assertIn(
+            "step=replace_image status=failed latency_ms=",
+            output.getvalue(),
+        )
+
+    def test_harness_rejects_delete_that_keeps_an_image(self) -> None:
+        responses = deepcopy(successful_responses())
+        responses[17][1]["after"]["attachments"].append(
+            {"id": NEW_IMAGE_ID, "type": "image"}
+        )
+        output = io.StringIO()
+
+        with self.assertRaises(live_smoke.SmokeFailure):
+            live_smoke.run_public_mcp_smoke(
+                SequenceClient(responses),
+                source_id="SOURCE-ID-SECRET",
+                cleanup=mock.Mock(return_value=True),
+                stdout=output,
+                list_name_factory=lambda: (
+                    "Codex-Apple-Reminders-Live-Smoke-deleteimage"
+                ),
+            )
+
+        self.assertIn(
+            "step=delete_image status=failed latency_ms=",
+            output.getvalue(),
+        )
+
+    def test_native_rechecks_replacement_and_delete_state(self) -> None:
+        def keep_old_image(responses):
+            responses[16][1]["data"]["attachments"].append(
+                {
+                    "id": OLD_IMAGE_ID,
+                    "type": "image",
+                    "sync": {"mobile_visible_likely": True},
+                }
+            )
+
+        def lose_mobile_evidence(responses):
+            responses[16][1]["data"]["attachments"][1]["sync"] = {
+                "mobile_visible_likely": False
+            }
+
+        def keep_deleted_image(responses):
+            responses[18][1]["data"]["attachments"].append(
+                {
+                    "id": NEW_IMAGE_ID,
+                    "type": "image",
+                    "sync": {"mobile_visible_likely": True},
+                }
+            )
+
+        cases = {
+            "replacement_keeps_old": (keep_old_image, "inspect_replaced_image"),
+            "replacement_loses_mobile_evidence": (
+                lose_mobile_evidence,
+                "inspect_replaced_image",
+            ),
+            "delete_keeps_image": (keep_deleted_image, "inspect_deleted_image"),
+        }
+        for label, (mutate, failed_step) in cases.items():
+            with self.subTest(label=label):
+                responses = deepcopy(successful_responses())
+                mutate(responses)
+                output = io.StringIO()
+
+                with self.assertRaises(live_smoke.SmokeFailure):
+                    live_smoke.run_public_mcp_smoke(
+                        SequenceClient(responses),
+                        source_id="SOURCE-ID-SECRET",
+                        cleanup=mock.Mock(return_value=True),
+                        stdout=output,
+                        list_name_factory=lambda: (
+                            "Codex-Apple-Reminders-Live-Smoke-native-recheck"
+                        ),
+                    )
+
+                self.assertIn(
+                    f"step={failed_step} status=failed latency_ms=",
+                    output.getvalue(),
                 )
 
     def test_failure_still_attempts_cleanup_and_names_only_unproven_residue(self) -> None:

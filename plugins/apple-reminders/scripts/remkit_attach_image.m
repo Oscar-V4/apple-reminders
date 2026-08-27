@@ -23,18 +23,27 @@ static void write_json(NSDictionary *payload) {
     printf("\n");
 }
 
-static NSString *normalize_reminder_uuid(NSString *value) {
-    NSString *prefix = @"x-apple-reminder://";
-    if ([value hasPrefix:prefix]) {
-        return [value substringFromIndex:prefix.length];
+static NSString *normalize_uuid(NSString *value) {
+    NSArray<NSString *> *prefixes = @[
+        @"x-apple-reminder://",
+        @"x-apple-reminderkit://"
+    ];
+    for (NSString *prefix in prefixes) {
+        if ([value hasPrefix:prefix]) {
+            return [value substringFromIndex:prefix.length];
+        }
     }
     return value;
 }
 
 int main(int argc, const char **argv) {
     @autoreleasepool {
-        if (argc < 3) {
-            write_json(@{@"ok": @NO, @"error": @"usage: remkit_attach_image REMINDER_UUID_OR_URL IMAGE_PATH"});
+        BOOL removeMode = argc == 4 && [@"remove" isEqualToString:[NSString stringWithUTF8String:argv[1]]];
+        if ((!removeMode && argc != 3) || (removeMode && argc != 4)) {
+            write_json(@{
+                @"ok": @NO,
+                @"error": @"usage: remkit_attach_image REMINDER_UUID_OR_URL IMAGE_PATH | remove REMINDER_UUID ATTACHMENT_UUID"
+            });
             return 2;
         }
 
@@ -46,64 +55,74 @@ int main(int argc, const char **argv) {
             return 2;
         }
 
-        NSString *uuidString = normalize_reminder_uuid([NSString stringWithUTF8String:argv[1]]);
-        NSString *imagePath = [NSString stringWithUTF8String:argv[2]];
+        int reminderArgument = removeMode ? 2 : 1;
+        NSString *uuidString = normalize_uuid([NSString stringWithUTF8String:argv[reminderArgument]]);
+        NSString *attachmentUUIDString = removeMode
+            ? normalize_uuid([NSString stringWithUTF8String:argv[3]])
+            : nil;
+        NSString *imagePath = removeMode ? nil : [NSString stringWithUTF8String:argv[2]];
         NSString *imageName = imagePath.lastPathComponent;
-        NSURL *imageURL = [NSURL fileURLWithPath:imagePath];
+        NSData *imageData = nil;
+        NSString *imageUTI = nil;
+        NSUInteger width = 0;
+        NSUInteger height = 0;
         NSError *error = nil;
-        NSData *imageData = [NSData dataWithContentsOfURL:imageURL
-                                                   options:NSDataReadingMappedIfSafe
-                                                     error:&error];
-        if (!imageData) {
-            write_json(@{
-                @"ok": @NO,
-                @"error": @"image_data_load_failed",
-                @"detail": error.localizedDescription ?: @"unknown",
-                @"image": imageName
-            });
-            return 2;
-        }
-        CGImageSourceRef imageSource = CGImageSourceCreateWithData(
-            (__bridge CFDataRef)imageData,
-            NULL
-        );
-        CFStringRef sourceType = imageSource ? CGImageSourceGetType(imageSource) : NULL;
-        NSString *imageUTI = sourceType ? [(__bridge NSString *)sourceType copy] : nil;
-        if (imageSource) {
-            CFRelease(imageSource);
-        }
-        NSSet<NSString *> *supportedImageUTIs = [NSSet setWithObjects:
-            @"public.jpeg",
-            @"public.png",
-            nil
-        ];
-        if (![supportedImageUTIs containsObject:imageUTI]) {
-            write_json(@{
-                @"ok": @NO,
-                @"error": @"unsupported_decoded_image_type",
-                @"detected_uti": imageUTI ?: [NSNull null],
-                @"image": imageName
-            });
-            return 2;
-        }
-        NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
-        if (!image) {
-            write_json(@{@"ok": @NO, @"error": @"image_load_failed", @"image": imageName});
-            return 2;
-        }
-
-        NSBitmapImageRep *bitmap = nil;
-        for (NSImageRep *candidate in image.representations) {
-            if ([candidate isKindOfClass:NSBitmapImageRep.class]) {
-                bitmap = (NSBitmapImageRep *)candidate;
-                break;
+        if (!removeMode) {
+            NSURL *imageURL = [NSURL fileURLWithPath:imagePath];
+            imageData = [NSData dataWithContentsOfURL:imageURL
+                                              options:NSDataReadingMappedIfSafe
+                                                error:&error];
+            if (!imageData) {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"image_data_load_failed",
+                    @"detail": error.localizedDescription ?: @"unknown",
+                    @"image": imageName
+                });
+                return 2;
             }
-        }
-        NSUInteger width = bitmap ? (NSUInteger)bitmap.pixelsWide : (NSUInteger)llround(image.size.width);
-        NSUInteger height = bitmap ? (NSUInteger)bitmap.pixelsHigh : (NSUInteger)llround(image.size.height);
-        if (width == 0 || height == 0) {
-            write_json(@{@"ok": @NO, @"error": @"invalid_image_dimensions", @"image": imageName});
-            return 2;
+            CGImageSourceRef imageSource = CGImageSourceCreateWithData(
+                (__bridge CFDataRef)imageData,
+                NULL
+            );
+            CFStringRef sourceType = imageSource ? CGImageSourceGetType(imageSource) : NULL;
+            imageUTI = sourceType ? [(__bridge NSString *)sourceType copy] : nil;
+            if (imageSource) {
+                CFRelease(imageSource);
+            }
+            NSSet<NSString *> *supportedImageUTIs = [NSSet setWithObjects:
+                @"public.jpeg",
+                @"public.png",
+                nil
+            ];
+            if (![supportedImageUTIs containsObject:imageUTI]) {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"unsupported_decoded_image_type",
+                    @"detected_uti": imageUTI ?: [NSNull null],
+                    @"image": imageName
+                });
+                return 2;
+            }
+            NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
+            if (!image) {
+                write_json(@{@"ok": @NO, @"error": @"image_load_failed", @"image": imageName});
+                return 2;
+            }
+
+            NSBitmapImageRep *bitmap = nil;
+            for (NSImageRep *candidate in image.representations) {
+                if ([candidate isKindOfClass:NSBitmapImageRep.class]) {
+                    bitmap = (NSBitmapImageRep *)candidate;
+                    break;
+                }
+            }
+            width = bitmap ? (NSUInteger)bitmap.pixelsWide : (NSUInteger)llround(image.size.width);
+            height = bitmap ? (NSUInteger)bitmap.pixelsHigh : (NSUInteger)llround(image.size.height);
+            if (width == 0 || height == 0) {
+                write_json(@{@"ok": @NO, @"error": @"invalid_image_dimensions", @"image": imageName});
+                return 2;
+            }
         }
 
         Class REMStore = NSClassFromString(@"REMStore");
@@ -161,39 +180,88 @@ int main(int argc, const char **argv) {
             write_json(@{@"ok": @NO, @"error": @"attachment_context_nil", @"reminder": uuidString});
             return 1;
         }
-        if (![attachmentContext respondsToSelector:@selector(addImageAttachmentWithData:uti:width:height:)]) {
-            write_json(@{@"ok": @NO, @"error": @"attachment_selector_missing", @"reminder": uuidString});
-            return 1;
-        }
-
-        id attachment = ((id (*)(id, SEL, id, id, NSUInteger, NSUInteger))objc_msgSend)(
-            attachmentContext,
-            @selector(addImageAttachmentWithData:uti:width:height:),
-            imageData,
-            imageUTI,
-            width,
-            height
-        );
-        if (!attachment) {
-            write_json(@{
-                @"ok": @NO,
-                @"error": @"add_image_attachment_failed",
-                @"reminder": uuidString,
-                @"image": imageName
-            });
-            return 1;
+        id attachment = nil;
+        NSUInteger attachmentsBefore = 0;
+        if (removeMode) {
+            NSUUID *attachmentUUID = [[NSUUID alloc] initWithUUIDString:attachmentUUIDString];
+            if (!attachmentUUID) {
+                write_json(@{@"ok": @NO, @"error": @"bad_attachment_uuid"});
+                return 2;
+            }
+            if (![attachmentContext respondsToSelector:@selector(attachments)]
+                || ![attachmentContext respondsToSelector:@selector(removeAttachment:)]) {
+                write_json(@{@"ok": @NO, @"error": @"remove_attachment_selectors_missing"});
+                return 2;
+            }
+            NSArray *attachments = send_id(attachmentContext, @selector(attachments));
+            attachmentsBefore = attachments.count;
+            for (id candidate in attachments) {
+                if (![candidate respondsToSelector:@selector(objectID)]) continue;
+                id candidateObjectID = send_id(candidate, @selector(objectID));
+                if (![candidateObjectID respondsToSelector:@selector(uuid)]) continue;
+                NSUUID *candidateUUID = send_id(candidateObjectID, @selector(uuid));
+                if ([candidateUUID isEqual:attachmentUUID]) {
+                    attachment = candidate;
+                    break;
+                }
+            }
+            if (!attachment) {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"attachment_not_found",
+                    @"attachment_count": @(attachmentsBefore)
+                });
+                return 1;
+            }
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                attachmentContext,
+                @selector(removeAttachment:),
+                attachment
+            );
+        } else {
+            if (![attachmentContext respondsToSelector:@selector(addImageAttachmentWithData:uti:width:height:)]) {
+                write_json(@{@"ok": @NO, @"error": @"attachment_selector_missing", @"reminder": uuidString});
+                return 1;
+            }
+            attachment = ((id (*)(id, SEL, id, id, NSUInteger, NSUInteger))objc_msgSend)(
+                attachmentContext,
+                @selector(addImageAttachmentWithData:uti:width:height:),
+                imageData,
+                imageUTI,
+                width,
+                height
+            );
+            if (!attachment) {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"add_image_attachment_failed",
+                    @"reminder": uuidString,
+                    @"image": imageName
+                });
+                return 1;
+            }
         }
 
         error = nil;
         BOOL saved = ((BOOL (*)(id, SEL, NSError **))objc_msgSend)(saveRequest, @selector(saveSynchronouslyWithError:), &error);
         if (!saved) {
-            write_json(@{
-                @"ok": @NO,
-                @"error": @"save_failed",
-                @"detail": error.localizedDescription ?: @"unknown",
-                @"reminder": uuidString,
-                @"image": imageName
-            });
+            if (removeMode) {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"save_failed",
+                    @"detail": error.localizedDescription ?: @"unknown",
+                    @"operation": @"remove_attachment",
+                    @"mutation_attempted": @YES
+                });
+            } else {
+                write_json(@{
+                    @"ok": @NO,
+                    @"error": @"save_failed",
+                    @"detail": error.localizedDescription ?: @"unknown",
+                    @"reminder": uuidString,
+                    @"image": imageName
+                });
+            }
             return 1;
         }
 
@@ -201,10 +269,25 @@ int main(int argc, const char **argv) {
             ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(
                 store,
                 @selector(triggerCloudKitOnlySyncWithReason:discretionary:completion:),
-                @"codex-reminderkit-image-attachment",
+                removeMode
+                    ? @"codex-reminderkit-remove-image-attachment"
+                    : @"codex-reminderkit-image-attachment",
                 NO,
                 nil
             );
+        }
+
+        if (removeMode) {
+            write_json(@{
+                @"ok": @YES,
+                @"backend": @"reminderkit",
+                @"operation": @"remove_attachment",
+                @"reminder_id": uuidString,
+                @"attachment_id": attachmentUUIDString,
+                @"attachments_before": @(attachmentsBefore),
+                @"mutation_attempted": @YES
+            });
+            return 0;
         }
 
         NSString *attachmentID = nil;
