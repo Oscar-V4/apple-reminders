@@ -82,16 +82,20 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   verification-pending on replay. The current key survives wall-clock jumps,
   and unresolved fences cannot be evicted merely to make capacity for a new
   write. A callback failure that affirmatively occurred before mutation clears
-  its fence for a safe retry; possible-commit failures retain it.
+  its fence for a safe retry; possible-commit failures retain it. Core create
+  now carries contract-validated EventKit no-write results through that same
+  cleanup path instead of leaving a permanent unresolved fence.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public
   contract validation. Missing proof or any post-save read failure now fails
   closed without inventing a verified or no-write outcome.
 - Mapped recovery failures to fixed public messages so private store paths and
-  native helper details cannot enter structured output. Adapter-missing and
-  launch-failed cases now retain proven pre-dispatch `failed_no_mutation`, while
-  timeouts and malformed post-launch output remain unknown.
+  native helper details cannot enter structured output. Parent-verified missing
+  paths and request-bound failures retain pre-dispatch `failed_no_mutation`;
+  generic process transport errors, timeouts, and malformed post-launch output
+  remain outcome-unknown because an `OSError` alone cannot prove the child never
+  started. Child output cannot spoof parent dispatch provenance.
 - Removed an unsafe nil-completion ReminderKit sync trigger that could crash
   after a successful recovery save. A helper crash or malformed post-dispatch
   result is now conservatively verification-pending rather than a false

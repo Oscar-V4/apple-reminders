@@ -681,10 +681,10 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
-                "__dispatch_phase": "not_started",
+                "__dispatch_phase": "started_unknown",
                 "error": {
-                    "code": "adapter_launch_failed",
-                    "message": f"The Reminders adapter could not start ({type(exc).__name__}).",
+                    "code": "adapter_process_failed",
+                    "message": f"The Reminders adapter failed before returning ({type(exc).__name__}).",
                 },
             },
             True,
@@ -830,6 +830,7 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "not_started",
                 "error": {
                     "code": "eventkit_bridge_unavailable",
                     "message": "The bundled EventKit bridge is unavailable.",
@@ -865,6 +866,7 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "not_started",
                 "error": {
                     "code": "eventkit_request_too_large",
                     "message": "The EventKit request exceeded the local bridge input bound.",
@@ -890,15 +892,9 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             details={"timeout_seconds": EVENTKIT_BRIDGE_TIMEOUT_SECONDS},
         )
     except OSError as exc:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "eventkit_bridge_launch_failed",
-                    "message": f"The EventKit bridge could not start ({type(exc).__name__}).",
-                },
-            },
-            True,
+        return transport_failure(
+            code="eventkit_bridge_process_failed",
+            message=f"The EventKit bridge failed before returning ({type(exc).__name__}).",
         )
 
     stdout = completed.stdout.strip()
@@ -922,6 +918,9 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             message="The EventKit bridge response must be a JSON object.",
             details={"exit_code": completed.returncode},
         )
+    payload = dict(payload)
+    # Dispatch provenance belongs to this launcher, never to child JSON.
+    payload.pop("__dispatch_phase", None)
     try:
         bundled_eventkit_bridge_module().validate_response(payload, operation)
     except RuntimeError as exc:

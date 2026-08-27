@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -19,7 +22,38 @@ from mcp.v2_core_backend import CoreBackend
 REMINDER_ID = "REMINDER-EXACT-1"
 
 
+def load_script_module(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+REAL_ADAPTER = load_script_module(
+    "reminders_adapter_core_backend_tests",
+    PLUGIN_ROOT / "scripts" / "reminders_adapter.py",
+)
+REAL_BRIDGE = load_script_module(
+    "eventkit_bridge_core_backend_tests",
+    PLUGIN_ROOT / "scripts" / "eventkit_bridge.py",
+)
+
+
 class BridgeContract:
+    def validate_response(
+        self,
+        payload: dict[str, Any],
+        operation: str,
+    ) -> None:
+        if payload.get("operation") != operation:
+            raise RuntimeError("operation mismatch")
+        if payload.get("status") == "failed_no_mutation":
+            if payload.get("ok") is not False or not isinstance(
+                payload.get("error"), dict
+            ):
+                raise RuntimeError("invalid failed-no-mutation response")
+
     def validate_mutation_receipt(
         self,
         payload: dict[str, Any],
@@ -43,18 +77,438 @@ def make_backend(
     adapter_call: Any | None = None,
     build_adapter_argv: Any | None = None,
     receipt_validator: Any | None = None,
+    adapter_module: Any | None = None,
+    bridge_module: Any | None = None,
 ) -> CoreBackend:
     return CoreBackend(
         bridge_call=bridge_call,
         adapter_call=adapter_call or mock.Mock(),
         build_adapter_argv=build_adapter_argv or mock.Mock(),
-        adapter_module=lambda: AdapterModule,
-        bridge_module=lambda: BridgeContract(),
+        adapter_module=lambda: adapter_module or AdapterModule,
+        bridge_module=lambda: bridge_module or BridgeContract(),
         receipt_validator=receipt_validator or mock.Mock(return_value=None),
     )
 
 
 class CoreBackendInterfaceTests(unittest.TestCase):
+    def test_non_create_mutation_does_not_load_idempotency_adapter(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "operation": "update_reminder",
+            "status": "verified",
+            "ok": True,
+        }
+        adapter_loader = mock.Mock(side_effect=RuntimeError("adapter unavailable"))
+        backend = CoreBackend(
+            bridge_call=mock.Mock(return_value=(payload, False)),
+            adapter_call=mock.Mock(),
+            build_adapter_argv=mock.Mock(),
+            adapter_module=adapter_loader,
+            bridge_module=lambda: BridgeContract(),
+            receipt_validator=mock.Mock(return_value=None),
+        )
+
+        reply = backend.invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T00:00:00Z",
+                "patch": {"title": "Changed"},
+            },
+            mutation=True,
+        )
+
+        self.assertFalse(reply.is_error)
+        self.assertEqual(reply.payload, payload)
+        adapter_loader.assert_not_called()
+
+    def test_create_proven_no_write_bridge_failure_clears_fence_for_retry(
+        self,
+    ) -> None:
+        failed = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "failed_no_mutation",
+            "ok": False,
+            "error": {
+                "code": "permission_denied",
+                "reason_code": "reminders_access_denied",
+                "message": "Full Reminders access is required",
+                "category": "permission_denied",
+                "retryable": False,
+                "details": {},
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Safe retry",
+            "idempotency_key": "create-no-write-retry",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            store = support / "idempotency.json"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(REAL_ADAPTER, "IDEMPOTENCY_STORE", store),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke(
+                    "create_reminder",
+                    arguments,
+                    mutation=True,
+                )
+                second = backend.invoke(
+                    "create_reminder",
+                    arguments,
+                    mutation=True,
+                )
+                stored = json.loads(store.read_text(encoding="utf-8"))
+
+        self.assertTrue(first.is_error)
+        self.assertTrue(second.is_error)
+        self.assertEqual(first.payload, failed)
+        self.assertEqual(second.payload, failed)
+        self.assertEqual(bridge_call.call_count, 2)
+        self.assertEqual(stored["entries"], {})
+
+    def test_create_unclassified_bridge_failure_remains_fenced(self) -> None:
+        failed = {
+            "ok": False,
+            "error": {
+                "code": "eventkit_bridge_unavailable",
+                "message": "The bundled EventKit bridge is unavailable.",
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Unclassified failure",
+            "idempotency_key": "create-unknown-failure",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke(
+                    "create_reminder",
+                    arguments,
+                    mutation=True,
+                )
+                replay = backend.invoke(
+                    "create_reminder",
+                    arguments,
+                    mutation=True,
+                )
+
+        self.assertTrue(first.is_error)
+        self.assertEqual(first.payload, failed)
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_create_parent_proven_prelaunch_failure_clears_fence(self) -> None:
+        not_started = {
+            "ok": False,
+            "__dispatch_phase": "not_started",
+            "error": {
+                "code": "eventkit_bridge_unavailable",
+                "message": "The bundled EventKit bridge is unavailable.",
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(not_started), True))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        facade = V2CoreFacade(backend)
+        arguments = {
+            "list_id": "LIST-1",
+            "title": "Retry prelaunch",
+            "idempotency_key": "create-parent-prelaunch",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            store = support / "idempotency.json"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(REAL_ADAPTER, "IDEMPOTENCY_STORE", store),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = facade.create_reminder(arguments)
+                second = facade.create_reminder(arguments)
+                stored = json.loads(store.read_text(encoding="utf-8"))
+
+        for receipt in (first, second):
+            self.assertFalse(receipt["ok"])
+            self.assertEqual(receipt["status"], "failed_no_mutation")
+            self.assertEqual(receipt["operation"], "create_reminder")
+            self.assertFalse(receipt["verification"]["write_performed"])
+            self.assertNotIn("__dispatch_phase", repr(receipt))
+        self.assertEqual(bridge_call.call_count, 2)
+        self.assertEqual(stored["entries"], {})
+
+    def test_create_pending_bridge_receipt_replays_without_redispatch(self) -> None:
+        pending = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "committed_verification_pending",
+            "ok": True,
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "backend": "eventkit_public_sdk",
+            "target": {},
+            "after": {},
+            "verification": {"state": "pending", "write_performed": None},
+            "recovery": {
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+            "warnings": [
+                {
+                    "code": "verification_pending",
+                    "message": "Read before retrying.",
+                }
+            ],
+            "error": {
+                "code": "sync_pending",
+                "reason_code": "native_timeout",
+                "message": "The EventKit outcome is unknown.",
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(pending), False))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Pending create",
+            "idempotency_key": "create-pending",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertFalse(first.is_error)
+        self.assertEqual(first.payload["status"], "committed_verification_pending")
+        self.assertFalse(first.payload.get("replayed", False))
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_create_invalid_success_receipt_remains_fenced(self) -> None:
+        invalid = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "verified",
+            "ok": True,
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(invalid), False))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Invalid receipt",
+            "idempotency_key": "create-invalid-success",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertTrue(first.is_error)
+        self.assertEqual(first.payload["error"]["code"], "invalid_eventkit_receipt")
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_create_validator_rejected_no_write_label_remains_fenced(self) -> None:
+        rejected = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "failed_no_mutation",
+            "ok": False,
+            "error": {
+                "code": "untrusted_error_code",
+                "message": "This label did not cross the bridge contract.",
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(rejected), True))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Rejected label",
+            "idempotency_key": "create-rejected-label",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertTrue(first.is_error)
+        self.assertEqual(first.payload, rejected)
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_create_no_write_cleanup_failure_keeps_fence_fail_closed(self) -> None:
+        failed = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "failed_no_mutation",
+            "ok": False,
+            "error": {
+                "code": "permission_denied",
+                "reason_code": "reminders_access_denied",
+                "message": "Full Reminders access is required",
+                "category": "permission_denied",
+                "retryable": False,
+                "details": {},
+            },
+        }
+        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Cleanup failure",
+            "idempotency_key": "create-cleanup-failure",
+        }
+        writes = 0
+        real_write = REAL_ADAPTER.write_idempotency_store
+
+        def fail_cleanup(payload: dict[str, Any]) -> None:
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("disk full")
+            real_write(payload)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "write_idempotency_store",
+                    side_effect=fail_cleanup,
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertTrue(first.is_error)
+        self.assertEqual(first.payload["status"], "failed_no_mutation")
+        self.assertEqual(
+            first.payload["error"]["details"]["reason_code"],
+            "idempotency_fence_cleanup_failed",
+        )
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
     def test_maps_reads_and_mutations_without_rewriting_arguments(self) -> None:
         read_payload = {
             "schema_version": 1,

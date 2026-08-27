@@ -640,10 +640,61 @@ class CoreBackend:
         bridge_arguments = dict(arguments)
         idempotency_key = bridge_arguments.pop("idempotency_key", None)
         bridge_contract = self._bridge_module()
+        adapter: Any | None = None
 
         def execute_once() -> dict[str, Any]:
             payload, is_error = self._bridge_call(operation, bridge_arguments)
             if is_error:
+                adapter_error = (
+                    getattr(adapter, "AdapterError", None)
+                    if adapter is not None
+                    else None
+                )
+                validate_response = getattr(bridge_contract, "validate_response", None)
+                transport_not_started = (
+                    payload.get("__dispatch_phase") == "not_started"
+                    and payload.get("ok") is False
+                )
+                contract_proved_no_write = (
+                    payload.get("status") == "failed_no_mutation"
+                    and payload.get("ok") is False
+                    and callable(validate_response)
+                )
+                proven_no_write = (
+                    tool_name == "create_reminder"
+                    and isinstance(adapter_error, type)
+                    and (transport_not_started or contract_proved_no_write)
+                )
+                if proven_no_write and not transport_not_started:
+                    try:
+                        validate_response(payload, operation)
+                    except RuntimeError:
+                        proven_no_write = False
+                if proven_no_write:
+                    error = payload.get("error")
+                    if not isinstance(error, dict):
+                        proven_no_write = False
+                if proven_no_write:
+                    public_payload = copy.deepcopy(payload)
+                    if transport_not_started:
+                        public_payload.setdefault("schema_version", 1)
+                        public_payload["operation"] = operation
+                        public_payload["status"] = "failed_no_mutation"
+                        public_payload["ok"] = False
+                    # The trusted EventKit boundary proved that no mutation
+                    # occurred.  Translate that proof into the adapter's
+                    # callback exception contract so execute_idempotent can
+                    # remove its write-ahead fence and permit an exact retry.
+                    # Preserve the bounded bridge payload after fence cleanup;
+                    # launcher provenance is stripped before public MCP output.
+                    raise adapter_error(
+                        str(error["message"]),
+                        code=str(error["code"]),
+                        reason_code=str(error.get("reason_code") or error["code"]),
+                        result_status="failed_no_mutation",
+                        mutation_not_started=True,
+                        _eventkit_failure_payload=public_payload,
+                    )
                 raise _EventKitBridgeFailure(payload)
             try:
                 bridge_contract.validate_mutation_receipt(payload, operation)
@@ -713,8 +764,15 @@ class CoreBackend:
                 True,
             )
         except Exception as exc:
-            adapter_error = getattr(self._adapter_module(), "AdapterError", ())
+            adapter_error = getattr(
+                adapter if adapter is not None else self._adapter_module(),
+                "AdapterError",
+                (),
+            )
             if adapter_error and isinstance(exc, adapter_error):
+                eventkit_payload = exc.details.get("_eventkit_failure_payload")
+                if isinstance(eventkit_payload, dict):
+                    return copy.deepcopy(eventkit_payload), True
                 return (
                     {
                         "ok": False,

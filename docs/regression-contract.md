@@ -115,9 +115,9 @@ even though optional MCP `outputSchema` descriptors are omitted from
     to only its `status` or `kind` discriminator.
 21. Recovery errors expose fixed public messages only. Home-relative or
     absolute paths, Reminders store filenames, and native helper/class details
-    are contract failures. Adapter-missing and launch-failed phases preserve a
-    proven no-write result; timeout or malformed post-launch output remains an
-    unknown possible write.
+    are contract failures. A parent-proven missing path or request-size
+    rejection preserves a no-write result; generic process `OSError`, timeout,
+    or malformed post-launch output remains an unknown possible write.
 22. Recently Deleted discovery is reachable beyond the first page. Its opaque
     cursor binds the exact account filter, limit, and full ordered deleted-item
     identity/revision snapshot. Drift rejects a continuation as
@@ -166,7 +166,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
     mutation; a full unresolved store fails closed before dispatch. An adapter
     callback error that the existing receipt boundary proves happened before
     mutation atomically clears its fence, while partial or outcome-unknown
-    errors keep the fence and block redispatch.
+    errors keep the fence and block redispatch. Core create translates only a
+    contract-validated EventKit `failed_no_mutation` result or parent-issued
+    `not_started` provenance into that cleanup contract. Missing paths and
+    request-size rejection are parent-proven; a generic process `OSError`,
+    timeout, oversized output, malformed output, or child-supplied provenance
+    cannot authorize fence removal.
 
 ## Deliberately withheld behavior
 

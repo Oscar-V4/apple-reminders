@@ -531,6 +531,25 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(missing["__dispatch_phase"], "not_started")
         self.assertNotIn("__dispatch_phase", self.server.sanitize_payload(missing))
 
+        with (
+            mock.patch.object(
+                self.server,
+                "adapter_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(
+                self.server.subprocess,
+                "run",
+                side_effect=OSError("process transport failed"),
+            ),
+        ):
+            process_failed, process_error = self.server.invoke_adapter(
+                ["create_reminder"]
+            )
+
+        self.assertTrue(process_error)
+        self.assertEqual(process_failed["__dispatch_phase"], "started_unknown")
+
         completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -571,6 +590,135 @@ class McpProtocolTests(unittest.TestCase):
 
         self.assertTrue(child_error)
         self.assertNotIn("__dispatch_phase", child_payload)
+
+    def test_eventkit_dispatch_phase_marks_only_parent_proven_prelaunch_failures(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            self.server,
+            "eventkit_bridge_path",
+            return_value=Path("/definitely/missing/eventkit_bridge.py"),
+        ):
+            missing, missing_error = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {"calendar_id": "LIST-1", "title": "Missing bridge"},
+            )
+
+        self.assertTrue(missing_error)
+        self.assertEqual(missing["__dispatch_phase"], "not_started")
+        self.assertNotIn("__dispatch_phase", self.server.sanitize_payload(missing))
+
+        with mock.patch.object(
+            self.server,
+            "eventkit_bridge_path",
+            return_value=Path(__file__),
+        ):
+            too_large, too_large_error = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {
+                    "calendar_id": "LIST-1",
+                    "title": "x" * self.server.MAX_EVENTKIT_REQUEST_BYTES,
+                },
+            )
+
+        self.assertTrue(too_large_error)
+        self.assertEqual(too_large["__dispatch_phase"], "not_started")
+
+        with (
+            mock.patch.object(
+                self.server,
+                "eventkit_bridge_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(
+                self.server.subprocess,
+                "run",
+                side_effect=OSError("launch denied"),
+            ),
+        ):
+            launch_failed, launch_error = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {"calendar_id": "LIST-1", "title": "Launch failure"},
+            )
+
+        self.assertFalse(launch_error)
+        self.assertEqual(
+            launch_failed["status"],
+            "committed_verification_pending",
+        )
+        self.assertIsNone(launch_failed["verification"]["write_performed"])
+        self.assertNotIn("__dispatch_phase", launch_failed)
+
+        spoofed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "doctor",
+                    "status": "verified",
+                    "ok": True,
+                    "data": {},
+                    "__dispatch_phase": "not_started",
+                }
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                self.server,
+                "eventkit_bridge_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(self.server.subprocess, "run", return_value=spoofed),
+        ):
+            child_payload, child_error = self.server.invoke_eventkit_bridge(
+                "doctor",
+                {},
+            )
+
+        self.assertFalse(child_error)
+        self.assertNotIn("__dispatch_phase", child_payload)
+
+        spoofed_create = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "__dispatch_phase": "not_started",
+                    "error": {
+                        "code": "eventkit_bridge_unavailable",
+                        "message": "Child output cannot prove parent launch state.",
+                    },
+                }
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                self.server,
+                "eventkit_bridge_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(
+                self.server.subprocess,
+                "run",
+                return_value=spoofed_create,
+            ),
+        ):
+            create_payload, create_error = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {"calendar_id": "LIST-1", "title": "Spoofed provenance"},
+            )
+
+        self.assertFalse(create_error)
+        self.assertEqual(
+            create_payload["status"],
+            "committed_verification_pending",
+        )
+        self.assertIsNone(create_payload["verification"]["write_performed"])
+        self.assertNotIn("__dispatch_phase", create_payload)
 
     def setUp(self) -> None:
         from mcp import server
