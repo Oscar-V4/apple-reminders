@@ -70,7 +70,7 @@ IMAGE_ATTACHMENT_ENT = 25
 URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
 SUBPROCESS_TIMEOUT_SECONDS = 30
-ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 6
+ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 10
 REMINDERKIT_REMOVAL_SETTLE_SECONDS = 0.5
 REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS = 10
 SECTION_SYNC_VERIFY_TIMEOUT_SECONDS = 10
@@ -5874,6 +5874,7 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                     "automatic_restore_available": False,
                 }
                 pending_warning = None
+                pending_error = None
             except AttachmentVerificationError as exc:
                 result = exc.compensation_result()
                 status = "committed_verification_pending"
@@ -5889,6 +5890,12 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                 pending_warning = {
                     "code": "mobile_visibility_pending",
                     "message": str(exc),
+                }
+                pending_error = {
+                    "code": "sync_pending",
+                    "reason_code": "mobile_visibility_pending",
+                    "message": str(exc),
+                    "retryable": True,
                 }
             except AdapterError as exc:
                 if not exc.details.get("partial_failure"):
@@ -5915,6 +5922,12 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                 pending_warning = {
                     "code": exc.code,
                     "message": str(exc),
+                }
+                pending_error = {
+                    "code": "sync_pending",
+                    "reason_code": exc.code,
+                    "message": str(exc),
+                    "retryable": True,
                 }
         else:
             con.execute("begin immediate")
@@ -5949,6 +5962,7 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                 "code": "local_only_attachment",
                 "message": result["warning"],
             }
+            pending_error = None
         attachment = result["attachment"]
         journal_warning = log_action(
             "attach_image",
@@ -5991,6 +6005,7 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
             verification=verification,
             recovery=recovery,
             warnings=warnings or None,
+            **({"error": pending_error} if pending_error is not None else {}),
             db=str(db),
             attached=result.get("attached", True),
             capability=capability,

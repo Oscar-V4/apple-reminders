@@ -901,6 +901,32 @@ class NativeFacade:
                 }
             )
             result["warnings"] = result["warnings"][:20]
+            if "error" not in result:
+                warning = next(
+                    (
+                        item
+                        for item in result["warnings"]
+                        if isinstance(item, Mapping)
+                    ),
+                    None,
+                )
+                result["error"] = _error(
+                    "sync_pending",
+                    str(
+                        warning.get("code")
+                        if isinstance(warning, Mapping)
+                        else "native_verification_pending"
+                    ),
+                    str(
+                        warning.get("message")
+                        if isinstance(warning, Mapping)
+                        else (
+                            "The native call may have committed; read before "
+                            "retrying."
+                        )
+                    ),
+                    retryable=True,
+                )
             result["next_action"] = {
                 "kind": "fresh_read",
                 "tool": "read_reminder",

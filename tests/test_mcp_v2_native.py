@@ -459,6 +459,49 @@ class NativeFacadeTests(unittest.TestCase):
             },
         )
 
+    def test_pending_native_receipt_without_error_uses_warning_as_structured_error(
+        self,
+    ) -> None:
+        backend = Backend()
+        references = References()
+        receipt = mutation_payload(
+            "attach_image",
+            status="committed_verification_pending",
+        )
+        receipt["warnings"] = [
+            {
+                "code": "mobile_visibility_pending",
+                "message": "The native image exists but mobile visibility is pending.",
+            }
+        ]
+        backend.native_mutation_payloads["attach_image"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+        reference = f"rev1.{'x' * 32}"
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": reference,
+                "action": {
+                    "kind": "attach_image",
+                    "image_path": "/tmp/synthetic.png",
+                    "idempotency_key": "attachment-contract-repro",
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(
+            result["error"]["reason_code"], "mobile_visibility_pending"
+        )
+        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(references.invalidated, [reference])
+        validate_public_result("change_reminder_attachment", result, "unknown")
+
     def test_manual_repair_receipt_survives_the_public_native_facade(self) -> None:
         backend = Backend()
         references = References()
