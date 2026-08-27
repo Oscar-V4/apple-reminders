@@ -161,6 +161,7 @@ class NativeBackend:
                 message="The section mutation may have partially committed.",
             )
 
+        payload.setdefault("before", {})
         mutation_state = validated_receipt_mutation_state(payload)
 
         if status in {"verified", "unchanged"}:

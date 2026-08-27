@@ -84,7 +84,6 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             "operation_id": "22222222-2222-4222-8222-222222222222",
             "backend": "reminderkit",
             "target": {"list_id": "LIST-1", "section_id": "SECTION-1"},
-            "before": {},
             "after": {
                 "section": {
                     "id": "SECTION-1",
@@ -105,7 +104,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         outcome = backend.create_section("LIST-1", "Next")
 
         self.assertEqual(outcome.mutation_state, "committed")
-        self.assertEqual(outcome.receipt, receipt)
+        self.assertEqual(outcome.receipt, {**receipt, "before": {}})
         self.assertEqual(
             argv_calls,
             [
