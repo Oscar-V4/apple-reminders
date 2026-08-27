@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted for the 0.2.0 development line. Live/sacrificial compatibility claims remain gated on separate approval and evidence.
+Superseded by ADR 0010 for the 0.3 public Interface. Its hybrid-backend,
+verification, and real-use evidence decisions remain historical constraints on
+the Modules that implement the smaller Interface; its public Maintenance and
+raw-precondition shape do not carry forward.
 
 ## Decision
 

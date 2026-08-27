@@ -11,10 +11,13 @@ from contextlib import closing
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+DEV_SCRIPTS = REPO_ROOT / "scripts"
+RUNTIME_SCRIPTS = PLUGIN_ROOT / "scripts"
+for scripts_dir in (DEV_SCRIPTS, RUNTIME_SCRIPTS):
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
 
 from reminders_recovery import (  # noqa: E402
     RetentionPolicy,
@@ -27,7 +30,7 @@ from audit_source_package import package_files  # noqa: E402
 
 class BackupPolicyTests(unittest.TestCase):
     def test_runtime_package_includes_the_backup_module(self) -> None:
-        files, errors = package_files(ROOT)
+        files, errors = package_files(PLUGIN_ROOT)
 
         self.assertEqual(errors, [])
         self.assertIn(Path("scripts/reminders_recovery.py"), files)

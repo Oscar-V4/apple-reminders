@@ -1,50 +1,106 @@
-# Google Calendar Reference Pattern
+# Calendar Plugin Reference Notes
 
-The Google Calendar plugin is the model for this plugin.
+Calendar integrations are comparison inputs for Apple Reminders, not templates
+whose structure or quality claims should be copied wholesale.
 
-## Pattern To Copy
+## Google Calendar: product-discipline reference
 
-- The primary skill is not a command manual. It is an operating contract.
-- The skill requires state reads before reasoning.
-- Reads must be bounded by concrete time windows or other scope.
-- Ambiguity should be resolved from existing data before asking the user.
-- Writes should preserve untouched fields.
-- Bulk changes require an exact qualifying set before execution.
-- Output should present decisions and diffs, not raw API payloads.
+The useful Google Calendar pattern is its operating discipline:
 
-## Reminders Translation
+- the skill is an operating contract rather than a command manual;
+- state is read before reasoning or mutation;
+- reads have a concrete semantic scope as well as a numeric limit;
+- ambiguity is resolved from existing data when possible;
+- writes preserve omitted fields;
+- bulk changes identify the exact qualifying set first;
+- output emphasizes decisions, changes, and uncertainty rather than raw payloads.
 
-Calendar concepts map to Reminders concepts like this:
+Google Calendar uses a hosted connector. Apple Reminders has no equivalent
+connector for the current user's native local store, so matching its tool count,
+authentication model, or package shape would be artificial.
 
-- calendar -> account or list
-- event -> reminder
-- recurring series -> repeated or template-like reminder patterns
-- meeting attendees/rooms -> list, section, tags, notes, and attachments context
-- event reminders -> due date, alert date, priority, flag, and urgent state
-- availability window -> task horizon or review window
-- temporary hold -> provisional reminder or staging section
+In the installed 1.2.3 snapshot reviewed on 2026-08-25, Google Calendar exposes
+15 connector actions under five task-oriented skills. That is useful
+counter-evidence to treating a smaller raw tool count as the quality goal: its
+coherence comes from bounded reads, preservation rules, explicit recurring-event
+scope, and purpose-level workflows above the connector.
 
-## Required Tool Backing
+## Apple Calendar references
 
-The Google Calendar skill depends on a connector declared in `.app.json`. Apple Reminders needs the same split between "agent behavior" and "actual operations", but not necessarily the same connector mechanism:
+### redpop: distribution and deep-module reference
 
-- public bridge: EventKit for accounts, lists, reminders, due dates, alarms, recurrence, notes, completion, priority, URLs, locations, and list-to-list moves
-- private adapter: ReminderKit/SQLite-backed operations for image attachments, sections, tags, URL-attachment objects, and membership ordering
-- verification adapter: post-write read-back, store backup, and schema doctor
-- typed local MCP: first-class tool discovery, strict inputs, bounded pagination, exact identifiers, stable errors, and normalized receipts
+[`redpop/apple-calendar-mcp`](https://github.com/redpop/apple-calendar-mcp) 0.2.1
+exposes six task-level tools over a TypeScript MCP server and one lazily started,
+long-lived Swift/EventKit helper. Its strongest ideas are a signed and notarized
+universal helper, compiler-free install, a fixed helper path that preserves the
+TCC grant across updates, explicit recurring-event scope with no destructive
+default, and tests around helper lifecycle and packaging.
 
-The local MCP server is bundled because Apple Reminders has no equivalent hosted connector. It remains a thin transport shim: public tools route to EventKit, private tools route to the adapter, and business logic does not move into the server.
+It is still a comparison input, not a safety contract to copy. The reviewed
+release has no opt-in EventKit/TCC smoke harness, create is not idempotent, and
+writes return the saved object without this project's independent exact
+read-back/Receipt semantics. Its private TCC self-responsibility re-exec also
+hung when rebuilt with the locally installed Xcode 26.5 SDK even though the
+published SDK 14.5 binary worked. A signed/prebuilt Reminders helper remains a
+valuable stable-release direction, but the private TCC mechanism and Node+Swift
+runtime should not be imported without a Reminders-specific failure and
+compatibility study.
 
-## Product-Parity Test
+### mightymattys: layout reference only
 
-An improvement counts as Google Calendar parity only when it preserves the same operating discipline:
+The recent
+[`mightymattys/apple-productivity-mcp`](https://github.com/mightymattys/apple-productivity-mcp)
+Apple Calendar/Reminders project was reviewed as a current community example.
+Its canonical plugin layout, short Quick Start, changelog, and disposable
+smoke-cleanup flow are useful release references.
 
-- read the relevant state before reasoning or writing;
-- require a semantic scope in addition to a numeric limit;
-- use opaque continuation cursors that cannot be replayed with changed filters;
-- distinguish all-day dates, timed due dates, and alarms instead of collapsing them;
-- preserve omitted fields and use last-modified preconditions for existing-item writes;
-- return verified, pending, partial, and failed outcomes without optimistic wording;
-- package task-oriented skills and deterministic rendering above the raw tools.
+It is not this project's quality bar. Its surface and safety trade-offs serve a
+different design, and do not justify loose schemas, unbounded results, ambiguous
+selectors, or weaker concurrency and Receipt contracts here. We copy evidence
+that improves installation and test ergonomics, not the reference repository's
+entire architecture.
 
-This copies the benchmark's product contract, not its hosted implementation or authentication model.
+## Apple Reminders translation
+
+The 0.3 design is:
+
+- **Core:** EventKit-backed access, exact list identity, bounded fetch, exact
+  read, create/change/delete, and idempotent list creation;
+- **Native Extension:** exact sections, tags, and native image/URL attachment
+  behavior behind guarded private interfaces;
+- **Diagnostics:** one content-free targeted tool used after a relevant failure;
+- **local MCP:** closed input discovery, exact dispatch, concise text, and
+  centrally validated structured results and Receipts.
+
+An exact read returns an opaque `rev1` Reference. This preserves the calendar
+principle of guarded writes without making callers choose between EventKit
+`last_modified` and private `reminder_version` fields.
+
+## Product-parity test
+
+An improvement counts as calendar-grade product discipline only when it:
+
+- reads relevant state before a guarded write;
+- requires semantic scope in addition to a numeric limit;
+- binds continuation cursors to the original filters;
+- distinguishes all-day dates, timed due dates, and alarms;
+- uses exact account/list/reminder identity instead of display names;
+- preserves omitted fields and rejects stale References before mutation;
+- returns verified, pending, partial, unchanged, and failed outcomes without
+  optimistic wording;
+- preserves visible URL, native image/section, tag, concurrency, idempotency,
+  and Receipt behavior already proven through real use;
+- packages task-oriented skills above the raw tools.
+
+Neither the six-tool Apple Calendar server nor the 15-action Google Calendar
+connector implies that Apple Reminders should chase a particular count. The
+current eight Core, four Native Extension, and one Diagnostics boundaries are
+appropriate while each maps to a recognizable task and the failure-triggered
+Diagnostics tool stays out of normal first use.
+
+## Intentional non-parity
+
+Unused-tag cleanup, attachment repair, backup/Snapshot, restore, log purge, flag
+mutation, and native UI handoff are withheld from the public 0.3 Interface.
+Their existence in an internal adapter or another plugin does not make them
+necessary first-use product features.

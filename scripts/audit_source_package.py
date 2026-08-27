@@ -23,22 +23,46 @@ from typing import Any, Iterable
 from validate_plugin import validate_root
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
-PACKAGE_ROOT_FILES = {
-    Path(".codex-plugin/plugin.json"),
-    Path(".mcp.json"),
+MIRRORED_ROOT_DOCUMENTS = {
+    Path("CHANGELOG.md"),
     Path("LICENSE"),
     Path("PRIVACY.md"),
     Path("README.md"),
+    Path("SECURITY.md"),
+    Path("SUPPORT.md"),
+    Path("TERMS.md"),
+}
+PACKAGE_ROOT_FILES = {
+    Path(".codex-plugin/plugin.json"),
+    Path(".mcp.json"),
+    Path("CHANGELOG.md"),
+    Path("LICENSE"),
+    Path("PRIVACY.md"),
+    Path("README.md"),
+    Path("SECURITY.md"),
+    Path("SUPPORT.md"),
+    Path("TERMS.md"),
     Path("assets/icon.png"),
     Path("mcp/server.py"),
+    Path("mcp/v2_contract.py"),
+    Path("mcp/v2_core.py"),
+    Path("mcp/v2_core_backend.py"),
+    Path("mcp/v2_diagnostics.py"),
+    Path("mcp/v2_native.py"),
+    Path("mcp/v2_native_backend.py"),
     Path("schemas/mcp-tools.json"),
     Path("scripts/eventkit_bridge.py"),
     Path("scripts/eventkit_bridge_info.plist"),
     Path("scripts/eventkit_bridge_schema.json"),
+    Path("scripts/launch_mcp.sh"),
     Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
+    Path("scripts/reminders_image_input.py"),
     Path("scripts/reminders_recovery.py"),
+    Path("scripts/reminders_service.py"),
     Path("scripts/reminders_contracts.py"),
     Path("scripts/reminders_doctor.py"),
     Path("scripts/reminders_eventkit.m"),
@@ -118,7 +142,7 @@ FORBIDDEN_DIRECTORY_NAMES = {
 SCREENSHOT_RE = re.compile(r"(?:screen[ _-]?shot|screenshot|db-first-.*-ui)", re.IGNORECASE)
 BACKUP_RE = re.compile(r"(?:^|[._-])backup(?:[._-]|$)|~$")
 PRIVATE_HOME_RE = re.compile(r"(?:/Users/|[A-Za-z]:\\Users\\)[^/<\\\s]+[/\\]")
-TEXT_SUFFIXES = {".json", ".m", ".md", ".plist", ".py", ".yaml", ".yml"}
+TEXT_SUFFIXES = {".json", ".m", ".md", ".plist", ".py", ".sh", ".yaml", ".yml"}
 
 
 @dataclass(frozen=True)
@@ -298,11 +322,55 @@ def scan_worktree_for_forbidden(root: Path) -> list[str]:
     return findings
 
 
+def unallowlisted_runtime_files(root: Path, allowed: set[Path]) -> list[str]:
+    """Reject source files a recursive marketplace install would copy."""
+
+    root = root.expanduser().resolve()
+    findings: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() and not path.is_symlink():
+            continue
+        relative = path.relative_to(root)
+        if relative in allowed:
+            continue
+        findings.append(relative.as_posix())
+    return findings
+
+
+def validate_document_mirrors(
+    repo_root: Path = REPO_ROOT,
+    plugin_root: Path = PLUGIN_ROOT,
+) -> list[str]:
+    """Keep install-local public docs byte-identical to canonical GitHub docs."""
+
+    repo_root = repo_root.expanduser().resolve()
+    plugin_root = plugin_root.expanduser().resolve()
+    errors: list[str] = []
+    for relative in sorted(MIRRORED_ROOT_DOCUMENTS, key=lambda path: path.as_posix()):
+        canonical = repo_root / relative
+        runtime = plugin_root / relative
+        if not canonical.is_file():
+            errors.append(f"canonical root document is missing: {relative}")
+            continue
+        if not runtime.is_file():
+            errors.append(f"runtime document mirror is missing: {relative}")
+            continue
+        canonical_digest = hashlib.sha256(canonical.read_bytes()).digest()
+        runtime_digest = hashlib.sha256(runtime.read_bytes()).digest()
+        if canonical_digest != runtime_digest:
+            errors.append(f"runtime document mirror drift: {relative}")
+    return errors
+
+
 def audit_source(root: Path, *, strict_worktree: bool = False) -> AuditResult:
     root = root.expanduser().resolve()
     files, policy_errors = package_files(root)
     errors = list(policy_errors)
     errors.extend(validate_root(root))
+    errors.extend(
+        f"runtime subtree file is outside the install allowlist: {relative}"
+        for relative in unallowlisted_runtime_files(root, files)
+    )
     for relative in sorted(files, key=lambda path: path.as_posix()):
         _validate_file(root, relative, errors)
     findings = scan_worktree_for_forbidden(root)
@@ -417,7 +485,7 @@ def _report(result: AuditResult, *, as_json: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("plugin", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("plugin", nargs="?", type=Path, default=PLUGIN_ROOT)
     parser.add_argument("--archive", type=Path, help="Audit a deterministic ZIP built from this source")
     parser.add_argument(
         "--strict-worktree",
@@ -425,6 +493,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Also fail on ignored local artifacts; normal package audit reports and excludes them.",
     )
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable report")
+    parser.add_argument(
+        "--verify-root-document-mirrors",
+        action="store_true",
+        help="Compare install-local public docs with canonical repository-root copies.",
+    )
     args = parser.parse_args(argv)
     root = args.plugin.expanduser().resolve()
     if args.archive:
@@ -438,6 +511,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Source package archive audit passed: {args.archive}")
         return 1 if errors else 0
     result = audit_source(root, strict_worktree=args.strict_worktree)
+    if args.verify_root_document_mirrors:
+        mirror_errors = validate_document_mirrors()
+        result = AuditResult(
+            files=result.files,
+            errors=tuple((*result.errors, *mirror_errors)),
+            worktree_warnings=result.worktree_warnings,
+        )
     _report(result, as_json=args.json)
     return 0 if result.ok else 1
 

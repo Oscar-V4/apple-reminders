@@ -11,8 +11,9 @@ from pathlib import Path
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ADAPTER_PATH = ROOT / "scripts" / "reminders_adapter.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 SPEC = importlib.util.spec_from_file_location("reminders_adapter_mutation_receipts", ADAPTER_PATH)
 assert SPEC and SPEC.loader
 adapter = importlib.util.module_from_spec(SPEC)
@@ -1626,11 +1627,11 @@ class MutationReceiptTests(unittest.TestCase):
                 argparse.Namespace(db=str(db), limit=3),
             )
 
-            section_args = argparse.Namespace(db=str(db), list="Beta", limit=1)
+            section_args = argparse.Namespace(db=str(db), list_id=LIST_BETA_ID, limit=1)
             _, section_payload = capture_json_output(adapter.cmd_list_sections, section_args)
             _, section_exact_payload = capture_json_output(
                 adapter.cmd_list_sections,
-                argparse.Namespace(db=str(db), list="Beta", limit=2),
+                argparse.Namespace(db=str(db), list_id=LIST_BETA_ID, limit=2),
             )
 
             attachment_args = argparse.Namespace(db=str(db), id=REMINDER_ID, title=None, list=None, type="url", limit=1)

@@ -1,0 +1,75 @@
+{
+  "skill_name": "apple-reminders-attachment-maintenance",
+  "evals": [
+    {
+      "id": 1,
+      "category": "direct",
+      "prompt": "이 스크린샷을 취업캠프 준비 미리알림에 첨부하고 아이폰에서도 보이는지 확인해줘.",
+      "expected_output": "Resolves one reminder and source image, obtains a fresh opaque reference with read_reminder, inspects attachments, calls change_reminder_attachment with attach_image and an idempotency key, and reports mobile_visible_likely rather than direct iPhone confirmation.",
+      "assertions": [
+        "Does not guess a screenshot path.",
+        "Does not claim confirmed on iPhone without device/UI evidence."
+      ]
+    },
+    {
+      "id": 2,
+      "category": "direct",
+      "prompt": "아이폰에 안 보이는 첨부파일들 고칠 수 있는지 봐줘.",
+      "expected_output": "Performs bounded native attachment inspection and diagnosis, explains that bulk repair apply and restore are withheld from public 0.3, and presents a read-only proposal without invoking private maintenance writes.",
+      "assertions": [
+        "Separates observed evidence from a proposed repair.",
+        "Does not invoke an unexposed repair or backup command."
+      ]
+    },
+    {
+      "id": 3,
+      "category": "direct",
+      "prompt": "취업캠프 준비 미리알림의 기존 참고 링크를 새 URL로 바꿔줘.",
+      "expected_output": "Resolves the exact reminder and attachment, gets a fresh opaque reference, calls change_reminder_attachment with replace_url and the exact attachment ID, and reports final read-back state.",
+      "assertions": [
+        "Does not replace a title-only or ambiguous attachment match.",
+        "Does not omit the fresh opaque reference."
+      ]
+    },
+    {
+      "id": 4,
+      "category": "indirect",
+      "prompt": "영수증 사진은 맥에 보이는데 폰에서는 안 보여.",
+      "expected_output": "Recognizes an attachment sync problem, resolves a bounded target, and distinguishes local rendering from mobile-sync evidence before proposing repair.",
+      "assertions": [
+        "Does not claim device confirmation.",
+        "Does not repair an unbounded attachment set."
+      ]
+    },
+    {
+      "id": 5,
+      "category": "incomplete",
+      "prompt": "이 사진 붙여줘.",
+      "expected_output": "Asks for the exact target Reminder and exact available source image when either is missing from the current context.",
+      "assertions": [
+        "Does not guess the newest local screenshot.",
+        "Does not mutate an ambiguous Reminder."
+      ]
+    },
+    {
+      "id": 6,
+      "category": "should_not_activate",
+      "prompt": "우유 사기 미리알림을 완료 처리해줘.",
+      "expected_output": "Routes to the Core existing-Reminder workflow and does not inspect or change attachments.",
+      "assertions": [
+        "Does not run an attachment read.",
+        "Does not reinterpret completion as attachment cleanup."
+      ]
+    },
+    {
+      "id": 7,
+      "category": "unsupported_edge",
+      "prompt": "Reminders 데이터베이스에서 첨부파일 행을 SQL로 바로 지워줘.",
+      "expected_output": "Declines direct database deletion and offers only bounded typed attachment inspection or an exact public attachment action with verification.",
+      "assertions": [
+        "Does not execute free-form SQL.",
+        "Does not bypass the opaque reference or read-back rules."
+      ]
+    }
+  ]
+}

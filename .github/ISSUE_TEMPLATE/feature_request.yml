@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose one recognizable Apple Reminders user goal and its safety boundary.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user goal rather than prescribing a new MCP tool. The public interface stays small unless a distinct user outcome justifies more surface area.
+
+        Do not include real Reminder content, screenshots, identifiers, URLs, databases, logs, or backups.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What should a first-time user be able to accomplish?
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-limit
+    attributes:
+      label: Why the current interface is insufficient
+      description: Explain why the existing 13 tools and five skills cannot express this goal safely.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired outcome
+      description: Give a synthetic example prompt and the observable success condition.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: likely-boundary
+    attributes:
+      label: Likely product boundary
+      options:
+        - Core
+        - Native Extension
+        - Diagnostics
+        - Optional Maintenance
+        - Skill or documentation only
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety, privacy, and sync considerations
+      description: Note destructive effects, retry behavior, iCloud/shared-list impact, private APIs, or sensitive local data.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: This request contains only synthetic examples and no private Reminder data.
+          required: true
+        - label: I searched existing issues for the same user goal.
+          required: true
+

@@ -6,14 +6,16 @@ import importlib.util
 import json
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ADAPTER_PATH = ROOT / "scripts" / "reminders_adapter.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+ADAPTER_PATH = PLUGIN_ROOT / "scripts" / "reminders_adapter.py"
 SPEC = importlib.util.spec_from_file_location("reminders_adapter", ADAPTER_PATH)
 assert SPEC and SPEC.loader
 reminders_adapter = importlib.util.module_from_spec(SPEC)
@@ -90,6 +92,185 @@ class ScheduleHelperTests(unittest.TestCase):
         )
 
 
+class ListSectionScopeTests(unittest.TestCase):
+    def test_duplicate_list_names_are_scoped_by_exact_list_identifier(self) -> None:
+        first_list = "11111111-1111-4111-8111-111111111111"
+        second_list = "22222222-2222-4222-8222-222222222222"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "duplicate-list-names.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    f"""
+                    create table ZREMCDBASELIST (
+                        Z_PK integer primary key,
+                        ZCKIDENTIFIER text,
+                        ZNAME text
+                    );
+                    create table ZREMCDBASESECTION (
+                        Z_PK integer primary key,
+                        ZCKIDENTIFIER text,
+                        ZDISPLAYNAME text,
+                        ZLIST integer,
+                        Z_FOK_LIST integer,
+                        ZMARKEDFORDELETION integer
+                    );
+                    insert into ZREMCDBASELIST values
+                        (1, '{first_list}', 'Inbox'),
+                        (2, '{second_list}', 'Inbox');
+                    insert into ZREMCDBASESECTION values
+                        (11, 'SECTION-PERSONAL', 'Personal', 1, 1024, 0),
+                        (22, 'SECTION-WORK', 'Work', 2, 1024, 0);
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "list_sections",
+                    "--db",
+                    str(database),
+                    "--list-id",
+                    second_list,
+                    "--limit",
+                    "10",
+                ],
+                cwd=PLUGIN_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(len(payload["sections"]), 1)
+        section = payload["sections"][0]
+        self.assertEqual(section["ZCKIDENTIFIER"], "SECTION-WORK")
+        self.assertEqual(section["ZDISPLAYNAME"], "Work")
+        self.assertEqual(section["list_id"], second_list)
+        self.assertEqual(section["list_name"], "Inbox")
+
+
+class TagScopeTests(unittest.TestCase):
+    def test_account_filter_is_applied_before_the_tag_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "tag-accounts.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    """
+                    create table ZREMCDHASHTAGLABEL (
+                        Z_PK integer primary key,
+                        ZNAME text,
+                        ZCANONICALNAME text,
+                        ZACCOUNTIDENTIFIER text,
+                        ZUUIDFORCHANGETRACKING blob,
+                        ZFIRSTOCCURRENCECREATIONDATE real,
+                        ZRECENCYDATE real
+                    );
+                    create table ZREMCDOBJECT (
+                        Z_PK integer primary key,
+                        ZHASHTAGLABEL integer,
+                        Z_ENT integer,
+                        ZMARKEDFORDELETION integer
+                    );
+                    insert into ZREMCDHASHTAGLABEL values
+                        (1, 'aaa-other', 'aaa-other', 'ACCOUNT-OTHER', null, null, null),
+                        (2, 'zzz-target', 'zzz-target', 'ACCOUNT-TARGET', null, null, null);
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ADAPTER_PATH),
+                    "list_tags",
+                    "--db",
+                    str(database),
+                    "--account-id",
+                    "ACCOUNT-TARGET",
+                    "--limit",
+                    "1",
+                ],
+                cwd=PLUGIN_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual([tag["name"] for tag in payload["tags"]], ["zzz-target"])
+        self.assertFalse(payload["truncated"])
+
+
+class ImageCommandBoundaryTests(unittest.TestCase):
+    def test_attach_and_replace_reject_symlinks_before_mutation(self) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target.png"
+            link = root / "link.png"
+            target.write_bytes(b"not-decoded-because-the-symlink-must-fail-first")
+            link.symlink_to(target)
+            commands = [
+                [
+                    "attach_image",
+                    "--id",
+                    reminder_id,
+                    "--image",
+                    str(link),
+                    "--if-version",
+                    "1",
+                    "--idempotency-key",
+                    "image-boundary-attach",
+                ],
+                [
+                    "replace_attachment",
+                    "--id",
+                    reminder_id,
+                    "--attachment-id",
+                    "11111111-1111-4111-8111-111111111111",
+                    "--image",
+                    str(link),
+                    "--if-version",
+                    "1",
+                    "--idempotency-key",
+                    "image-boundary-replace",
+                ],
+            ]
+            results = []
+            for command in commands:
+                completed = subprocess.run(
+                    [sys.executable, str(ADAPTER_PATH), *command],
+                    cwd=PLUGIN_ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=10,
+                )
+                results.append((completed, json.loads(completed.stdout)))
+
+        for completed, payload in results:
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertEqual(payload["status"], "failed_no_mutation")
+            self.assertFalse(payload["verification"]["write_performed"])
+            self.assertEqual(payload["error"]["code"], "invalid_input")
+            self.assertEqual(payload["error"]["reason_code"], "symlink_not_allowed")
+
+
 class AppleScriptSyncTests(unittest.TestCase):
     def test_sync_reminder_text_uses_no_change_sentinels(self) -> None:
         with mock.patch.object(reminders_adapter, "run_osascript", return_value="x-apple-reminder://AAA") as run:
@@ -111,6 +292,16 @@ class AppleScriptSyncTests(unittest.TestCase):
 
 
 class AttachmentSyncTests(unittest.TestCase):
+    def test_native_image_helper_uses_decoded_type_and_data_transport(self) -> None:
+        source = (
+            reminders_adapter.SCRIPT_DIR / "remkit_attach_image.m"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CGImageSourceCreateWithData", source)
+        self.assertIn("CGImageSourceGetType", source)
+        self.assertIn("addImageAttachmentWithData:uti:width:height:", source)
+        self.assertNotIn("NSURLContentTypeKey", source)
+
     def test_image_attachment_payload_marks_cloudkit_attachment_mobile_visible(self) -> None:
         payload = reminders_adapter.attachment_payload(
             {
@@ -535,6 +726,109 @@ class AttachmentSyncTests(unittest.TestCase):
 
         self.assertTrue(raised.exception.details["partial_failure"])
         self.assertIn("delete_attachment", raised.exception.details["cleanup_command"])
+
+    def test_helper_attach_rejects_unrenderable_evidence(self) -> None:
+        """Cloud evidence cannot bless the wrong transport or a mismatched UTI."""
+        cases = (
+            ("url_transport", "url", "public.png", "attachment_transport", "url"),
+            ("uti_mismatch", "data", "public.jpeg", "stored_image_uti", "public.png"),
+        )
+        for name, transport, helper_uti, detail_key, detail_value in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "reminders.sqlite"
+                image = Path(tmp) / "browser-capture.png"
+                helper = Path(tmp) / "remkit_attach_image"
+                image.write_bytes(b"fake-image")
+                helper.write_text("#!/bin/sh\n", encoding="utf-8")
+                con = sqlite3.connect(db)
+                con.row_factory = sqlite3.Row
+                try:
+                    con.executescript(
+                        """
+                        create table ZREMCDOBJECT (
+                            Z_PK integer primary key,
+                            Z_ENT integer,
+                            ZCKIDENTIFIER text,
+                            ZCKCLOUDSTATE integer,
+                            ZREMINDER2 integer,
+                            Z_FOK_REMINDER1 integer,
+                            ZFILENAME text,
+                            ZSHA512SUM text,
+                            ZUTI text,
+                            ZFILESIZE integer,
+                            ZWIDTH integer,
+                            ZHEIGHT integer,
+                            ZURL text,
+                            ZHOSTURL text,
+                            ZMARKEDFORDELETION integer,
+                            ZCKSERVERRECORDDATA blob
+                        );
+                        create table ZREMCKCLOUDSTATE (
+                            Z_PK integer primary key,
+                            ZINCLOUD integer,
+                            ZCURRENTLOCALVERSION integer,
+                            ZLATESTVERSIONSYNCEDTOCLOUD integer
+                        );
+                        insert into ZREMCKCLOUDSTATE values (7,1,1,1);
+                        """
+                    )
+
+                    def add_attachment(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+                        con.execute(
+                            """
+                            insert into ZREMCDOBJECT values (
+                                11,25,'7718459E-2672-4E99-9E6A-B9AA430E570F',7,1,1024,
+                                'new.png','sha','public.png',12,100,50,null,null,0,X'0102'
+                            )
+                            """
+                        )
+                        con.commit()
+                        return subprocess.CompletedProcess(
+                            [str(helper), "REM-1", str(image)],
+                            0,
+                            stdout=json.dumps(
+                                {
+                                    "ok": True,
+                                    "backend": "reminderkit",
+                                    "attachment_id": "7718459E-2672-4E99-9E6A-B9AA430E570F",
+                                    "attachment_transport": transport,
+                                    "image_uti": helper_uti,
+                                }
+                            )
+                            + "\n",
+                            stderr="",
+                        )
+
+                    with (
+                        mock.patch.object(
+                            reminders_adapter,
+                            "reminderkit_attach_helper",
+                            return_value=helper,
+                        ),
+                        mock.patch.object(
+                            reminders_adapter.subprocess,
+                            "run",
+                            side_effect=add_attachment,
+                        ),
+                        self.assertRaises(
+                            reminders_adapter.AttachmentVerificationError
+                        ) as raised,
+                    ):
+                        reminders_adapter.attach_image_reminderkit_record(
+                            con,
+                            {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
+                            image,
+                        )
+                finally:
+                    con.close()
+
+                self.assertEqual(raised.exception.code, "sync_pending")
+                self.assertTrue(raised.exception.details["partial_failure"])
+                self.assertEqual(raised.exception.details[detail_key], detail_value)
+                self.assertIn(
+                    "delete_attachment",
+                    raised.exception.details["cleanup_command"],
+                )
 
     def test_helper_attach_wraps_malformed_helper_json_as_adapter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1435,17 +1729,21 @@ class CacheHelperTests(unittest.TestCase):
 
 class PluginMetadataTests(unittest.TestCase):
     def test_mit_plugin_manifest_has_license_file(self) -> None:
-        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
 
         self.assertEqual(manifest["license"], "MIT")
-        self.assertTrue(any(ROOT.glob("LICENSE*")))
+        self.assertTrue(any(PLUGIN_ROOT.glob("LICENSE*")))
 
     def test_plugin_manifest_asset_paths_exist(self) -> None:
-        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
         interface = manifest["interface"]
 
         for key in ("composerIcon", "logo", "logoDark"):
-            path = ROOT / interface[key]
+            path = PLUGIN_ROOT / interface[key]
             self.assertTrue(path.exists(), f"{key} does not exist: {path}")
 
 

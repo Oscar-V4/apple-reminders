@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 SKILL_NAMES = [
     "apple-reminders-daily-brief",
     "apple-reminders-quick-capture",
@@ -70,7 +71,10 @@ class PurposeSkillLayerTests(unittest.TestCase):
                 },
             ],
         }
-        script = ROOT / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
         proc = subprocess.run(
             [
                 sys.executable,
@@ -109,14 +113,14 @@ class PurposeSkillLayerTests(unittest.TestCase):
                     {
                         "id": "all-day",
                         "title": "All day",
-                        "calendar_title": "Work",
+                        "list_title": "Work",
                         "completed": False,
                         "due": {"kind": "all_day", "date": "2026-08-05"},
                     },
                     {
                         "id": "timed",
                         "title": "Timed",
-                        "calendar_title": "Home",
+                        "list_title": "Home",
                         "completed": False,
                         "due": {
                             "kind": "timed",
@@ -127,7 +131,7 @@ class PurposeSkillLayerTests(unittest.TestCase):
                     {
                         "id": "none",
                         "title": "No date",
-                        "calendar_title": "Inbox",
+                        "list_title": "Inbox",
                         "completed": False,
                         "due": None,
                     },
@@ -137,7 +141,10 @@ class PurposeSkillLayerTests(unittest.TestCase):
                 "next_cursor": "opaque",
             },
         }
-        script = ROOT / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
         proc = subprocess.run(
             [
                 sys.executable,
@@ -168,7 +175,7 @@ class PurposeSkillLayerTests(unittest.TestCase):
                             {
                                 "id": "floating",
                                 "title": "Floating time",
-                                "calendar_title": "Inbox",
+                                "list_title": "Inbox",
                                 "completed": False,
                                 "due": {
                                     "kind": "timed",
@@ -185,7 +192,10 @@ class PurposeSkillLayerTests(unittest.TestCase):
                 }
             }
         }
-        script = ROOT / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
         proc = subprocess.run(
             [
                 sys.executable,
@@ -205,9 +215,10 @@ class PurposeSkillLayerTests(unittest.TestCase):
         self.assertIn("Floating time [Inbox] id: floating - 2026-08-05", proc.stdout)
 
     def test_new_skills_have_complete_metadata_and_evals(self) -> None:
+        observed_categories: set[str] = set()
         for name in SKILL_NAMES:
             with self.subTest(skill=name):
-                skill_dir = ROOT / "skills" / name
+                skill_dir = PLUGIN_ROOT / "skills" / name
                 skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
                 self.assertNotIn("TODO", skill_text)
                 self.assertIn(f"name: {name}", skill_text)
@@ -217,11 +228,36 @@ class PurposeSkillLayerTests(unittest.TestCase):
                 evals = json.loads((skill_dir / "evals/evals.json").read_text(encoding="utf-8"))
                 self.assertEqual(evals["skill_name"], name)
                 self.assertGreaterEqual(len(evals["evals"]), 2)
+                categories = {case.get("category") for case in evals["evals"]}
+                self.assertIn("direct", categories)
+                self.assertIn("should_not_activate", categories)
+                observed_categories.update(category for category in categories if category)
+
+        self.assertTrue(
+            {"direct", "indirect", "incomplete", "should_not_activate", "unsupported_edge"}
+            .issubset(observed_categories)
+        )
 
     def test_main_skill_routes_to_purpose_specific_skills(self) -> None:
-        skill_text = (ROOT / "skills/apple-reminders/SKILL.md").read_text(encoding="utf-8")
+        skill_text = (PLUGIN_ROOT / "skills/apple-reminders/SKILL.md").read_text(
+            encoding="utf-8"
+        )
         for name in SKILL_NAMES:
             self.assertIn(f"${name}", skill_text)
+
+    def test_primary_skill_starts_with_core_and_diagnoses_only_after_failure(self) -> None:
+        skill_text = (PLUGIN_ROOT / "skills/apple-reminders/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        core_instruction = "Start with the requested bounded Core operation"
+        diagnosis_instruction = "Use `diagnose_reminders` only for a relevant environment or Native Extension failure"
+        self.assertIn(core_instruction, skill_text)
+        self.assertIn("Do not run Doctor or capability preflight first", skill_text)
+        self.assertIn("request access once and retry the original operation once", skill_text)
+        self.assertIn(diagnosis_instruction, skill_text)
+        self.assertLess(skill_text.index(core_instruction), skill_text.index(diagnosis_instruction))
+        self.assertNotIn("On first use or after an environment change, run", skill_text)
 
 
 if __name__ == "__main__":

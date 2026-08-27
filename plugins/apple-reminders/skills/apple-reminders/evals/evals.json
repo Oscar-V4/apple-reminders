@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "오늘 할 일 브리핑해줘. 지난 항목, 오늘 마감, 이번 주 예정, 기한 없는 항목을 나눠서 보여줘.",
+    "expected_behavior": "Reads bounded current Reminders state first, normalizes today's date and timezone, groups results by operational status, and includes exact list or section names without dumping raw rows."
+  },
+  {
+    "prompt": "스크린샷 파일을 '취업캠프 준비' 미리알림에 첨부하고 아이폰에서 보일 수 있는지 확인해줘.",
+    "expected_behavior": "Resolves the exact reminder and source image, obtains a fresh opaque reference, inspects attachments, uses change_reminder_attachment with attach_image and an idempotency key, and reports mobile evidence without claiming iPhone confirmation."
+  },
+  {
+    "prompt": "'생각 주머니' 목록에서 실행 가능한 항목만 이번 주 섹션으로 옮겨줘.",
+    "expected_behavior": "Inspects the exact list and section structure, identifies the qualifying set, obtains a fresh opaque reference for each target, uses organize_reminder move_to_section, and avoids broad moves unless standing delegation or approval covers them."
+  },
+  {
+    "prompt": "'치과 예약' 미리알림 지워줘.",
+    "expected_behavior": "Searches bounded candidates, disambiguates duplicates, reads the exact Reminder for a fresh opaque reference, calls delete_reminder with that reference, never falls back to AppleScript or the private DB, and requires local-absence evidence."
+  },
+  {
+    "prompt": "첨부파일이 아이폰에 안 뜨는 미리알림들을 찾아서 고칠 수 있는지 봐줘.",
+    "expected_behavior": "Runs bounded native attachment inspection and diagnosis, presents local-only or uncertain evidence, and explains that bulk repair/restore apply is withheld from public 0.3 without invoking private maintenance writes."
+  }
+]

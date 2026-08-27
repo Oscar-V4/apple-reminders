@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reminders Attachment Maintenance"
+  short_description: "Inspect and change exact reminder attachments"
+  default_prompt: "Use $apple-reminders-attachment-maintenance to inspect one reminder's attachments or safely attach, replace, or remove an exact image or URL."

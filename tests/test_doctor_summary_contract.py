@@ -10,8 +10,9 @@ from pathlib import Path
 from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SCRIPTS = PLUGIN_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -64,7 +65,7 @@ def sample_full_report() -> dict[str, object]:
 
 def load_server_module() -> object:
     name = f"apple_reminders_server_doctor_contract_{id(object())}"
-    spec = importlib.util.spec_from_file_location(name, ROOT / "mcp/server.py")
+    spec = importlib.util.spec_from_file_location(name, PLUGIN_ROOT / "mcp/server.py")
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load MCP server")
     module = importlib.util.module_from_spec(spec)
@@ -109,9 +110,11 @@ class DoctorSummaryCliTests(unittest.TestCase):
 
 class DoctorSummaryMcpContractTests(unittest.TestCase):
     def test_doctor_tool_exposes_summary_default_and_explicit_full_mode(self) -> None:
-        schema = json.loads((ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8"))
+        schema = json.loads(
+            (PLUGIN_ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8")
+        )
         doctor = next(
-            tool for tool in schema["tools"] if tool["name"] == "reminders_plugin_doctor"
+            tool for tool in schema["tools"] if tool["name"] == "diagnose_reminders"
         )
 
         detail = doctor["inputSchema"]["properties"]["detail_level"]
@@ -137,7 +140,7 @@ class DoctorSummaryMcpContractTests(unittest.TestCase):
 
         instructions = response["result"]["instructions"]
         self.assertLessEqual(len(instructions), 220)
-        self.assertNotIn("Start with reminders_plugin_doctor", instructions)
+        self.assertNotIn("diagnose_reminders first", instructions)
 
 
 if __name__ == "__main__":
