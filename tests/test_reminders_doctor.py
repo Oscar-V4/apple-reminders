@@ -73,7 +73,7 @@ class DoctorFixture:
         self.paths["private_frameworks"] = private
 
         public = {}
-        for name in ("Foundation", "AppKit"):
+        for name in ("Foundation", "AppKit", "ImageIO"):
             framework = root / f"{name}.framework"
             framework.mkdir()
             public[name] = framework

@@ -22,6 +22,7 @@ On macOS, also validate both native sources and the EventKit plist:
 
 ```bash
 clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
+  -framework ImageIO \
   -fsyntax-only plugins/apple-reminders/scripts/remkit_attach_image.m
 clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
   -fsyntax-only plugins/apple-reminders/scripts/reminders_eventkit.m

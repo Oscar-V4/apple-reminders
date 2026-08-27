@@ -115,7 +115,9 @@ For image attachments and sections, local Mac rendering is insufficient. A
 SQLite-only row can appear locally without a native CloudKit save. The Native
 Module therefore uses ReminderKit saves and CloudKit version evidence. That
 evidence is described as likely mobile visibility, never direct iPhone-screen
-observation.
+observation. The image helper also decodes the source bytes to select the PNG
+or JPEG UTI, uses ReminderKit's image-data attachment path, and requires that
+UTI to survive database read-back; a filename extension is not format evidence.
 
 ## Diagnosis policy
 

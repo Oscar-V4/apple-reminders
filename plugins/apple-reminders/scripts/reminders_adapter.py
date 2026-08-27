@@ -1715,6 +1715,8 @@ def reminderkit_attach_helper() -> Path:
                         "Foundation",
                         "-framework",
                         "AppKit",
+                        "-framework",
+                        "ImageIO",
                         "-o",
                         str(temp_path),
                         str(source),
@@ -1960,6 +1962,45 @@ def attach_image_reminderkit_record(
         )
 
     attachment = attachment_payload(selected)
+    attachment_transport = payload.get("attachment_transport")
+    if attachment_transport != "data":
+        raise AttachmentVerificationError(
+            "Image attachment helper did not use the native image-data transport",
+            row=selected,
+            partial_failure=True,
+            attachment=attachment,
+            attachment_transport=(
+                attachment_transport
+                if isinstance(attachment_transport, str)
+                else "missing"
+            ),
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
+    helper_image_uti = payload.get("image_uti")
+    if helper_image_uti not in {"public.jpeg", "public.png"} or attachment.get(
+        "uti"
+    ) != helper_image_uti:
+        raise AttachmentVerificationError(
+            "Image attachment content type did not survive native read-back",
+            row=selected,
+            partial_failure=True,
+            attachment=attachment,
+            helper_image_uti=(
+                helper_image_uti
+                if isinstance(helper_image_uti, str)
+                else "missing"
+            ),
+            stored_image_uti=attachment.get("uti"),
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
     if attachment["sync"].get("mobile_visible_likely") is not True:
         raise AttachmentVerificationError(
             "Image attachment was created but mobile visibility could not be verified",

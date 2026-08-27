@@ -292,6 +292,16 @@ class AppleScriptSyncTests(unittest.TestCase):
 
 
 class AttachmentSyncTests(unittest.TestCase):
+    def test_native_image_helper_uses_decoded_type_and_data_transport(self) -> None:
+        source = (
+            reminders_adapter.SCRIPT_DIR / "remkit_attach_image.m"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CGImageSourceCreateWithData", source)
+        self.assertIn("CGImageSourceGetType", source)
+        self.assertIn("addImageAttachmentWithData:uti:width:height:", source)
+        self.assertNotIn("NSURLContentTypeKey", source)
+
     def test_image_attachment_payload_marks_cloudkit_attachment_mobile_visible(self) -> None:
         payload = reminders_adapter.attachment_payload(
             {
@@ -716,6 +726,109 @@ class AttachmentSyncTests(unittest.TestCase):
 
         self.assertTrue(raised.exception.details["partial_failure"])
         self.assertIn("delete_attachment", raised.exception.details["cleanup_command"])
+
+    def test_helper_attach_rejects_unrenderable_evidence(self) -> None:
+        """Cloud evidence cannot bless the wrong transport or a mismatched UTI."""
+        cases = (
+            ("url_transport", "url", "public.png", "attachment_transport", "url"),
+            ("uti_mismatch", "data", "public.jpeg", "stored_image_uti", "public.png"),
+        )
+        for name, transport, helper_uti, detail_key, detail_value in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "reminders.sqlite"
+                image = Path(tmp) / "browser-capture.png"
+                helper = Path(tmp) / "remkit_attach_image"
+                image.write_bytes(b"fake-image")
+                helper.write_text("#!/bin/sh\n", encoding="utf-8")
+                con = sqlite3.connect(db)
+                con.row_factory = sqlite3.Row
+                try:
+                    con.executescript(
+                        """
+                        create table ZREMCDOBJECT (
+                            Z_PK integer primary key,
+                            Z_ENT integer,
+                            ZCKIDENTIFIER text,
+                            ZCKCLOUDSTATE integer,
+                            ZREMINDER2 integer,
+                            Z_FOK_REMINDER1 integer,
+                            ZFILENAME text,
+                            ZSHA512SUM text,
+                            ZUTI text,
+                            ZFILESIZE integer,
+                            ZWIDTH integer,
+                            ZHEIGHT integer,
+                            ZURL text,
+                            ZHOSTURL text,
+                            ZMARKEDFORDELETION integer,
+                            ZCKSERVERRECORDDATA blob
+                        );
+                        create table ZREMCKCLOUDSTATE (
+                            Z_PK integer primary key,
+                            ZINCLOUD integer,
+                            ZCURRENTLOCALVERSION integer,
+                            ZLATESTVERSIONSYNCEDTOCLOUD integer
+                        );
+                        insert into ZREMCKCLOUDSTATE values (7,1,1,1);
+                        """
+                    )
+
+                    def add_attachment(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+                        con.execute(
+                            """
+                            insert into ZREMCDOBJECT values (
+                                11,25,'7718459E-2672-4E99-9E6A-B9AA430E570F',7,1,1024,
+                                'new.png','sha','public.png',12,100,50,null,null,0,X'0102'
+                            )
+                            """
+                        )
+                        con.commit()
+                        return subprocess.CompletedProcess(
+                            [str(helper), "REM-1", str(image)],
+                            0,
+                            stdout=json.dumps(
+                                {
+                                    "ok": True,
+                                    "backend": "reminderkit",
+                                    "attachment_id": "7718459E-2672-4E99-9E6A-B9AA430E570F",
+                                    "attachment_transport": transport,
+                                    "image_uti": helper_uti,
+                                }
+                            )
+                            + "\n",
+                            stderr="",
+                        )
+
+                    with (
+                        mock.patch.object(
+                            reminders_adapter,
+                            "reminderkit_attach_helper",
+                            return_value=helper,
+                        ),
+                        mock.patch.object(
+                            reminders_adapter.subprocess,
+                            "run",
+                            side_effect=add_attachment,
+                        ),
+                        self.assertRaises(
+                            reminders_adapter.AttachmentVerificationError
+                        ) as raised,
+                    ):
+                        reminders_adapter.attach_image_reminderkit_record(
+                            con,
+                            {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
+                            image,
+                        )
+                finally:
+                    con.close()
+
+                self.assertEqual(raised.exception.code, "sync_pending")
+                self.assertTrue(raised.exception.details["partial_failure"])
+                self.assertEqual(raised.exception.details[detail_key], detail_value)
+                self.assertIn(
+                    "delete_attachment",
+                    raised.exception.details["cleanup_command"],
+                )
 
     def test_helper_attach_wraps_malformed_helper_json_as_adapter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

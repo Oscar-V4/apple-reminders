@@ -33,6 +33,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   `PATH`, while preserving the existing safe unsupported-runtime response.
 - Added an actionable helper-build recovery path from Core failures to
   content-free packaging diagnosis and the macOS command-line-tools installer.
+- Made native image attachment derive PNG/JPEG type from decoded bytes instead
+  of the filename suffix, use ReminderKit's image-data path, and reject a
+  content-type mismatch during read-back. Browser screenshots saved with a
+  misleading extension now render in Reminders instead of producing an
+  apparently synced but invisible attachment.
 
 ### Preserved
 

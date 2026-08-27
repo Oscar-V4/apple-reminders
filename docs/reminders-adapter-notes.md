@@ -61,7 +61,9 @@ These names are version-sensitive observations, not stable Apple API.
 - DB-only rows can lack server-record data, `ZINCLOUD=1`, or a synced local
   version; local rendering is therefore insufficient verification.
 - The working path uses private ReminderKit classes through
-  `remkit_attach_image.m`, then reads back CloudKit evidence.
+  `remkit_attach_image.m`, decodes the actual PNG/JPEG type from image bytes,
+  saves through the native image-data selector, then reads back the stored UTI
+  and CloudKit evidence.
 - Helper exit success alone is insufficient. Pre-existing or ambiguous rows are
   rejected, and missing evidence within the bounded window remains partial or
   pending.

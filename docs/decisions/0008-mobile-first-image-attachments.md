@@ -8,6 +8,9 @@ Accepted.
 
 Use the ReminderKit background backend as the default path for image attachments.
 
+Pass decoded image data with a content-derived PNG/JPEG UTI. Do not infer the
+attachment UTI from the source filename extension.
+
 Treat SQLite-created image attachments as local-only unless read-back evidence shows a CloudKit server record and `ZINCLOUD=1`.
 
 ## Rationale
@@ -19,7 +22,9 @@ The private ReminderKit path creates native image attachments that Reminders syn
 ## Consequences
 
 - `attach_image` defaults to `--backend reminderkit`.
-- A helper success is accepted only when it resolves to one newly created attachment id and read-back proves mobile-visible CloudKit evidence.
+- A helper success is accepted only when it uses the image-data transport,
+  resolves to one newly created attachment id, preserves the content-derived
+  UTI on read-back, and proves mobile-visible CloudKit evidence.
 - `attach_image --backend db` remains available only as a diagnostic fallback.
 - `audit_attachments` reports image rows that are likely Mac-local only.
 - `repair_attachments` can back up the Reminders container, reattach local-only images through ReminderKit, and soft-delete the old local-only attachment objects.

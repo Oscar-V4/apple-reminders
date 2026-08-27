@@ -42,8 +42,10 @@ even though optional MCP `outputSchema` descriptors are omitted from
    read. An unavailable final read remains verification-pending; a failed
    attachment step remains partial; idempotent retry does not duplicate the
    reminder or attachment.
-7. Image attach and replacement use the ReminderKit path. CloudKit evidence can
-   be described as likely mobile visibility, never direct iPhone-screen
+7. Image attach and replacement use the ReminderKit image-data path, derive
+   PNG/JPEG UTI from decoded bytes rather than a filename suffix, and require
+   the stored UTI to match native helper read-back. CloudKit evidence can be
+   described as likely mobile visibility, never direct iPhone-screen
    confirmation.
 8. URL attachment replacement/deletion preserves the observed native tombstone
    and ordering behavior and rejects duplicate or stale changes before

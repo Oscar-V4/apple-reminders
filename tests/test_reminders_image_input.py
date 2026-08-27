@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -34,6 +35,40 @@ class ReminderImageInputTests(unittest.TestCase):
         self.assertEqual((result.width, result.height), (1, 1))
         self.assertEqual(result.bytes, len(PNG_1X1))
         self.assertRegex(result.sha256, r"^[0-9a-f]{64}$")
+
+    def test_accepts_a_decoded_jpeg_even_with_a_png_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.png"
+            converted = root / "converted.jpg"
+            image = root / "browser-capture.png"
+            source.write_bytes(PNG_1X1)
+            conversion = subprocess.run(
+                [
+                    "sips",
+                    "-s",
+                    "format",
+                    "jpeg",
+                    "-z",
+                    "2",
+                    "2",
+                    str(source),
+                    "--out",
+                    str(converted),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            self.assertEqual(conversion.returncode, 0, conversion.stderr)
+            converted.rename(image)
+
+            result = reminders_image_input.validate_image_input(image)
+
+        self.assertEqual(result.format, "jpeg")
+        self.assertEqual((result.width, result.height), (2, 2))
 
     def test_rejects_a_relative_path(self) -> None:
         with self.assertRaises(reminders_image_input.ImageInputError) as raised:

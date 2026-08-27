@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
@@ -49,6 +50,42 @@ int main(int argc, const char **argv) {
         NSString *imagePath = [NSString stringWithUTF8String:argv[2]];
         NSString *imageName = imagePath.lastPathComponent;
         NSURL *imageURL = [NSURL fileURLWithPath:imagePath];
+        NSError *error = nil;
+        NSData *imageData = [NSData dataWithContentsOfURL:imageURL
+                                                   options:NSDataReadingMappedIfSafe
+                                                     error:&error];
+        if (!imageData) {
+            write_json(@{
+                @"ok": @NO,
+                @"error": @"image_data_load_failed",
+                @"detail": error.localizedDescription ?: @"unknown",
+                @"image": imageName
+            });
+            return 2;
+        }
+        CGImageSourceRef imageSource = CGImageSourceCreateWithData(
+            (__bridge CFDataRef)imageData,
+            NULL
+        );
+        CFStringRef sourceType = imageSource ? CGImageSourceGetType(imageSource) : NULL;
+        NSString *imageUTI = sourceType ? [(__bridge NSString *)sourceType copy] : nil;
+        if (imageSource) {
+            CFRelease(imageSource);
+        }
+        NSSet<NSString *> *supportedImageUTIs = [NSSet setWithObjects:
+            @"public.jpeg",
+            @"public.png",
+            nil
+        ];
+        if (![supportedImageUTIs containsObject:imageUTI]) {
+            write_json(@{
+                @"ok": @NO,
+                @"error": @"unsupported_decoded_image_type",
+                @"detected_uti": imageUTI ?: [NSNull null],
+                @"image": imageName
+            });
+            return 2;
+        }
         NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
         if (!image) {
             write_json(@{@"ok": @NO, @"error": @"image_load_failed", @"image": imageName});
@@ -95,7 +132,7 @@ int main(int argc, const char **argv) {
         }
 
         id objectID = ((id (*)(id, SEL, id))objc_msgSend)((id)REMReminder, @selector(objectIDWithUUID:), uuid);
-        NSError *error = nil;
+        error = nil;
         id reminder = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(store, @selector(fetchReminderWithObjectID:error:), objectID, &error);
         if (!reminder) {
             write_json(@{
@@ -124,25 +161,23 @@ int main(int argc, const char **argv) {
             write_json(@{@"ok": @NO, @"error": @"attachment_context_nil", @"reminder": uuidString});
             return 1;
         }
-        if (![attachmentContext respondsToSelector:@selector(addImageAttachmentWithURL:width:height:error:)]) {
+        if (![attachmentContext respondsToSelector:@selector(addImageAttachmentWithData:uti:width:height:)]) {
             write_json(@{@"ok": @NO, @"error": @"attachment_selector_missing", @"reminder": uuidString});
             return 1;
         }
 
-        error = nil;
-        id attachment = ((id (*)(id, SEL, id, NSUInteger, NSUInteger, NSError **))objc_msgSend)(
+        id attachment = ((id (*)(id, SEL, id, id, NSUInteger, NSUInteger))objc_msgSend)(
             attachmentContext,
-            @selector(addImageAttachmentWithURL:width:height:error:),
-            imageURL,
+            @selector(addImageAttachmentWithData:uti:width:height:),
+            imageData,
+            imageUTI,
             width,
-            height,
-            &error
+            height
         );
         if (!attachment) {
             write_json(@{
                 @"ok": @NO,
                 @"error": @"add_image_attachment_failed",
-                @"detail": error.localizedDescription ?: @"unknown",
                 @"reminder": uuidString,
                 @"image": imageName
             });
@@ -184,6 +219,8 @@ int main(int argc, const char **argv) {
         NSMutableDictionary *payload = [@{
             @"ok": @YES,
             @"backend": @"reminderkit",
+            @"attachment_transport": @"data",
+            @"image_uti": imageUTI,
             @"reminder_id": uuidString,
             @"image": imageName,
             @"width": @(width),

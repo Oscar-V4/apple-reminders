@@ -100,6 +100,7 @@ def default_paths(
         "public_frameworks": {
             "Foundation": Path("/System/Library/Frameworks/Foundation.framework"),
             "AppKit": Path("/System/Library/Frameworks/AppKit.framework"),
+            "ImageIO": Path("/System/Library/Frameworks/ImageIO.framework"),
         },
     }
 
@@ -641,6 +642,8 @@ def inspect_helper_toolchain(
         "Foundation",
         "-framework",
         "AppKit",
+        "-framework",
+        "ImageIO",
         "-fsyntax-only",
         str(source),
     ]
