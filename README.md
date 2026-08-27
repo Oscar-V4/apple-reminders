@@ -48,10 +48,10 @@ to content-free packaging diagnosis instead of asking for a blind retry.
 
 ## Quick Start
 
-Install the pinned 0.3.0 repo-marketplace release:
+Install the pinned 0.3.1 repo-marketplace release:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
