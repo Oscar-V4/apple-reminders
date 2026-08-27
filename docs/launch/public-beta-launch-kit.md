@@ -22,7 +22,7 @@ everywhere:
 
 | Placeholder | Final value |
 | --- | --- |
-| `<TAG>` | Expected `v0.3.0`; verify after tagging |
+| `<TAG>` | `v0.3.1`; verify against the published tag |
 | `<RELEASE_URL>` | Public GitHub Release URL |
 | `<COMMIT_SHA>` | Commit referenced by the tag |
 | `<ZIP_URL>` | Release artifact URL |
