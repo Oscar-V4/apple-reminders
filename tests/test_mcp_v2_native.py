@@ -586,6 +586,38 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertFalse(result["next_action"]["retry_original_once"])
         validate_public_result("organize_reminder", result, "unknown")
 
+    def test_pending_native_receipt_normalizes_non_sync_error_code(self) -> None:
+        backend = Backend()
+        references = References()
+        receipt = mutation_payload(
+            "add_tag",
+            status="committed_verification_pending",
+            recovery={
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+        )
+        receipt["error"] = {}
+        backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "organize_reminder",
+            {
+                "reference": f"rev1.{'x' * 32}",
+                "action": {"kind": "add_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(result["error"]["reason_code"], "backend_error")
+        self.assertFalse(result["error"]["retryable"])
+        validate_public_result("organize_reminder", result, "unknown")
+
     def test_manual_repair_receipt_survives_the_public_native_facade(self) -> None:
         backend = Backend()
         references = References()
@@ -674,6 +706,53 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertEqual(result["error"]["reason_code"], "invalid_native_mutation_outcome")
         validate_public_result("organize_reminder", result, "unknown")
+
+    def test_malformed_optional_post_dispatch_receipt_fields_remain_unknown(
+        self,
+    ) -> None:
+        cases = (
+            ("warnings", None, "invalid_native_receipt_warnings"),
+            ("warnings", 1, "invalid_native_receipt_warnings"),
+            ("error", None, "invalid_native_receipt_error"),
+        )
+        for field, value, reason_code in cases:
+            with self.subTest(field=field, value=value):
+                backend = Backend()
+                references = References()
+                receipt = mutation_payload(
+                    "add_tag",
+                    status="committed_verification_pending",
+                    recovery={
+                        "semantics": "read_before_retry",
+                        "automatic_retry_safe": False,
+                    },
+                )
+                receipt[field] = value
+                backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+                    receipt=receipt,
+                    mutation_state="unknown",
+                )
+                facade = self.make_facade(backend, references=references)
+                reference = f"rev1.{'x' * 32}"
+
+                result = facade.call(
+                    "organize_reminder",
+                    {
+                        "reference": reference,
+                        "action": {"kind": "add_tag", "tag": "next"},
+                    },
+                )
+
+                self.assertEqual(references.invalidated, [reference])
+                self.assertEqual(
+                    result["status"], "committed_verification_pending"
+                )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["error"]["code"], "sync_pending")
+                self.assertEqual(result["error"]["reason_code"], reason_code)
+                self.assertIsNone(result["verification"]["write_performed"])
+                self.assertFalse(result["recovery"]["automatic_retry_safe"])
+                validate_public_result("organize_reminder", result, "unknown")
 
     def test_committed_native_write_with_failed_final_read_is_pending(self) -> None:
         backend = Backend()

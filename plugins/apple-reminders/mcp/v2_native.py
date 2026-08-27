@@ -811,6 +811,14 @@ class NativeFacade:
                 target,
                 exc.reason_code,
             )
+        except Exception:
+            if outcome.mutation_state not in {"committed", "unknown"}:
+                self._references.invalidate_reference(reference)
+            return self._unknown_native_result(
+                public_operation,
+                target,
+                "invalid_native_mutation_receipt",
+            )
 
         before = self._native_state(
             tool_name,
@@ -1142,6 +1150,24 @@ class NativeFacade:
                 "invalid_native_receipt_objects",
                 "Native mutation receipt objects are missing or invalid.",
             )
+        if "warnings" in receipt:
+            warnings = receipt["warnings"]
+            if not isinstance(warnings, list) or any(
+                not isinstance(item, Mapping)
+                and not (isinstance(item, str) and bool(item))
+                for item in warnings
+            ):
+                raise FacadeError(
+                    "schema_mismatch",
+                    "invalid_native_receipt_warnings",
+                    "Native mutation receipt warnings are invalid.",
+                )
+        if "error" in receipt and not isinstance(receipt["error"], Mapping):
+            raise FacadeError(
+                "schema_mismatch",
+                "invalid_native_receipt_error",
+                "Native mutation receipt error is invalid.",
+            )
         if status in {"unchanged", "verified"} and not receipt["after"]:
             raise FacadeError(
                 "schema_mismatch",
@@ -1209,10 +1235,17 @@ class NativeFacade:
 
     @staticmethod
     def _copy_receipt_extras(raw: Mapping[str, Any], result: dict[str, Any]) -> None:
-        warnings = [item for value in raw.get("warnings", []) if (item := _warning(value))]
+        raw_warnings = raw.get("warnings", [])
+        warnings = (
+            [item for value in raw_warnings if (item := _warning(value))]
+            if isinstance(raw_warnings, list)
+            else []
+        )
         if warnings:
             result["warnings"] = warnings[:20]
-        if result["status"] in FAILURE_STATUSES or "error" in raw:
+        if result["status"] in FAILURE_STATUSES or (
+            "error" in raw and isinstance(raw.get("error"), Mapping)
+        ):
             result["error"] = _normalized_error(raw.get("error"))
 
     @staticmethod
@@ -1236,7 +1269,11 @@ class NativeFacade:
                 }
             )
         result["warnings"] = warnings[:20]
-        if "error" not in result:
+        current_error = result.get("error")
+        if (
+            not isinstance(current_error, Mapping)
+            or current_error.get("code") != "sync_pending"
+        ):
             causal_warning = next(
                 (
                     item
@@ -1251,14 +1288,21 @@ class NativeFacade:
                     ),
                 },
             )
+            reason_code = causal_warning.get("code")
+            message = causal_warning.get("message")
+            retryable = True
+            if isinstance(current_error, Mapping):
+                reason_code = current_error.get("reason_code") or reason_code
+                message = current_error.get("message") or message
+                retryable = current_error.get("retryable") is True
             result["error"] = _error(
                 "sync_pending",
-                str(causal_warning.get("code") or "native_verification_pending"),
+                str(reason_code or "native_verification_pending"),
                 str(
-                    causal_warning.get("message")
+                    message
                     or "The native call may have committed; read before retrying."
                 ),
-                retryable=True,
+                retryable=retryable,
             )
         if next_tool is not None:
             result["next_action"] = {
