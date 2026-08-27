@@ -2,7 +2,7 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## Unreleased — 0.3.0 public beta
+## 0.3.0 — 2026-08-27 (public beta)
 
 ### Changed
 
@@ -54,12 +54,12 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Deprecated direct adapter writes and Maintenance commands remain internal
   migration or diagnostic seams; public skills do not fall back to them.
 
-### Planned release work
+### Post-beta validation
 
-- Run one external first-install check on a clean supported Mac and record the
-  supported macOS/Python combination.
-- Create the first tag, deterministic ZIP/checksum, GitHub Release, and matching
-  release notes after the beta candidate is approved.
+- Repeat first-use permission and create/read/delete validation on a genuinely
+  fresh macOS permission subject, then record the observed prompt wording.
+- Verify an upgrade from this tag does not unexpectedly require permission
+  reauthorization.
 
 ## 0.2.0 — internal development baseline
 

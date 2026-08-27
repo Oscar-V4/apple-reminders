@@ -189,7 +189,7 @@ Submission does not mean acceptance or endorsement.
 
 - **Project title:** Apple Reminders for Codex
 - **Tagline:** Safer Apple Reminders workflows from Codex on macOS.
-- **Displayed author:** `Soo / Oscar-V4 — choose one and make every profile consistent`
+- **Displayed author:** `Sungsoo Kim (Oscar-V4)`
 - **Public project URL:** `https://github.com/Oscar-V4/apple-reminders`
 - **Tagged release:** `<RELEASE_URL>`
 - **Demo:** `<DEMO_URL>`
