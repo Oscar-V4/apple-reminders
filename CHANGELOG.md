@@ -2,6 +2,58 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.4.0 — 2026-08-28
+
+### Added
+
+- Added bounded Recently Deleted discovery and exact one-item recovery. Only an
+  exact deleted-item read issues a short-lived, one-use opaque `del1`
+  Reference; recovery requires a same-account destination, an idempotency key,
+  native attachment preservation, and final EventKit read-back.
+- Added the closed `copy_image` attachment action. It revalidates fresh source
+  and destination `rev1` References, snapshots one exact private image without
+  exposing its path, preserves the source, and verifies byte-identical content
+  on the destination.
+- Added explicit completed-range daily briefs with a separate Completed
+  section and human priority labels.
+- Added a current workflow capability matrix covering UI-versus-API ordering,
+  dependency-first destructive flows, CRUD boundaries, and evidence limits.
+
+### Changed
+
+- Bound pagination to a private ordered ID-and-revision SHA-256 snapshot.
+  Continuation now fails read-only with `pagination_snapshot_stale` when list
+  membership or revisions change between pages.
+- Broad cleanup now discovers summaries first, obtains write References just
+  in time, processes authorized 25–40 item chunks, verifies each item, and
+  stops the entire run on the first uncertain Receipt.
+- MCP text output now leads with a content-free outcome, write state, evidence
+  scope, exact safe target identifiers, and the next read-only action.
+- URL metadata changes now replace one exact matching visible attachment,
+  preserve unrelated or ambiguous objects, and reuse an already-correct target
+  attachment instead of creating a duplicate on retry.
+
+### Fixed
+
+- Removed an unsafe nil-completion ReminderKit sync trigger that could crash
+  after a successful recovery save. A helper crash or malformed post-dispatch
+  result is now conservatively verification-pending rather than a false
+  no-write failure.
+- Preserved local clock and IANA timezone in timed daily-brief output and
+  translated Apple/EventKit priority numbers into high, medium, and low labels.
+- Allowed multiple content-addressed backing-file candidates only when every
+  candidate matches the stored SHA-512 digest. ReminderKit UTI normalization is
+  accepted when the copied bytes, dimensions, and file size remain exact.
+
+### Local validation
+
+- On macOS 26.5.2 (25F84), Reminders 7.0 (3976), restored four exact deleted
+  Reminders with all four images, created a four-image rollup, and observed the
+  final state in the native app.
+- Exercised `copy_image` end to end through the public MCP, observed one image
+  on the destination in the native app, then deleted the disposable test
+  Reminder and verified local absence.
+
 ## 0.3.1 — 2026-08-27
 
 ### Fixed

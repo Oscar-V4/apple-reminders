@@ -21,6 +21,7 @@ from mcp.v2_contract import (
 
 
 REFERENCE = "rev1." + "A" * 32
+DELETED_REFERENCE = "del1." + "D" * 32
 OPERATION_ID = "12345678-1234-4234-9234-1234567890ab"
 
 READ_TOOLS = (
@@ -28,6 +29,7 @@ READ_TOOLS = (
     "list_reminder_lists",
     "fetch_reminders",
     "read_reminder",
+    "inspect_recently_deleted",
     "inspect_reminder_native",
     "diagnose_reminders",
 )
@@ -36,6 +38,11 @@ MUTATION_CASES = {
     "create_reminder": ("create_reminder", "eventkit_public_sdk", True),
     "change_reminder": ("change_reminder.patch", "eventkit_public_sdk", True),
     "delete_reminder": ("delete_reminder", "eventkit_public_sdk", False),
+    "recover_deleted_reminder": (
+        "recover_deleted_reminder",
+        "native_extension",
+        False,
+    ),
     "ensure_reminder_list": ("ensure_reminder_list", "eventkit_public_sdk", False),
     "create_reminder_section": (
         "create_reminder_section",
@@ -77,6 +84,15 @@ def read_success(tool_name: str) -> dict[str, object]:
                 "title": "Ship beta",
                 "reference": REFERENCE,
             }
+        }
+    elif tool_name == "inspect_recently_deleted":
+        data = {
+            "kind": "item",
+            "deleted_reminder": {
+                "id": "REMINDER-1",
+                "title": "Recover me",
+                "reference": DELETED_REFERENCE,
+            },
         }
     elif tool_name == "inspect_reminder_native":
         data = {
@@ -200,6 +216,7 @@ def mutation_failure(
                 "create_reminder": "fetch_reminders",
                 "ensure_reminder_list": "list_reminder_lists",
                 "create_reminder_section": "inspect_reminder_native",
+                "recover_deleted_reminder": "inspect_recently_deleted",
             }.get(tool_name, "read_reminder"),
             "retry_original_once": False,
             "message": "Read the exact Reminder again.",
@@ -262,13 +279,14 @@ class PublicV2ResultContractTests(unittest.TestCase):
 
         self.assertEqual(payload["data"]["items"][0]["title"], "Inbox")
 
-    def test_all_thirteen_tool_families_accept_success_and_safe_failure(self) -> None:
+    def test_all_fifteen_tool_families_accept_success_and_safe_failure(self) -> None:
         for tool_name in READ_TOOLS:
             with self.subTest(tool=tool_name, outcome="success"):
                 self.assertTrue(validate_public_result(tool_name, read_success(tool_name))["ok"])
             failure_code = {
                 "request_reminders_access": "permission_denied",
                 "read_reminder": "not_found",
+                "inspect_recently_deleted": "not_found",
                 "diagnose_reminders": "schema_mismatch",
             }.get(tool_name, "invalid_input")
             with self.subTest(tool=tool_name, outcome="failure"):
@@ -352,6 +370,7 @@ class PublicV2ResultContractTests(unittest.TestCase):
             "change_reminder_attachment": (
                 "change_reminder_attachment.attach_image",
                 "change_reminder_attachment.attach_url",
+                "change_reminder_attachment.copy_image",
                 "change_reminder_attachment.replace_image",
                 "change_reminder_attachment.replace_url",
                 "change_reminder_attachment.delete",

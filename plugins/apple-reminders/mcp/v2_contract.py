@@ -33,6 +33,7 @@ READ_TOOLS = frozenset(
         "list_reminder_lists",
         "fetch_reminders",
         "read_reminder",
+        "inspect_recently_deleted",
         "inspect_reminder_native",
         "diagnose_reminders",
     }
@@ -42,6 +43,7 @@ MUTATION_TOOLS = frozenset(
         "create_reminder",
         "change_reminder",
         "delete_reminder",
+        "recover_deleted_reminder",
         "ensure_reminder_list",
         "create_reminder_section",
         "organize_reminder",
@@ -64,6 +66,8 @@ OPERATION_FAMILIES = {
         }
     ),
     "delete_reminder": frozenset({"delete_reminder"}),
+    "inspect_recently_deleted": frozenset({"inspect_recently_deleted"}),
+    "recover_deleted_reminder": frozenset({"recover_deleted_reminder"}),
     "inspect_reminder_native": frozenset({"inspect_reminder_native"}),
     "ensure_reminder_list": frozenset({"ensure_reminder_list"}),
     "create_reminder_section": frozenset({"create_reminder_section"}),
@@ -78,6 +82,7 @@ OPERATION_FAMILIES = {
         {
             "change_reminder_attachment.attach_image",
             "change_reminder_attachment.attach_url",
+            "change_reminder_attachment.copy_image",
             "change_reminder_attachment.replace_image",
             "change_reminder_attachment.replace_url",
             "change_reminder_attachment.delete",
@@ -118,6 +123,7 @@ PUBLIC_ERROR_CODES = frozenset(
     }
 )
 REFERENCE_PATTERN = re.compile(r"^rev1\.[A-Za-z0-9_-]{32,4091}$")
+DELETED_REFERENCE_PATTERN = re.compile(r"^del1\.[A-Za-z0-9_-]{32,4091}$")
 CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -654,6 +660,8 @@ def _validate_next_action(
         "ensure_reminder_list": "list_reminder_lists",
         "create_reminder_section": "inspect_reminder_native",
     }.get(tool_name, "read_reminder")
+    if tool_name == "recover_deleted_reminder" and error_code == "concurrent_modification":
+        sync_pending_tool = "inspect_recently_deleted"
     expected = {
         "permission_denied": ("request_access", "request_reminders_access"),
         "concurrent_modification": ("fresh_read", sync_pending_tool),
@@ -728,6 +736,29 @@ def _reference_locations(value: Any, path: str = "$", field: str | None = None) 
     return locations
 
 
+def _deleted_reference_locations(
+    value: Any,
+    path: str = "$",
+    field: str | None = None,
+) -> list[str]:
+    locations: list[str] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            locations.extend(_deleted_reference_locations(item, f"{path}.{key}", key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            locations.extend(
+                _deleted_reference_locations(item, f"{path}[{index}]", field)
+            )
+    elif (
+        isinstance(value, str)
+        and field not in REFERENCE_CONTENT_FIELDS
+        and DELETED_REFERENCE_PATTERN.fullmatch(value)
+    ):
+        locations.append(path)
+    return locations
+
+
 def _validate_direct_reference(
     value: Any,
     *,
@@ -740,6 +771,23 @@ def _validate_direct_reference(
             "missing_fresh_reference",
             path,
             "a canonical final read must issue one fresh opaque rev1 reference",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+
+
+def _validate_deleted_reference(
+    value: Any,
+    *,
+    path: str,
+    tool_name: str,
+    mutation_state: str | None,
+) -> None:
+    if not isinstance(value, str) or not DELETED_REFERENCE_PATTERN.fullmatch(value):
+        _fail(
+            "missing_fresh_reference",
+            path,
+            "an exact Recently Deleted read must issue one fresh opaque del1 reference",
             tool_name=tool_name,
             mutation_state=mutation_state,
         )
@@ -933,6 +981,34 @@ def _validate_read_result(
                 mutation_state=mutation_state,
             )
             expected_reference_path = "$.data.reference"
+        expected_deleted_reference_path: str | None = None
+        if tool_name == "inspect_recently_deleted":
+            kind = result["data"].get("kind")
+            if kind == "item":
+                deleted_reminder = result["data"].get("deleted_reminder")
+                if not isinstance(deleted_reminder, Mapping):
+                    _fail(
+                        "invalid_read_envelope",
+                        "$.data.deleted_reminder",
+                        "exact deleted read must return one deleted Reminder object",
+                        tool_name=tool_name,
+                        mutation_state=mutation_state,
+                    )
+                _validate_deleted_reference(
+                    deleted_reminder.get("reference"),
+                    path="$.data.deleted_reminder.reference",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                )
+                expected_deleted_reference_path = "$.data.deleted_reminder.reference"
+            elif kind != "list":
+                _fail(
+                    "invalid_read_envelope",
+                    "$.data.kind",
+                    "Recently Deleted reads must report kind=list or kind=item",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                )
         locations = _reference_locations(result)
         if expected_reference_path is None and locations:
             _fail(
@@ -947,6 +1023,26 @@ def _validate_read_result(
                 "unsafe_reference",
                 "$",
                 "exact read must expose exactly one public reference",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+        deleted_locations = _deleted_reference_locations(result)
+        if expected_deleted_reference_path is None and deleted_locations:
+            _fail(
+                "unsafe_reference",
+                deleted_locations[0],
+                "only an exact deleted Reminder read may issue a recovery reference",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+        if (
+            expected_deleted_reference_path is not None
+            and deleted_locations != [expected_deleted_reference_path]
+        ):
+            _fail(
+                "unsafe_reference",
+                "$",
+                "exact deleted read must expose exactly one recovery reference",
                 tool_name=tool_name,
                 mutation_state=mutation_state,
             )
@@ -1029,6 +1125,15 @@ def _validate_read_result(
             tool_name=tool_name,
             mutation_state=mutation_state,
         )
+    deleted_locations = _deleted_reference_locations(result)
+    if deleted_locations:
+        _fail(
+            "unsafe_reference",
+            deleted_locations[0],
+            "failed reads must not issue recovery references",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
 
 
 def _allowed_backends(operation: str) -> frozenset[str]:
@@ -1041,7 +1146,7 @@ def _allowed_backends(operation: str) -> frozenset[str]:
         "ensure_reminder_list",
     }:
         return frozenset({"eventkit_public_sdk"})
-    if operation == "create_reminder_section" or operation.startswith(
+    if operation == "recover_deleted_reminder" or operation == "create_reminder_section" or operation.startswith(
         ("organize_reminder.", "change_reminder_attachment.")
     ):
         return frozenset({"native_extension"})
@@ -1357,6 +1462,16 @@ def _validate_mutation_result(
             "unsafe_reference",
             locations[0],
             "only a verified or unchanged exact Reminder result may expose rev1",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+
+    deleted_locations = _deleted_reference_locations(result)
+    if deleted_locations:
+        _fail(
+            "unsafe_reference",
+            deleted_locations[0],
+            "mutation receipts must not expose a reusable deleted-item reference",
             tool_name=tool_name,
             mutation_state=mutation_state,
         )

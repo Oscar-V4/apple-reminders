@@ -265,18 +265,6 @@ int main(int argc, const char **argv) {
             return 1;
         }
 
-        if ([store respondsToSelector:@selector(triggerCloudKitOnlySyncWithReason:discretionary:completion:)]) {
-            ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(
-                store,
-                @selector(triggerCloudKitOnlySyncWithReason:discretionary:completion:),
-                removeMode
-                    ? @"codex-reminderkit-remove-image-attachment"
-                    : @"codex-reminderkit-image-attachment",
-                NO,
-                nil
-            );
-        }
-
         if (removeMode) {
             write_json(@{
                 @"ok": @YES,

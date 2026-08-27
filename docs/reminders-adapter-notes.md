@@ -4,22 +4,24 @@ These notes record implementation evidence from local macOS Reminders
 investigation. They describe the private adapter beneath the public Modules;
 they are not a second user-facing command contract.
 
-## Public 0.3 boundary
+## Public 0.4 boundary
 
 Core operations use EventKit for access, exact lists/reminders, typed due dates,
 absolute and coordinate-backed location alarms, recurrence, completion,
 priority, URLs, and list moves. Native Extension operations cover exact
 sections, tags, and native image/URL attachments.
 
-Public callers use the 13 tools in `plugins/apple-reminders/schemas/mcp-tools.json`. An exact reminder
+Public callers use the 15 tools in `plugins/apple-reminders/schemas/mcp-tools.json`. An exact reminder
 read returns one opaque `rev1` Reference; callers do not obtain private versions
 from an attachment command or submit `if_version` directly. The Module unwraps
 and revalidates the Reference immediately before the selected backend mutation.
 
 The direct `plugins/apple-reminders/scripts/reminders_adapter.py` CLI is a deprecated/internal seam for
 tests, migration compatibility, and carefully reviewed diagnostic research. Its
-Maintenance, backup, restore, repair, log-purge, flag, and UI-handoff commands
-are not public 0.3 capabilities and public skills must not fall back to them.
+Maintenance, broad backup restore, repair, log-purge, flag, and UI-handoff
+commands are not public capabilities and public skills must not fall back to
+them. Exact Recently Deleted recovery is exposed only through its guarded
+`del1` Recovery Module.
 
 ## Public API findings
 
@@ -99,10 +101,37 @@ These names are version-sensitive observations, not stable Apple API.
   relationship read-back, no compensating deletion runs. The receipt requires
   an exact attachment inspection before any retry so a committed old removal
   cannot be followed by deletion of the only remaining image.
+- Cross-Reminder copy revalidates independent source and destination public
+  guards, acquires fresh private revisions, snapshots the source into a private
+  temporary file, and rechecks both Reminders before dispatch. Reminders can
+  retain byte-identical content-addressed files under more than one extension;
+  they are equivalent only when every candidate matches the stored SHA-512.
+- A live source exposed stale `public.png` metadata for bytes decoded as JPEG.
+  ReminderKit normalized the destination to `public.jpeg` while preserving the
+  exact SHA-512, file size, width, and height. Copy verification therefore uses
+  byte identity plus decoded destination-type verification rather than
+  requiring stale source and normalized destination UTI strings to match.
 
 The historical DB image backend and local-only attachment repair remain
 internal diagnostic/Maintenance paths. Attachment repair, its container backup,
-and automatic restoration are withheld from the public Interface.
+and automatic repair restoration are withheld from the public Interface.
+
+## Recently Deleted recovery evidence
+
+The public Recovery Module lists a bounded 30-day inventory without writable
+references. An exact item read keeps store identity, private revision, deletion
+timestamp, account identity, and attachment digest server-side and returns one
+short-lived `del1`. Recovery rechecks that entire guard and uses ReminderKit's
+list-scoped undelete save only for an exact same-account destination.
+
+On macOS 26.5.2 (25F84), Reminders 7.0 (3976), schema fingerprint
+`adaa7c550726b35e592085a531fba649466a6099ec8cbb863bf726143fcf5634`,
+four exact deleted Reminders returned with their original identifiers and four
+preserved image attachments. A null-completion CloudKit trigger crashed after
+one successful save, so the helper removed that optional call and retains
+`setSyncToCloudKit:YES` on the save request. Missing or malformed post-dispatch
+output is consequently an unknown possible write, never a clean no-write
+failure.
 
 ## URL attachment evidence
 

@@ -45,7 +45,7 @@ from v2_contract import (  # noqa: E402
 
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
-SERVER_VERSION = "0.3.1"
+SERVER_VERSION = "0.4.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     LATEST_PROTOCOL_VERSION,
@@ -147,6 +147,17 @@ ROUTES: dict[str, ToolRoute] = {
             ("idempotency_key", "--idempotency-key"),
         ),
     ),
+    "copy_image_attachment": ToolRoute(
+        command="copy_image_attachment",
+        options=(
+            ("source_reminder_id", "--source-id"),
+            ("reminder_id", "--id"),
+            ("attachment_id", "--attachment-id"),
+            ("if_source_version", "--if-source-version"),
+            ("if_version", "--if-version"),
+            ("idempotency_key", "--idempotency-key"),
+        ),
+    ),
     "attach_url_to_reminder": ToolRoute(
         command="attach_url",
         options=(
@@ -220,7 +231,8 @@ def load_tools(path: Path = TOOLS_SCHEMA_PATH) -> list[dict[str, Any]]:
         names.add(name)
     if names != set(V2_PUBLIC_TOOLS):
         raise RuntimeError(
-            "Public v2 tool definitions do not match the 13-tool runtime surface"
+            "Public v2 tool definitions do not match the "
+            f"{len(V2_PUBLIC_TOOLS)}-tool runtime surface"
         )
     return tools
 
@@ -233,9 +245,11 @@ _ADAPTER_MODULE: Any | None = None
 _EVENTKIT_BRIDGE_MODULE: Any | None = None
 _V2_CORE_FACADE: Any | None = None
 _V2_NATIVE_FACADE: Any | None = None
+_V2_RECOVERY_FACADE: Any | None = None
 _V2_DIAGNOSTICS_FACADE: Any | None = None
 _V2_CORE_TYPES_LOADED = False
 _V2_NATIVE_TYPES_LOADED = False
+_V2_RECOVERY_TYPES_LOADED = False
 _V2_DIAGNOSTICS_TYPES_LOADED = False
 
 
@@ -275,6 +289,24 @@ def _ensure_v2_native_types() -> None:
         }
     )
     _V2_NATIVE_TYPES_LOADED = True
+
+
+def _ensure_v2_recovery_types() -> None:
+    """Load Recently Deleted recovery code only for its two public tools."""
+
+    global _V2_RECOVERY_TYPES_LOADED
+    if _V2_RECOVERY_TYPES_LOADED:
+        return
+    from v2_recovery import RecoveryFacade as _RecoveryFacade  # noqa: PLC0415
+    from v2_recovery_backend import RecoveryBackend as _RecoveryBackend  # noqa: PLC0415
+
+    globals().update(
+        {
+            "RecoveryFacade": _RecoveryFacade,
+            "RecoveryBackend": _RecoveryBackend,
+        }
+    )
+    _V2_RECOVERY_TYPES_LOADED = True
 
 
 def _ensure_v2_diagnostics_types() -> None:
@@ -938,8 +970,23 @@ def _v2_native_facade() -> NativeFacade:
             references=_v2_core_facade().reference_port,
             native_read=backend.read,
             native_mutation=backend.mutate,
+            native_copy_mutation=backend.copy_image,
         )
     return _V2_NATIVE_FACADE
+
+
+def _v2_recovery_facade() -> RecoveryFacade:
+    global _V2_RECOVERY_FACADE
+    _ensure_v2_recovery_types()
+    if _V2_RECOVERY_FACADE is None:
+        _V2_RECOVERY_FACADE = RecoveryFacade(
+            RecoveryBackend(
+                adapter_call=invoke_adapter,
+                bridge_call=invoke_eventkit_bridge,
+                receipt_validator=validate_adapter_receipt,
+            )
+        )
+    return _V2_RECOVERY_FACADE
 
 
 def _v2_diagnostics_facade() -> DiagnosticsFacade:
@@ -971,22 +1018,158 @@ def rate_limit_allows_call() -> bool:
     return True
 
 
+_SUMMARY_TARGET_FIELDS = frozenset(
+    {
+        "account_id",
+        "attachment_id",
+        "calendar_id",
+        "id",
+        "list_id",
+        "new_attachment_id",
+        "old_attachment_id",
+        "reminder_id",
+        "section_id",
+        "source_attachment_id",
+        "source_id",
+        "source_reminder_id",
+    }
+)
+_SUMMARY_READ_ONLY_TOOLS = V2_PUBLIC_TOOLS - V2_MUTATION_TOOLS
+
+
+def _content_free_target(value: Any) -> dict[str, Any]:
+    """Project only stable target identifiers into the human text summary."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(name): item
+        for name, item in value.items()
+        if name in _SUMMARY_TARGET_FIELDS
+        and (item is None or isinstance(item, (str, int, bool)))
+    }
+
+
+def _summary_write_state(
+    status: Any,
+    verification: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    if verification is None:
+        return False, "not_applicable"
+    write_performed = verification.get("write_performed")
+    if write_performed is False:
+        return False, "not_mutated"
+    if status == "verified" and write_performed is True:
+        return True, "committed_and_verified"
+    if status == "committed_verification_pending" and write_performed is True:
+        return True, "committed_unverified"
+    if status == "partial_success":
+        return True, "partial"
+    if status == "failed_manual_repair_required" and write_performed is True:
+        return True, "committed_manual_repair_required"
+    if status == "failed_manual_repair_required":
+        return True, "committed_or_unknown"
+    return True, "unknown"
+
+
+def _summary_evidence_scope(
+    verification: Mapping[str, Any] | None,
+) -> str:
+    if verification is None:
+        return "bounded_public_read"
+    if verification.get("write_performed") is False:
+        return "affirmed_no_write"
+    if (
+        verification.get("state") == "read_back"
+        and verification.get("final_read") is True
+        and verification.get("matched") is True
+    ):
+        return "matched_exact_final_read"
+    if verification.get("final_read") is True:
+        return "partial_or_unmatched_final_read"
+    return "no_final_read"
+
+
+def _summary_next_read_only_action(
+    payload: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate = payload.get("next_action")
+    if isinstance(candidate, Mapping) and candidate.get("tool") in _SUMMARY_READ_ONLY_TOOLS:
+        return {
+            "kind": candidate.get("kind"),
+            "tool": candidate.get("tool"),
+            "retry_original_once": False,
+        }
+
+    operation = str(payload.get("operation") or "")
+    if isinstance(target.get("reminder_id"), str):
+        tool = "read_reminder"
+    elif isinstance(target.get("list_id"), str):
+        tool = (
+            "inspect_reminder_native"
+            if "section" in operation
+            else "fetch_reminders"
+        )
+    elif isinstance(target.get("source_id"), str):
+        tool = "list_reminder_lists"
+    else:
+        tool = "diagnose_reminders"
+    return {"kind": "fresh_read", "tool": tool, "retry_original_once": False}
+
+
 def _tool_result_summary(payload: Mapping[str, Any]) -> str:
+    status = payload.get("status")
+    data = payload.get("data")
+    diagnostic_attention = (
+        isinstance(data, Mapping)
+        and data.get("overall") in {"blocked", "degraded"}
+    )
+    needs_attention = (
+        status not in {"verified", "unchanged"}
+        or payload.get("ok") is not True
+        or isinstance(payload.get("error"), Mapping)
+        or diagnostic_attention
+    )
+    verification_raw = payload.get("verification")
+    verification = (
+        verification_raw if isinstance(verification_raw, Mapping) else None
+    )
+    may_have_mutated, write_state = _summary_write_state(status, verification)
+    target = _content_free_target(payload.get("target"))
     summary: dict[str, Any] = {
+        "outcome": "attention_required" if needs_attention else str(status),
         "operation": payload.get("operation"),
         "status": payload.get("status"),
         "ok": payload.get("ok"),
+        "needs_attention": needs_attention,
+        "may_have_mutated": may_have_mutated,
+        "write_state": write_state,
+        "evidence_scope": _summary_evidence_scope(verification),
+        "next_read_only_action": (
+            _summary_next_read_only_action(payload, target)
+            if needs_attention
+            else None
+        ),
     }
-    data = payload.get("data")
+    if target:
+        summary["target"] = target
+    if verification is not None:
+        summary["verification"] = {
+            name: verification.get(name)
+            for name in ("state", "write_performed", "final_read", "matched")
+            if name in verification
+        }
     if isinstance(data, Mapping):
-        for name in ("returned", "truncated", "has_more"):
+        for name in ("returned", "truncated", "has_more", "overall", "scope"):
             if name in data:
                 summary[name] = data[name]
     error = payload.get("error")
     if isinstance(error, Mapping):
         summary["error"] = {
             "code": error.get("code"),
-            "message": str(error.get("message") or "")[:500],
+            "reason_code": error.get("reason_code"),
+            "retryable": error.get("retryable"),
         }
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
@@ -1028,6 +1211,9 @@ _V2_NATIVE_TOOLS = frozenset(
     }
 )
 _V2_DIAGNOSTIC_TOOLS = frozenset({"diagnose_reminders"})
+_V2_RECOVERY_TOOLS = frozenset(
+    {"inspect_recently_deleted", "recover_deleted_reminder"}
+)
 
 
 def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
@@ -1053,6 +1239,7 @@ def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
                 "attach_url",
                 "replace_image",
                 "replace_url",
+                "copy_image",
                 "delete",
             }
             else "change_reminder_attachment.attach_image"
@@ -1081,6 +1268,8 @@ def _v2_public_target(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]
         return {"source_id": arguments.get("source_id"), "list_id": None}
     if name == "create_reminder_section":
         return {"list_id": arguments.get("list_id"), "section_id": None}
+    if name == "recover_deleted_reminder":
+        return {"list_id": arguments.get("list_id")}
     return {}
 
 
@@ -1277,6 +1466,8 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
                     facade = _v2_core_facade()
                 elif name in _V2_NATIVE_TOOLS:
                     facade = _v2_native_facade()
+                elif name in _V2_RECOVERY_TOOLS:
+                    facade = _v2_recovery_facade()
                 elif name in _V2_DIAGNOSTIC_TOOLS:
                     facade = _v2_diagnostics_facade()
                 else:

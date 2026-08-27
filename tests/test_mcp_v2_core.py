@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from mcp.v2_core import EventKitReply, V2CoreFacade
+from mcp.v2_core import EventKitReply, V2CoreFacade, _change_reminder
 from mcp.v2_contract import validate_public_result
 
 
@@ -113,6 +113,34 @@ def read_receipt(reminder: Mapping[str, Any]) -> dict[str, Any]:
         "status": "verified",
         "operation": "read_reminder",
         "data": {"reminder": copy.deepcopy(dict(reminder))},
+    }
+
+
+def fetch_receipt(
+    items: list[Mapping[str, Any]],
+    *,
+    total_matched: int,
+    offset: int,
+    has_more: bool,
+    next_offset: int | None,
+    snapshot_fingerprint: str | None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "items": [copy.deepcopy(dict(item)) for item in items],
+        "total_matched": total_matched,
+        "limit": len(items),
+        "offset": offset,
+        "has_more": has_more,
+        "next_offset": next_offset,
+    }
+    if snapshot_fingerprint is not None:
+        data["snapshot_fingerprint"] = snapshot_fingerprint
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "status": "verified",
+        "operation": "fetch_reminders",
+        "data": data,
     }
 
 
@@ -934,6 +962,113 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertNotIn("external_id", summary)
         self.assertNotIn("created", summary)
 
+    def test_fetch_cursor_keeps_the_ordered_snapshot_private_across_pages(self) -> None:
+        eventkit = FakeEventKit()
+        snapshot = "a" * 64
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [native_reminder()],
+                total_matched=2,
+                offset=0,
+                has_more=True,
+                next_offset=1,
+                snapshot_fingerprint=snapshot,
+            ),
+        )
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [native_reminder(reminder_id="REMINDER-2", title="Second")],
+                total_matched=2,
+                offset=1,
+                has_more=False,
+                next_offset=None,
+                snapshot_fingerprint=snapshot,
+            ),
+        )
+        subject = facade(eventkit)
+        filters = {"list_ids": ["LIST-1"], "limit": 1, "sort": "title"}
+
+        first = subject.fetch_reminders(filters)
+        cursor = first["data"]["next_cursor"]
+        second = subject.fetch_reminders({**filters, "cursor": cursor})
+
+        self.assertTrue(first["ok"])
+        self.assertIsInstance(cursor, str)
+        self.assertNotIn("snapshot_fingerprint", repr(first))
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["data"]["items"][0]["id"], "REMINDER-2")
+        self.assertIsNone(second["data"]["next_cursor"])
+        self.assertEqual(eventkit.calls[1][1]["offset"], 1)
+        self.assertNotIn("snapshot_fingerprint", repr(second))
+
+    def test_fetch_page_two_fails_when_ordered_snapshot_changed(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [native_reminder()],
+                total_matched=2,
+                offset=0,
+                has_more=True,
+                next_offset=1,
+                snapshot_fingerprint="a" * 64,
+            ),
+        )
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [native_reminder(reminder_id="REMINDER-3", title="Changed")],
+                total_matched=2,
+                offset=1,
+                has_more=False,
+                next_offset=None,
+                snapshot_fingerprint="b" * 64,
+            ),
+        )
+        subject = facade(eventkit)
+        filters = {"list_ids": ["LIST-1"], "limit": 1, "sort": "title"}
+        first = subject.fetch_reminders(filters)
+
+        result = subject.fetch_reminders(
+            {**filters, "cursor": first["data"]["next_cursor"]}
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["code"], "concurrent_modification")
+        self.assertEqual(result["error"]["reason_code"], "pagination_snapshot_stale")
+        self.assertIn(
+            "Restart fetch_reminders without a cursor",
+            result["error"]["message"],
+        )
+        self.assertNotIn("data", result)
+        self.assertNotIn("next_action", result)
+        validate_public_result("fetch_reminders", result)
+
+    def test_fetch_does_not_issue_a_cursor_without_a_snapshot_fingerprint(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [native_reminder()],
+                total_matched=2,
+                offset=0,
+                has_more=True,
+                next_offset=1,
+                snapshot_fingerprint=None,
+            ),
+        )
+
+        result = facade(eventkit).fetch_reminders(
+            {"list_ids": ["LIST-1"], "limit": 1}
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["reason_code"], "missing_pagination_snapshot")
+        self.assertNotIn("data", result)
+
     def test_change_uses_core_reference_guard_and_returns_the_final_exact_read(self) -> None:
         eventkit = FakeEventKit()
         before = native_reminder()
@@ -993,6 +1128,30 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
         self.assertEqual(result["warnings"][0]["code"], "native_receipt_preserved")
         self.assertNotIn("calendar_id", repr(result))
+
+    def test_change_projection_strips_private_url_attachment_fields(self) -> None:
+        result = _change_reminder(
+            {
+                "id": "REMINDER-1",
+                "url_attachment": {
+                    "id": "ATTACHMENT-URL-1",
+                    "type": "url",
+                    "url": "https://example.com/item",
+                    "pk": 99,
+                    "database": "/private/store.sqlite",
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["url_attachment"],
+            {
+                "id": "ATTACHMENT-URL-1",
+                "type": "url",
+                "url": "https://example.com/item",
+            },
+        )
+        self.assertNotIn("/private/store.sqlite", repr(result))
 
     def test_change_move_translates_public_list_id_only_at_the_eventkit_seam(self) -> None:
         eventkit = FakeEventKit()

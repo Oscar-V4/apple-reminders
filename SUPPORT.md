@@ -18,5 +18,8 @@ Never attach a Reminders database, container archive, diagnostic bundle, reminde
 ## Supported scope
 
 The project supports local Codex use on macOS. It does not promise ChatGPT web, Codex cloud, Windows, Linux, automatic restore, direct iPhone inspection, or compatibility with every future private Reminders schema.
+Exact user-directed recovery from Recently Deleted is available only within its
+documented 30-day, same-account, compatible-local-build boundary; it is not an
+automatic or broad backup restoration service.
 
 Feature requests should describe the recognizable user goal and expected result. Requests for raw database mutation, silent destructive cleanup, or weakened concurrency and verification guards are outside the supported product direction.

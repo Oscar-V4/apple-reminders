@@ -43,6 +43,7 @@ class NativeBackend:
         "add_reminder_tag": "add_tag",
         "remove_reminder_tag": "remove_tag",
         "attach_image_to_reminder": "attach_image",
+        "copy_image_attachment": "copy_image",
         "attach_url_to_reminder": "attach_url",
         "replace_reminder_attachment": "replace_attachment",
         "delete_reminder_attachment": "delete_attachment",
@@ -413,3 +414,265 @@ class NativeBackend:
         else:
             mutation_state = "unknown"
         return MutationOutcome(receipt=payload, mutation_state=mutation_state)
+
+    @staticmethod
+    def _exact_image_attachment(
+        payload: dict[str, Any],
+        attachment_id: str,
+    ) -> dict[str, Any]:
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, list) or payload.get("truncated") is True:
+            raise RuntimeError("The exact source attachment set was not bounded")
+        matches = [
+            item
+            for item in attachments
+            if isinstance(item, dict) and item.get("id") == attachment_id
+        ]
+        if len(matches) != 1 or matches[0].get("type") != "image":
+            raise RuntimeError("The exact active source image attachment was not found")
+        return copy.deepcopy(matches[0])
+
+    @staticmethod
+    def _copy_attachment_identity(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: value.get(name)
+            for name in (
+                "id",
+                "type",
+                "uti",
+                "filename",
+                "sha512",
+                "file_size",
+                "width",
+                "height",
+                "marked_for_deletion",
+            )
+        }
+
+    @staticmethod
+    def _copy_content_identity(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: value.get(name)
+            for name in ("type", "sha512", "file_size", "width", "height")
+        }
+
+    def copy_image(
+        self,
+        destination_guard: Guard,
+        source_guard: Guard,
+        command: str,
+        arguments: dict[str, Any],
+    ) -> MutationOutcome:
+        """Copy one exact active image under independent source/destination Guards."""
+
+        if command != "copy_image":
+            raise RuntimeError(f"Unsupported guarded copy mutation: {command}")
+        attachment_id = arguments.get("attachment_id")
+        idempotency_key = arguments.get("idempotency_key")
+        if (
+            arguments.get("source_reminder_id") != source_guard.reminder_id
+            or source_guard.reminder_id == destination_guard.reminder_id
+            or not isinstance(attachment_id, str)
+            or not attachment_id
+            or not isinstance(idempotency_key, str)
+            or not idempotency_key
+        ):
+            return self._failure_outcome(
+                destination_guard,
+                command,
+                code="invalid_input",
+                message="The guarded copy identities were incomplete or inconsistent.",
+            )
+
+        try:
+            self._revalidate_guard(destination_guard)
+            self._revalidate_guard(source_guard)
+            source_before = self._private_attachments(
+                source_guard.reminder_id,
+                limit=200,
+                attachment_type="image",
+            )
+            destination_before = self._private_attachments(
+                destination_guard.reminder_id,
+                limit=1,
+            )
+            source_attachment = self._exact_image_attachment(
+                source_before,
+                attachment_id,
+            )
+        except ReferenceRejected as exc:
+            return self._failure_outcome(
+                destination_guard,
+                command,
+                code="concurrent_modification",
+                message=str(exc),
+            )
+        except Exception as exc:
+            return self._failure_outcome(
+                destination_guard,
+                command,
+                code="sync_pending",
+                message=f"The guarded copy preflight failed ({type(exc).__name__}).",
+            )
+
+        source_version = source_before.get("reminder_version")
+        destination_version = destination_before.get("reminder_version")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in (source_version, destination_version)
+        ):
+            return self._failure_outcome(
+                destination_guard,
+                command,
+                code="schema_mismatch",
+                message="Both private Reminder revisions are required for image copy.",
+            )
+
+        routed_arguments = {
+            "source_reminder_id": source_guard.reminder_id,
+            "reminder_id": destination_guard.reminder_id,
+            "attachment_id": attachment_id,
+            "if_source_version": source_version,
+            "if_version": destination_version,
+            "idempotency_key": idempotency_key,
+        }
+        payload, is_error = self._adapter_call(
+            self._build_adapter_argv("copy_image_attachment", routed_arguments)
+        )
+        status = payload.get("status")
+        if (
+            is_error
+            and status == "failed_no_mutation"
+            and payload.get("operation") == "copy_image_attachment"
+        ):
+            # The adapter's generic CLI error boundary reports the command name
+            # when copy preflight fails before dispatch. Normalize that one
+            # proven-no-write envelope to the adapter operation expected by the
+            # guarded backend; post-dispatch or successful receipts must still
+            # name copy_image exactly.
+            payload = copy.deepcopy(payload)
+            payload["operation"] = self._EXPECTED_OPERATIONS[
+                "copy_image_attachment"
+            ]
+        if status not in SUCCESS_RECEIPT_STATUSES | FAILURE_RECEIPT_STATUSES:
+            return self._pending_outcome(
+                destination_guard,
+                command,
+                reason_code="invalid_copy_image_receipt",
+                message="The image-copy result could not be validated.",
+            )
+        receipt_error = self._receipt_validator(
+            payload,
+            expected_operation=self._EXPECTED_OPERATIONS["copy_image_attachment"],
+        )
+        if receipt_error:
+            return self._pending_outcome(
+                destination_guard,
+                command,
+                reason_code="invalid_copy_image_receipt",
+                message=receipt_error,
+            )
+        if is_error and status not in {
+            "failed_no_mutation",
+            "failed_manual_repair_required",
+        }:
+            return self._pending_outcome(
+                destination_guard,
+                command,
+                reason_code="copy_image_failed_after_dispatch",
+                message="The image copy may have committed to the destination.",
+            )
+        if status not in {"verified", "unchanged"}:
+            mutation_state = (
+                "not_mutated" if status == "failed_no_mutation" else "unknown"
+            )
+            return MutationOutcome(receipt=payload, mutation_state=mutation_state)
+
+        target = payload.get("target")
+        new_attachment_id = (
+            target.get("attachment_id") if isinstance(target, dict) else None
+        )
+        if (
+            not isinstance(target, dict)
+            or target.get("source_reminder_id") != source_guard.reminder_id
+            or target.get("reminder_id") != destination_guard.reminder_id
+            or target.get("source_attachment_id") != attachment_id
+            or not isinstance(new_attachment_id, str)
+            or not new_attachment_id
+        ):
+            return self._pending_outcome(
+                destination_guard,
+                command,
+                reason_code="copy_image_target_mismatch",
+                message="The committed copy receipt did not preserve exact identities.",
+            )
+
+        try:
+            source_after = self._private_attachments(
+                source_guard.reminder_id,
+                limit=200,
+                attachment_type="image",
+            )
+            destination_after = self._private_attachments(
+                destination_guard.reminder_id,
+                limit=200,
+                attachment_type="image",
+            )
+            source_attachment_after = self._exact_image_attachment(
+                source_after,
+                attachment_id,
+            )
+            destination_attachment = self._exact_image_attachment(
+                destination_after,
+                new_attachment_id,
+            )
+            source_unchanged = (
+                source_after.get("reminder_version") == source_version
+                and self._copy_attachment_identity(source_attachment_after)
+                == self._copy_attachment_identity(source_attachment)
+            )
+            if not source_unchanged:
+                raise RuntimeError("The source changed during image copy")
+            if self._copy_content_identity(destination_attachment) != self._copy_content_identity(
+                source_attachment
+            ):
+                raise RuntimeError("The destination image content differs from the source")
+        except Exception:
+            return self._pending_outcome(
+                destination_guard,
+                command,
+                reason_code="copy_image_final_read_failed",
+                message=(
+                    "The destination may contain the copied image, but exact source and "
+                    "destination read-back did not complete."
+                ),
+            )
+
+        payload["after"] = {
+            "reminder": {"id": destination_guard.reminder_id},
+            "attachments": destination_after.get("attachments", []),
+        }
+        verification = payload.setdefault("verification", {})
+        verification.update(
+            {
+                "state": "read_back",
+                "write_performed": status == "verified",
+                "final_read": True,
+                "matched": True,
+                "source_unchanged": True,
+                "destination_attachment_active": True,
+            }
+        )
+        payload.setdefault("recovery", {}).setdefault(
+            "automatic_retry_safe", status == "unchanged"
+        )
+        payload["target"] = {
+            "source_reminder_id": source_guard.reminder_id,
+            "reminder_id": destination_guard.reminder_id,
+            "source_attachment_id": attachment_id,
+            "attachment_id": destination_attachment["id"],
+        }
+        return MutationOutcome(
+            receipt=payload,
+            mutation_state="committed" if status == "verified" else "not_mutated",
+        )

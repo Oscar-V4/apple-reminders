@@ -37,6 +37,9 @@ class Backend:
         self.apply_payloads: dict[str, dict[str, Any]] = {}
         self.native_reads: list[tuple[Guard, dict[str, Any]]] = []
         self.native_mutations: list[tuple[Guard, str, dict[str, Any]]] = []
+        self.native_copy_mutations: list[
+            tuple[Guard, Guard, str, dict[str, Any]]
+        ] = []
         self.native_read_payload: dict[str, Any] = {}
         self.native_mutation_payloads: dict[str, Any] = {}
         self.native_mutation_errors: dict[str, Exception] = {}
@@ -64,6 +67,25 @@ class Backend:
             raise self.native_mutation_errors[command]
         return deepcopy(self.native_mutation_payloads[command])
 
+    def native_copy_mutation(
+        self,
+        destination_guard: Guard,
+        source_guard: Guard,
+        command: str,
+        arguments: dict[str, Any],
+    ) -> MutationOutcome:
+        self.native_copy_mutations.append(
+            (
+                destination_guard,
+                source_guard,
+                command,
+                deepcopy(arguments),
+            )
+        )
+        if command in self.native_mutation_errors:
+            raise self.native_mutation_errors[command]
+        return deepcopy(self.native_mutation_payloads[command])
+
 
 class References:
     def __init__(self) -> None:
@@ -77,12 +99,14 @@ class References:
         self.fresh_reads: list[str] = []
         self.reject = False
         self.fail_fresh_read = False
+        self.guards: dict[str, Guard] = {}
+        self.rejections: set[str] = set()
 
     def revalidate_reference(self, reference: str) -> Guard:
         self.resolved.append(reference)
-        if self.reject:
+        if self.reject or reference in self.rejections:
             raise ReferenceRejected("concurrent_modification", "Read the reminder again")
-        return self.guard
+        return self.guards.get(reference, self.guard)
 
     def invalidate_reference(self, reference: str) -> None:
         self.invalidated.append(reference)
@@ -130,6 +154,7 @@ class NativeFacadeTests(unittest.TestCase):
             references=references or References(),
             native_read=backend.native_read,
             native_mutation=backend.native_mutation,
+            native_copy_mutation=backend.native_copy_mutation,
         )
 
     def test_create_section_preserves_exact_list_id_and_receipt(self) -> None:
@@ -861,6 +886,182 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertEqual(result["operation"], "change_reminder_attachment.attach_url")
         self.assertEqual(result["after"]["attachments"][0]["id"], "ATTACHMENT-1")
         validate_public_result("change_reminder_attachment", result, "committed")
+
+    def test_copy_image_revalidates_two_exact_references_and_returns_destination_only(
+        self,
+    ) -> None:
+        backend = Backend()
+        references = References()
+        destination_reference = f"rev1.{'d' * 32}"
+        source_reference = f"rev1.{'s' * 32}"
+        source_guard = Guard(
+            reminder_id="REMINDER-SOURCE",
+            store_identity="STORE-SOURCE",
+            public_concurrency_value="2026-08-25T00:00:00Z",
+        )
+        references.guards[source_reference] = source_guard
+        receipt = mutation_payload(
+            "copy_image",
+            after={
+                "reminder": {"id": "REMINDER-1"},
+                "attachments": [
+                    {
+                        "id": "ATTACHMENT-NEW",
+                        "type": "image",
+                        "filename": "copied.png",
+                        "sync": {"mobile_visible_likely": True},
+                    }
+                ],
+            },
+        )
+        receipt["target"] = {
+            "source_reminder_id": "REMINDER-SOURCE",
+            "reminder_id": "REMINDER-1",
+            "source_attachment_id": "ATTACHMENT-SOURCE",
+            "attachment_id": "ATTACHMENT-NEW",
+        }
+        backend.native_mutation_payloads["copy_image"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="committed",
+        )
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": destination_reference,
+                "action": {
+                    "kind": "copy_image",
+                    "source_reference": source_reference,
+                    "attachment_id": "ATTACHMENT-SOURCE",
+                    "idempotency_key": "copy-image-contract",
+                },
+            },
+        )
+
+        self.assertEqual(references.resolved, [destination_reference, source_reference])
+        self.assertEqual(
+            backend.native_copy_mutations,
+            [
+                (
+                    references.guard,
+                    source_guard,
+                    "copy_image",
+                    {
+                        "attachment_id": "ATTACHMENT-SOURCE",
+                        "idempotency_key": "copy-image-contract",
+                        "source_reminder_id": "REMINDER-SOURCE",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(
+            references.invalidated,
+            [destination_reference, source_reference],
+        )
+        self.assertEqual(references.fresh_reads, ["REMINDER-1"])
+        self.assertEqual(
+            result["target"],
+            {
+                "source_reminder_id": "REMINDER-SOURCE",
+                "reminder_id": "REMINDER-1",
+                "source_attachment_id": "ATTACHMENT-SOURCE",
+                "attachment_id": "ATTACHMENT-NEW",
+            },
+        )
+        self.assertEqual(result["after"]["reference"], f"rev1.{'n' * 32}")
+        self.assertNotIn("image_path", str(result))
+        self.assertNotIn("source_reference", str(result))
+        validate_public_result("change_reminder_attachment", result, "committed")
+
+    def test_copy_image_stale_source_fails_before_native_dispatch(self) -> None:
+        backend = Backend()
+        references = References()
+        destination_reference = f"rev1.{'d' * 32}"
+        source_reference = f"rev1.{'s' * 32}"
+        references.rejections.add(source_reference)
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": destination_reference,
+                "action": {
+                    "kind": "copy_image",
+                    "source_reference": source_reference,
+                    "attachment_id": "ATTACHMENT-SOURCE",
+                    "idempotency_key": "copy-image-stale-source",
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["code"], "concurrent_modification")
+        self.assertEqual(backend.native_copy_mutations, [])
+        self.assertEqual(references.fresh_reads, [])
+        validate_public_result("change_reminder_attachment", result, "not_mutated")
+
+    def test_copy_image_pending_never_issues_a_destination_reference(self) -> None:
+        backend = Backend()
+        references = References()
+        destination_reference = f"rev1.{'d' * 32}"
+        source_reference = f"rev1.{'s' * 32}"
+        references.guards[source_reference] = Guard(
+            reminder_id="REMINDER-SOURCE",
+            store_identity="STORE-SOURCE",
+            public_concurrency_value="2026-08-25T00:00:00Z",
+        )
+        receipt = mutation_payload(
+            "copy_image",
+            status="committed_verification_pending",
+        )
+        receipt["warnings"] = [
+            {"code": "verification_pending", "message": "Read both reminders."}
+        ]
+        receipt["error"] = {
+            "code": "sync_pending",
+            "reason_code": "copy_image_final_read_failed",
+            "message": "Read both reminders.",
+            "retryable": False,
+        }
+        receipt["verification"] = {
+            "state": "pending",
+            "write_performed": None,
+            "final_read": False,
+        }
+        receipt["recovery"] = {
+            "semantics": "read_both_reminders_before_retry",
+            "automatic_retry_safe": False,
+        }
+        backend.native_mutation_payloads["copy_image"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="unknown",
+        )
+        facade = self.make_facade(backend, references=references)
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": destination_reference,
+                "action": {
+                    "kind": "copy_image",
+                    "source_reference": source_reference,
+                    "attachment_id": "ATTACHMENT-SOURCE",
+                    "idempotency_key": "copy-image-pending",
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["after"])
+        self.assertNotIn("rev1.", str(result))
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+        self.assertEqual(references.fresh_reads, [])
+        self.assertEqual(
+            references.invalidated,
+            [destination_reference, source_reference],
+        )
+        validate_public_result("change_reminder_attachment", result, "unknown")
 
     def test_native_concurrent_receipt_points_to_exact_reminder_read(self) -> None:
         backend = Backend()

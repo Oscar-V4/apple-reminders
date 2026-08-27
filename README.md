@@ -12,7 +12,7 @@ Try prompts such as:
 - `쇼핑 목록에 우유 사기를 추가해줘.`
 - `이 리마인더를 완료하고 다시 읽어서 확인해줘.`
 
-This repository hosts the 0.3 public beta. The MCP and adapters run locally,
+This repository hosts the Apple Reminders community plugin. The MCP and adapters run locally,
 but results are returned to Codex as described in [PRIVACY.md](PRIVACY.md).
 This is an independent community project, not an Apple or OpenAI product or
 endorsed integration.
@@ -48,10 +48,10 @@ to content-free packaging diagnosis instead of asking for a blind retry.
 
 ## Quick Start
 
-Install the pinned 0.3.1 repo-marketplace release:
+Install the pinned 0.4.0 repo-marketplace release:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.1
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -62,7 +62,7 @@ Start a new Codex task so that it loads the installed skills and tools, then try
 쇼핑 목록에 우유 사기를 추가해줘.
 ```
 
-This beta has passed current-Mac live Reminders and iCloud attachment checks,
+This release has passed current-Mac live Reminders and iCloud attachment checks,
 but first-use permission behavior on a genuinely fresh macOS permission subject
 remains follow-up validation. Report any unexpected permission prompt or
 reauthorization requirement through the repository issue tracker.
@@ -81,18 +81,19 @@ require Doctor or private-interface setup.
 
 ## Public Interface
 
-The public beta exposes one static 13-tool Interface. It is intentionally
+The plugin exposes one static 15-tool Interface. It is intentionally
 smaller than the internal development surface:
 
 | Module | Public tools |
 |---|---|
 | Core | `request_reminders_access`, `list_reminder_lists`, `fetch_reminders`, `read_reminder`, `create_reminder`, `change_reminder`, `delete_reminder`, `ensure_reminder_list` |
 | Native Extension | `inspect_reminder_native`, `create_reminder_section`, `organize_reminder`, `change_reminder_attachment` |
+| Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
 | Diagnostics | `diagnose_reminders` |
 
 Core reminder work does not depend on Native Extension availability. Unused-tag
-cleanup, attachment repair, backup/Snapshot operations, privacy-log purge, flag
-mutation, and native `show_reminder` handoff are withheld from the 0.3 public
+cleanup, raw attachment export, attachment repair, backup/Snapshot operations,
+privacy-log purge, flag mutation, and native `show_reminder` handoff are withheld from the public
 Interface. Their lower-level implementations may remain for development and
 compatibility, but skills and public MCP callers must not route to them.
 
@@ -111,6 +112,9 @@ found in actual use:
 - URL create/change as one hybrid operation: EventKit metadata, the visible
   native URL attachment, and a final exact EventKit read;
 - native ReminderKit image attachment and section saves with CloudKit evidence;
+- exact Recently Deleted recovery through one-use `del1` References;
+- byte-verified cross-Reminder image copy without private-path disclosure;
+- snapshot-bound pagination that rejects changed membership or revisions;
 - exact-list section scope and fresh-version tag changes;
 - stale-write rejection and explicit unknown-outcome handling under
   concurrency;
@@ -150,6 +154,7 @@ reached every participant in a shared list.
 | Local MCP | Closed input schemas, routing, concise text, and validated structured results | Runs with the Codex host user's local process permissions |
 | Core Module | EventKit-backed list/reminder operations and opaque References | Public API behavior is still account-, permission-, and sync-dependent |
 | Native Extension Module | Sections, tags, and native image/URL attachments | Uses version-sensitive private interfaces and exact read-back gates |
+| Recovery Module | Bounded Recently Deleted reads and exact one-item recovery | macOS-only, private-framework, same-account, and 30-day retention boundary |
 | Diagnostics Module | Content-free targeted diagnosis | Does not prove write semantics, iCloud convergence, or device visibility |
 
 The MCP can make changes that sync through the user's Apple account and affect
@@ -274,6 +279,8 @@ clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
   -fsyntax-only plugins/apple-reminders/scripts/remkit_attach_image.m
 clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
   -fsyntax-only plugins/apple-reminders/scripts/reminders_eventkit.m
+clang -x objective-c -fobjc-arc -framework Foundation \
+  -fsyntax-only plugins/apple-reminders/scripts/remkit_recover.m
 plutil -lint plugins/apple-reminders/scripts/eventkit_bridge_info.plist
 ```
 
@@ -342,9 +349,10 @@ Internal or development operations can create support data under:
 - `~/Library/Caches/apple-reminders-codex/`
 
 These locations may contain sensitive identifiers, cached metadata, operation
-records, compiled helpers, capability records, or recovery snapshots. Backup,
-restore, repair, and log-purge operations are not public 0.3 tools; no automatic
-restore is promised. See [PRIVACY.md](PRIVACY.md#user-control) before inspecting,
+records, compiled helpers, capability records, or recovery snapshots. Broad
+backup restore, repair, and log-purge operations are not public tools;
+Recently Deleted recovery is exact and user-directed, never automatic. See
+[PRIVACY.md](PRIVACY.md#user-control) before inspecting,
 sharing, or removing support data.
 
 To remove local support data safely, first remove or stop the plugin, start a

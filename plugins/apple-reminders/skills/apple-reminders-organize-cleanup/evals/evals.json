@@ -15,7 +15,7 @@
       "id": 2,
       "category": "direct",
       "prompt": "안 쓰는 태그 정리해줘.",
-      "expected_output": "Runs a bounded tag inventory, explains that unused-label row deletion is withheld from public 0.3, and presents a read-only proposal without invoking adapter or database maintenance writes.",
+      "expected_output": "Runs a bounded tag inventory, explains that unused-label row deletion is withheld, and presents a read-only proposal without invoking adapter or database maintenance writes.",
       "assertions": [
         "Presents the observed bounded tag set.",
         "Does not invoke an unexposed cleanup or backup command."
@@ -59,6 +59,26 @@
       "assertions": [
         "Does not run a delete batch.",
         "Does not use title-only matching."
+      ]
+    },
+    {
+      "id": 7,
+      "category": "direct",
+      "prompt": "최근 삭제된 항목 중 정확히 이 네 개를 원래 계정의 작업 목록으로 복구해줘.",
+      "expected_output": "Uses bounded Recently Deleted discovery, inspects each exact ID just in time for a fresh del1, recovers one at a time into an exact compatible same-account list with unique idempotency keys, and halts on the first non-verified result.",
+      "assertions": [
+        "Does not recover from a list result or title-only match.",
+        "Reports the local macOS private-framework and 30-day retention boundary."
+      ]
+    },
+    {
+      "id": 8,
+      "category": "direct",
+      "prompt": "화면 맨 위 4개를 사진 하나로 모은 다음 정리해줘.",
+      "expected_output": "Determines whether top means directly observed current UI order or an explicit bounded API snapshot with a supported sort, records exact IDs and the evidence basis, verifies all destination image copies before any source deletion, and then applies fresh-reference deletes one at a time within the approved scope.",
+      "assertions": [
+        "Does not call API order the current UI order.",
+        "Does not delete a source while any destination dependency is unresolved."
       ]
     }
   ]

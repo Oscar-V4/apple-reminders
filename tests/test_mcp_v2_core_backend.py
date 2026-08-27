@@ -217,7 +217,11 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             [
                 (
                     "list_reminder_attachments",
-                    {"reminder_id": REMINDER_ID, "limit": 1},
+                    {
+                        "reminder_id": REMINDER_ID,
+                        "attachment_type": "url",
+                        "limit": 200,
+                    },
                 ),
                 (
                     "attach_url_to_reminder",
@@ -229,6 +233,370 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_url_patch_replaces_single_attachment_matching_previous_metadata(self) -> None:
+        old_url = "https://example.com/old"
+        new_url = "https://example.com/new"
+        eventkit_receipt = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "update_reminder",
+            "operation_id": "33333333-3333-4333-8333-333333333333",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": old_url},
+            "after": {"id": REMINDER_ID, "url": new_url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "eventkit_native_api",
+                "automatic_retry_safe": False,
+            },
+        }
+        final_read = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": new_url,
+                    "calendar_id": "LIST-1",
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        bridge_call = mock.Mock(
+            side_effect=[(eventkit_receipt, False), (final_read, False)]
+        )
+        adapter_call = mock.Mock(
+            side_effect=[
+                (
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 7,
+                        "attachments": [
+                            {"id": "ATTACHMENT-A", "type": "url", "url": old_url},
+                            {
+                                "id": "UNRELATED",
+                                "type": "url",
+                                "url": "https://example.com/unrelated",
+                            },
+                        ],
+                        "truncated": False,
+                    },
+                    False,
+                ),
+                (
+                    {
+                        "ok": True,
+                        "status": "verified",
+                        "operation": "replace_attachment",
+                        "operation_id": "44444444-4444-4444-8444-444444444444",
+                        "backend": "sqlite_private",
+                        "target": {
+                            "reminder_id": REMINDER_ID,
+                            "attachment_id": "ATTACHMENT-B",
+                        },
+                        "before": {},
+                        "after": {
+                            "attachment": {
+                                "id": "ATTACHMENT-B",
+                                "type": "url",
+                                "url": new_url,
+                            }
+                        },
+                        "verification": {"attachment_active": True},
+                        "recovery": {"semantics": "replace_previous_attachment"},
+                    },
+                    False,
+                ),
+            ]
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def build_argv(tool_name: str, arguments: dict[str, Any]) -> list[str]:
+            argv_calls.append((tool_name, copy.deepcopy(arguments)))
+            return [tool_name]
+
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=build_argv,
+        )
+
+        reply = backend.invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": new_url},
+            },
+            mutation=True,
+        )
+
+        self.assertEqual(reply.payload["status"], "verified")
+        self.assertEqual(reply.payload["after"]["url_attachment"]["url"], new_url)
+        replace_tool, replace_arguments = argv_calls[1]
+        self.assertEqual(replace_tool, "replace_reminder_attachment")
+        self.assertEqual(replace_arguments["attachment_id"], "ATTACHMENT-A")
+        self.assertEqual(replace_arguments["url"], new_url)
+        self.assertTrue(
+            replace_arguments["idempotency_key"].startswith("core-url-replace-")
+        )
+        self.assertNotIn("UNRELATED", repr(replace_arguments))
+
+    def test_url_patch_preserves_ambiguous_matching_attachments(self) -> None:
+        old_url = "https://example.com/old"
+        new_url = "https://example.com/new"
+        eventkit_receipt = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "update_reminder",
+            "operation_id": "55555555-5555-4555-8555-555555555555",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": old_url},
+            "after": {"id": REMINDER_ID, "url": new_url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "eventkit_native_api",
+                "automatic_retry_safe": False,
+            },
+        }
+        final_read = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": new_url,
+                    "calendar_id": "LIST-1",
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        bridge_call = mock.Mock(
+            side_effect=[(eventkit_receipt, False), (final_read, False)]
+        )
+        adapter_call = mock.Mock(
+            return_value=(
+                {
+                    "ok": True,
+                    "reminder_id": REMINDER_ID,
+                    "reminder_version": 7,
+                    "attachments": [
+                        {"id": "A-1", "type": "url", "url": old_url},
+                        {"id": "A-2", "type": "url", "url": old_url},
+                    ],
+                    "truncated": False,
+                },
+                False,
+            )
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def build_argv(tool_name: str, arguments: dict[str, Any]) -> list[str]:
+            argv_calls.append((tool_name, copy.deepcopy(arguments)))
+            return [tool_name]
+
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=build_argv,
+        )
+
+        reply = backend.invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": new_url},
+            },
+            mutation=True,
+        )
+
+        self.assertEqual(reply.payload["status"], "partial_success")
+        self.assertEqual(
+            reply.payload["error"]["reason_code"],
+            "ambiguous_visible_url_attachment",
+        )
+        self.assertEqual(len(adapter_call.call_args_list), 1)
+        self.assertEqual(
+            [name for name, _ in argv_calls], ["list_reminder_attachments"]
+        )
+        self.assertTrue(reply.payload["verification"]["final_read"])
+
+    def test_url_patch_reuses_one_existing_target_without_duplicate_write(self) -> None:
+        url = "https://example.com/already-visible"
+        existing = {"id": "ATTACHMENT-EXISTING", "type": "url", "url": url}
+        eventkit_receipt = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "operation_id": "66666666-6666-4666-8666-666666666666",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": url},
+            "after": {"id": REMINDER_ID, "url": url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": False,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": True,
+            },
+        }
+        final_read = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": url,
+                    "calendar_id": "LIST-1",
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        bridge_call = mock.Mock(
+            side_effect=[(eventkit_receipt, False), (final_read, False)]
+        )
+        adapter_call = mock.Mock(
+            return_value=(
+                {
+                    "ok": True,
+                    "reminder_id": REMINDER_ID,
+                    "reminder_version": 7,
+                    "attachments": [existing],
+                    "truncated": False,
+                },
+                False,
+            )
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def build_argv(tool_name: str, arguments: dict[str, Any]) -> list[str]:
+            argv_calls.append((tool_name, copy.deepcopy(arguments)))
+            return [tool_name]
+
+        reply = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=build_argv,
+        ).invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": url},
+            },
+            mutation=True,
+        )
+
+        self.assertEqual(reply.payload["status"], "unchanged")
+        self.assertEqual(reply.payload["after"]["url_attachment"], existing)
+        self.assertFalse(
+            reply.payload["verification"]["url_attachment"]["write_performed"]
+        )
+        self.assertEqual(
+            [name for name, _ in argv_calls], ["list_reminder_attachments"]
+        )
+        self.assertEqual(adapter_call.call_count, 1)
+
+    def test_url_retry_preserves_existing_a_and_b_instead_of_duplicating_b(self) -> None:
+        old_url = "https://example.com/old"
+        new_url = "https://example.com/new"
+        payload = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "update_reminder",
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": old_url},
+            "after": {"id": REMINDER_ID, "url": new_url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "eventkit_native_api",
+                "automatic_retry_safe": False,
+            },
+        }
+        final_read = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": new_url,
+                    "calendar_id": "LIST-1",
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        adapter_call = mock.Mock(
+            return_value=(
+                {
+                    "ok": True,
+                    "reminder_id": REMINDER_ID,
+                    "reminder_version": 7,
+                    "attachments": [
+                        {"id": "ATTACHMENT-A", "type": "url", "url": old_url},
+                        {"id": "ATTACHMENT-B", "type": "url", "url": new_url},
+                    ],
+                    "truncated": False,
+                },
+                False,
+            )
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+
+        result = make_backend(
+            bridge_call=mock.Mock(return_value=(final_read, False)),
+            adapter_call=adapter_call,
+            build_adapter_argv=lambda name, arguments: (
+                argv_calls.append((name, copy.deepcopy(arguments))) or [name]
+            ),
+        )._ensure_visible_url_attachment(copy.deepcopy(payload), new_url)
+
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "target_url_attachment_already_exists",
+        )
+        self.assertEqual(
+            [name for name, _ in argv_calls], ["list_reminder_attachments"]
+        )
+        self.assertEqual(adapter_call.call_count, 1)
 
 
 if __name__ == "__main__":

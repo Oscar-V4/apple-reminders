@@ -74,6 +74,8 @@ PUBLIC_MCP_TOOL_NAMES = (
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
     "inspect_reminder_native",
     "ensure_reminder_list",
     "create_reminder_section",

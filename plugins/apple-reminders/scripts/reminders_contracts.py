@@ -73,6 +73,20 @@ _RUNTIME_SCHEMA_REQUIREMENTS: SchemaProfile = {
         """,
         ZREMCKCLOUDSTATE="ZCURRENTLOCALVERSION ZLOCALVERSIONDATE Z_OPT Z_PK",
     ),
+    "recover_deleted_reminder": _schema(
+        ZREMCDREMINDER="""
+            ZACCOUNT ZCKIDENTIFIER ZCOMPLETED ZCREATIONDATE ZLASTMODIFIEDDATE
+            ZLIST ZMARKEDFORDELETION ZPRIORITY ZTITLE Z_OPT Z_PK
+        """,
+        ZREMCDBASELIST="""
+            ZACCOUNT ZCKIDENTIFIER ZMARKEDFORDELETION ZNAME Z_PK
+        """,
+        ZREMCDOBJECT="""
+            ZCKIDENTIFIER ZFILENAME ZFILESIZE ZHEIGHT ZHOSTURL
+            ZMARKEDFORDELETION ZREMINDER2 ZSHA512SUM ZURL ZUTI ZWIDTH
+            Z_ENT Z_FOK_REMINDER1 Z_PK
+        """,
+    ),
     "cleanup_tags": _schema(
         ZREMCDHASHTAGLABEL="""
             ZACCOUNTIDENTIFIER ZCANONICALNAME ZNAME ZUUIDFORCHANGETRACKING Z_PK
@@ -180,6 +194,20 @@ _ATTACHMENT_FIELDS = _schema(
         Z_PK Z_ENT ZCKIDENTIFIER ZREMINDER2 Z_FOK_REMINDER1 ZMARKEDFORDELETION
     """
 )
+_DELETED_REMINDER_FIELDS = _schema(
+    ZREMCDREMINDER="""
+        Z_PK Z_OPT ZACCOUNT ZCKIDENTIFIER ZTITLE ZLIST ZCOMPLETED ZPRIORITY
+        ZCREATIONDATE ZLASTMODIFIEDDATE ZMARKEDFORDELETION
+    """,
+    ZREMCDBASELIST="""
+        Z_PK ZACCOUNT ZCKIDENTIFIER ZNAME ZMARKEDFORDELETION
+    """,
+    ZREMCDOBJECT="""
+        Z_PK Z_ENT ZCKIDENTIFIER ZREMINDER2 Z_FOK_REMINDER1
+        ZFILENAME ZSHA512SUM ZUTI ZFILESIZE ZWIDTH ZHEIGHT ZURL ZHOSTURL
+        ZMARKEDFORDELETION
+    """,
+)
 _ATTACHMENT_SYNC_FIELDS = _schema(
     ZREMCDOBJECT="ZCKSERVERRECORDDATA",
     ZREMCKCLOUDSTATE="""
@@ -212,6 +240,9 @@ _DIAGNOSTIC_SCHEMA_REQUIREMENTS: SchemaProfile = {
     "read_reminder": _merge(
         _LIST_FIELDS, _REMINDER_FIELDS, _TAG_FIELDS, _ATTACHMENT_FIELDS
     ),
+    "list_deleted_reminders": _merge(_DELETED_REMINDER_FIELDS),
+    "read_deleted_reminder": _merge(_DELETED_REMINDER_FIELDS),
+    "recover_deleted_reminder": _merge(_DELETED_REMINDER_FIELDS),
     "list_tags": _merge(_TAG_FIELDS),
     "cache_rebuild": _merge(
         _LIST_FIELDS,
@@ -309,6 +340,7 @@ DIAGNOSTIC_RUNTIME_ALIASES = {
     "update_reminder_db": "update_reminder_db",
     "complete_reminder_db": "set_completion_db",
     "delete_reminder_db": "delete_reminder_db",
+    "recover_deleted_reminder": "recover_deleted_reminder",
     "create_section_db": "create_section_db",
     "move_to_section_db": "move_to_section_db",
     "add_tag_db": "tag_assignment_db",

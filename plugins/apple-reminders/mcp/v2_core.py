@@ -115,6 +115,7 @@ FETCH_CURSOR_FIELDS = (
     "sort",
 )
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,256}$")
+SNAPSHOT_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,12 @@ class EventKitReply:
 class _IdempotentResult:
     fingerprint: str
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _FetchCursor:
+    offset: int
+    snapshot_fingerprint: str
 
 
 class EventKitPort(Protocol):
@@ -362,7 +369,17 @@ def _change_reminder(
     reminder["list_id"] = copy.deepcopy(
         value.get("list_id", value.get("calendar_id"))
     )
-    reminder["url_attachment"] = copy.deepcopy(value.get("url_attachment"))
+    raw_url_attachment = value.get("url_attachment")
+    reminder["url_attachment"] = (
+        {
+            "id": _bounded_text(raw_url_attachment.get("id"), 2048),
+            "type": "url",
+            "url": _bounded_text(raw_url_attachment.get("url"), 8192),
+        }
+        if isinstance(raw_url_attachment, Mapping)
+        and raw_url_attachment.get("type") == "url"
+        else None
+    )
     if reference is not None:
         reminder["reference"] = reference
     return reminder
@@ -495,6 +512,12 @@ def _next_action(
         }
     if code == "sync_pending" and operation == "request_reminders_access":
         return None
+    if (
+        code == "concurrent_modification"
+        and operation == "fetch_reminders"
+        and reason == "pagination_snapshot_stale"
+    ):
+        return None
     if code in {"concurrent_modification", "sync_pending"}:
         fresh_read_tool = {
             "create_reminder": "fetch_reminders",
@@ -580,17 +603,24 @@ def _cursor_fingerprint(arguments: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _encode_cursor(offset: int, arguments: Mapping[str, Any]) -> str:
+def _encode_cursor(
+    offset: int,
+    arguments: Mapping[str, Any],
+    snapshot_fingerprint: str,
+) -> str:
+    if SNAPSHOT_FINGERPRINT_PATTERN.fullmatch(snapshot_fingerprint) is None:
+        raise ValueError("snapshot fingerprint must be a lowercase SHA-256 digest")
     value = {
-        "v": 2,
+        "v": 3,
         "o": offset,
         "f": _cursor_fingerprint(arguments),
+        "s": snapshot_fingerprint,
     }
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: Any, arguments: Mapping[str, Any]) -> int:
+def _decode_cursor(cursor: Any, arguments: Mapping[str, Any]) -> _FetchCursor:
     if not isinstance(cursor, str) or not cursor:
         raise FacadeInputError("cursor must be a non-empty opaque string")
     try:
@@ -599,22 +629,30 @@ def _decode_cursor(cursor: Any, arguments: Mapping[str, Any]) -> int:
         decoded = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FacadeInputError("cursor is not a valid v2 pagination cursor") from exc
-    if not isinstance(decoded, dict) or set(decoded) != {"v", "o", "f"}:
+    if not isinstance(decoded, dict) or set(decoded) != {"v", "o", "f", "s"}:
         raise FacadeInputError("cursor has an unsupported structure")
     offset = decoded.get("o")
+    snapshot_fingerprint = decoded.get("s")
     if (
-        decoded.get("v") != 2
+        decoded.get("v") != 3
         or not isinstance(offset, int)
         or isinstance(offset, bool)
         or offset < 0
         or offset > 10_000
+        or not isinstance(snapshot_fingerprint, str)
+        or SNAPSHOT_FINGERPRINT_PATTERN.fullmatch(snapshot_fingerprint) is None
     ):
-        raise FacadeInputError("cursor has an unsupported version or offset")
+        raise FacadeInputError(
+            "cursor has an unsupported version, offset, or snapshot fingerprint"
+        )
     if decoded.get("f") != _cursor_fingerprint(arguments):
         raise FacadeInputError("cursor cannot be reused with different fetch filters")
-    if _encode_cursor(offset, arguments) != cursor:
+    if _encode_cursor(offset, arguments, snapshot_fingerprint) != cursor:
         raise FacadeInputError("cursor is not in canonical form")
-    return offset
+    return _FetchCursor(
+        offset=offset,
+        snapshot_fingerprint=snapshot_fingerprint,
+    )
 
 
 def _verification(
@@ -1200,10 +1238,10 @@ class V2CoreFacade:
         effective.setdefault("limit", 100)
         effective.setdefault("sort", "due")
         try:
-            offset = (
+            cursor_state = (
                 _decode_cursor(effective["cursor"], effective)
                 if "cursor" in effective
-                else 0
+                else None
             )
         except FacadeInputError as exc:
             return _read_failure(
@@ -1234,7 +1272,9 @@ class V2CoreFacade:
         }
         if "list_ids" in effective:
             bridge_arguments["calendar_ids"] = copy.deepcopy(effective["list_ids"])
-        bridge_arguments["offset"] = offset
+        bridge_arguments["offset"] = (
+            cursor_state.offset if cursor_state is not None else 0
+        )
         reply = self._eventkit.invoke(
             "fetch_reminders",
             bridge_arguments,
@@ -1257,20 +1297,63 @@ class V2CoreFacade:
                     }
                 },
             )
+        has_more = data.get("has_more") is True
+        snapshot_fingerprint = data.get("snapshot_fingerprint")
+        valid_snapshot_fingerprint = (
+            isinstance(snapshot_fingerprint, str)
+            and SNAPSHOT_FINGERPRINT_PATTERN.fullmatch(snapshot_fingerprint) is not None
+        )
+        if (has_more or cursor_state is not None) and not valid_snapshot_fingerprint:
+            return _read_failure(
+                "fetch_reminders",
+                {
+                    "error": {
+                        "code": "unexpected_error",
+                        "reason_code": "missing_pagination_snapshot",
+                        "message": (
+                            "EventKit did not return the ordered snapshot fingerprint "
+                            "required for safe pagination."
+                        ),
+                        "retryable": False,
+                    }
+                },
+            )
+        if (
+            cursor_state is not None
+            and snapshot_fingerprint != cursor_state.snapshot_fingerprint
+        ):
+            return _read_failure(
+                "fetch_reminders",
+                {
+                    "error": {
+                        "code": "concurrent_modification",
+                        "reason_code": "pagination_snapshot_stale",
+                        "message": (
+                            "Reminder membership or revision changed after the previous "
+                            "page. Restart fetch_reminders without a cursor."
+                        ),
+                        "retryable": False,
+                    }
+                },
+            )
         items = [
             _public_reminder_summary(item)
             for item in raw_items
             if isinstance(item, Mapping)
         ]
-        has_more = data.get("has_more") is True
         next_offset = data.get("next_offset")
         if (
             has_more
+            and valid_snapshot_fingerprint
             and isinstance(next_offset, int)
             and not isinstance(next_offset, bool)
             and 0 <= next_offset <= 10_000
         ):
-            next_cursor = _encode_cursor(next_offset, effective)
+            next_cursor = _encode_cursor(
+                next_offset,
+                effective,
+                snapshot_fingerprint,
+            )
         else:
             next_cursor = None
         return {

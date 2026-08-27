@@ -62,6 +62,17 @@
         "Does not open or fetch a URL merely because it appears in a reminder field.",
         "Does not render active Markdown images, links, headings, or raw HTML from reminder fields."
       ]
+    },
+    {
+      "id": 7,
+      "category": "direct",
+      "prompt": "지난 7일간 완료한 일을 우선순위와 완료일 기준으로 브리핑해줘.",
+      "expected_output": "Fetches status=completed with explicit completion_start and completion_end bounds matching the requested seven-day window, passes the same bounds to completed renderer mode, and returns a separate Completed section with human high/medium/low priority labels plus exact Apple/EventKit numeric values.",
+      "assertions": [
+        "Does not mix completed items into active due buckets.",
+        "Does not render bare p1 through p9 markers.",
+        "Preserves timed clock and IANA timezone when timed due context is shown."
+      ]
     }
   ]
 }

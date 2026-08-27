@@ -64,6 +64,9 @@ class ReferencePort(Protocol):
 
 NativeRead = Callable[[Guard, dict[str, Any]], dict[str, Any]]
 NativeMutation = Callable[[Guard, str, dict[str, Any]], MutationOutcome]
+NativeCopyMutation = Callable[
+    [Guard, Guard, str, dict[str, Any]], MutationOutcome
+]
 BackendCall = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 # ``NativeMutation`` is a guarded port, not a raw adapter call. Its production
@@ -380,11 +383,13 @@ class NativeFacade:
         references: ReferencePort,
         native_read: NativeRead,
         native_mutation: NativeMutation,
+        native_copy_mutation: NativeCopyMutation | None = None,
     ) -> None:
         self._adapter_call = adapter_call
         self._references = references
         self._native_read = native_read
         self._native_mutation = native_mutation
+        self._native_copy_mutation = native_copy_mutation
 
     def call(self, name: str, raw_arguments: Any) -> dict[str, Any]:
         arguments: dict[str, Any] = {}
@@ -508,6 +513,13 @@ class NativeFacade:
             }
         if name == "change_reminder_attachment":
             action = arguments.get("action") if isinstance(arguments.get("action"), Mapping) else {}
+            if action.get("kind") == "copy_image":
+                return {
+                    "source_reminder_id": "unknown",
+                    "reminder_id": "unknown",
+                    "source_attachment_id": action.get("attachment_id"),
+                    "attachment_id": None,
+                }
             return {"reminder_id": "unknown", "attachment_id": action.get("attachment_id")}
         return {}
 
@@ -779,14 +791,50 @@ class NativeFacade:
             raise FacadeError("invalid_input", "invalid_action", "action must be an object")
         command, native_arguments = self._native_action(tool_name, dict(action))
         guard = self._references.revalidate_reference(reference)
+        source_reference: str | None = None
+        source_guard: Guard | None = None
+        if command == "copy_image":
+            source_reference = str(native_arguments.pop("source_reference"))
+            source_guard = self._references.revalidate_reference(source_reference)
+            if source_guard.reminder_id == guard.reminder_id:
+                raise FacadeError(
+                    "invalid_input",
+                    "copy_source_matches_destination",
+                    "copy_image requires different source and destination Reminders.",
+                )
+            if self._native_copy_mutation is None:
+                raise FacadeError(
+                    "unsupported_capability",
+                    "copy_image_backend_unavailable",
+                    "The guarded cross-Reminder image copy backend is unavailable.",
+                )
+            native_arguments["source_reminder_id"] = source_guard.reminder_id
         public_operation = f"{tool_name}.{action['kind']}"
         target = self._native_target(tool_name, guard.reminder_id, native_arguments)
         try:
-            outcome = self._native_mutation(guard, command, native_arguments)
+            if command == "copy_image":
+                assert source_guard is not None
+                assert self._native_copy_mutation is not None
+                outcome = self._native_copy_mutation(
+                    guard,
+                    source_guard,
+                    command,
+                    native_arguments,
+                )
+                # A source Reference is a one-use copy precondition even though
+                # the source itself is never mutated. Consume both grants after
+                # dispatch so private-only attachment changes cannot be retried
+                # under stale public revisions.
+                self._references.invalidate_reference(reference)
+                self._references.invalidate_reference(source_reference)
+            else:
+                outcome = self._native_mutation(guard, command, native_arguments)
         except Exception:
             # The guarded backend call is the dispatch boundary. An exception
             # after crossing it cannot prove that no native write occurred.
             self._references.invalidate_reference(reference)
+            if source_reference is not None:
+                self._references.invalidate_reference(source_reference)
             return self._unknown_native_result(
                 public_operation,
                 target,
@@ -799,12 +847,12 @@ class NativeFacade:
                 target,
                 "invalid_native_mutation_outcome",
             )
-        if outcome.mutation_state in {"committed", "unknown"}:
+        if command != "copy_image" and outcome.mutation_state in {"committed", "unknown"}:
             self._references.invalidate_reference(reference)
         try:
             receipt = self._validated_outcome(outcome)
         except FacadeError as exc:
-            if outcome.mutation_state not in {"committed", "unknown"}:
+            if command != "copy_image" and outcome.mutation_state not in {"committed", "unknown"}:
                 self._references.invalidate_reference(reference)
             return self._unknown_native_result(
                 public_operation,
@@ -812,13 +860,33 @@ class NativeFacade:
                 exc.reason_code,
             )
         except Exception:
-            if outcome.mutation_state not in {"committed", "unknown"}:
+            if command != "copy_image" and outcome.mutation_state not in {"committed", "unknown"}:
                 self._references.invalidate_reference(reference)
             return self._unknown_native_result(
                 public_operation,
                 target,
                 "invalid_native_mutation_receipt",
             )
+
+        if command == "copy_image" and receipt["status"] in {"unchanged", "verified"}:
+            receipt_target = receipt.get("target")
+            expected_source_id = native_arguments["source_reminder_id"]
+            expected_source_attachment_id = native_arguments["attachment_id"]
+            if (
+                not isinstance(receipt_target, Mapping)
+                or receipt_target.get("source_reminder_id") != expected_source_id
+                or receipt_target.get("reminder_id") != guard.reminder_id
+                or receipt_target.get("source_attachment_id")
+                != expected_source_attachment_id
+                or not isinstance(receipt_target.get("attachment_id"), str)
+                or not receipt_target.get("attachment_id")
+            ):
+                return self._unknown_native_result(
+                    public_operation,
+                    target,
+                    "copy_image_target_mismatch",
+                )
+            target["attachment_id"] = receipt_target["attachment_id"]
 
         before = self._native_state(
             tool_name,
@@ -935,6 +1003,13 @@ class NativeFacade:
                 "section_id": native_arguments.get("section_id"),
                 "tag": native_arguments.get("tag"),
             }
+        if native_arguments.get("source_reminder_id") is not None:
+            return {
+                "source_reminder_id": native_arguments.get("source_reminder_id"),
+                "reminder_id": reminder_id,
+                "source_attachment_id": native_arguments.get("attachment_id"),
+                "attachment_id": None,
+            }
         return {
             "reminder_id": reminder_id,
             "attachment_id": native_arguments.get("attachment_id"),
@@ -1035,6 +1110,21 @@ class NativeFacade:
                 )
             key = NativeFacade._idempotency_key(action["idempotency_key"])
             return "attach_image", {"image_path": image_path, "idempotency_key": key}
+        if kind == "copy_image":
+            _closed(
+                action,
+                {"kind", "source_reference", "attachment_id", "idempotency_key"},
+                {"kind", "source_reference", "attachment_id", "idempotency_key"},
+            )
+            return "copy_image", {
+                "source_reference": NativeFacade._reference(action["source_reference"]),
+                "attachment_id": _trimmed(
+                    action["attachment_id"], "attachment_id", 2048
+                ),
+                "idempotency_key": NativeFacade._idempotency_key(
+                    action["idempotency_key"]
+                ),
+            }
         if kind == "attach_url":
             _closed(action, {"kind", "url"}, {"kind", "url"})
             return "attach_url", {"url": NativeFacade._http_url(action["url"])}

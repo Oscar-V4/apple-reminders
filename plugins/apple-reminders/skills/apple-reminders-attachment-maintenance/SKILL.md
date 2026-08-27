@@ -1,6 +1,6 @@
 ---
 name: apple-reminders-attachment-maintenance
-description: Inspect, attach, replace, or delete Apple Reminders image and URL attachments safely. Use for screenshots, images, files, URLs, iPhone visibility evidence, exact attachment replacement, or removal. Bulk repair apply is not public in 0.3.
+description: Inspect, attach, copy, replace, or delete Apple Reminders image and URL attachments safely. Use for screenshots, images, files, URLs, iPhone visibility evidence, cross-reminder consolidation, exact attachment replacement, or removal. Bulk repair apply is not public.
 ---
 
 # Apple Reminders Attachments
@@ -9,17 +9,18 @@ Resolve one exact Reminder and attachment target, then use the guarded Native Ex
 
 ## Workflow
 
-1. Resolve a bounded candidate set, then call `read_reminder` for the exact target and fresh opaque reference. Stop on duplicate titles.
+1. Resolve a bounded candidate set, then call `read_reminder` for the exact destination and fresh opaque reference. Stop on duplicate titles.
 2. Call `inspect_reminder_native` with `kind=reminder`, that reference, and `include=["attachments","sync"]`. Filter by attachment type when useful.
-3. Resolve exactly one source image, URL, or existing `attachment_id`. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
+3. Resolve exactly one local source image, URL, existing destination `attachment_id`, or exact active source Reminder plus image attachment ID. For cross-reminder copy, call `read_reminder` and native attachment inspection for the source immediately before the write. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
 4. Call `change_reminder_attachment` with the fresh reference and exactly one action.
-5. Treat only `verified` as completed after final read-back. On pending or partial status, surface recovery guidance and perform no automatic second write.
+5. Treat only `verified` or `unchanged` as completed after exact destination read-back. On pending or partial status, surface recovery guidance and perform no automatic second write.
 
 Actions:
 
 ```json
 {"kind":"attach_image","image_path":"/absolute/input.png","idempotency_key":"UNIQUE-KEY"}
 {"kind":"attach_url","url":"https://example.com"}
+{"kind":"copy_image","source_reference":"rev1.FRESH-SOURCE","attachment_id":"EXACT-SOURCE-IMAGE-ID","idempotency_key":"UNIQUE-KEY"}
 {"kind":"replace_image","attachment_id":"EXACT-ID","image_path":"/absolute/input.jpg","idempotency_key":"UNIQUE-KEY"}
 {"kind":"replace_url","attachment_id":"EXACT-ID","url":"https://example.com","idempotency_key":"UNIQUE-KEY"}
 {"kind":"delete","attachment_id":"EXACT-ID"}
@@ -27,7 +28,11 @@ Actions:
 
 ## Image boundary
 
-The source must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, no dimension above 16,384 pixels, and at most 40,000,000 total pixels. Validation occurs before mutation; a changed file is rejected.
+For `attach_image` and `replace_image`, the source path must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, no dimension above 16,384 pixels, and at most 40,000,000 total pixels. Validation occurs before mutation; a changed file is rejected.
+
+`copy_image` is the path for an image that already belongs to another active Reminder. It requires fresh, distinct source and destination `rev1` references and one exact active source image attachment ID. The backing bytes must decode as PNG or JPEG under the same byte/dimension/pixel bounds; HEIC and other formats are not converted. Both references are consumed as one-use preconditions after dispatch even though the source stays unchanged, so re-read the source before another copy. The backend snapshots the source bytes privately, never exposes the storage path, and reports `verified` or `unchanged` only after exact destination read-back. Recover a deleted source through exact `del1` recovery before copying; deleted attachment metadata is not a copy authority.
+
+For consolidation, inspect all dependencies, copy and verify every destination image first, then hand any authorized source deletion to `$apple-reminders-organize-cleanup`. After each copy, use the returned fresh destination reference for the next mutation. Stop the chain on a stale, missing, ambiguous, pending, partial, or manual-repair result.
 
 ## URL behavior
 
@@ -39,7 +44,7 @@ The source must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, 
 
 - `mobile_visible_likely` means CloudKit/mobile-sync evidence, not direct iPhone-screen confirmation.
 - Local Mac rendering alone is not mobile evidence.
-- Bulk attachment audit/repair apply, backup/Snapshot apply, and restore are withheld from public 0.3. A request to repair many local-only attachments may receive bounded inspection, diagnosis, and a proposal, but not a private maintenance write.
+- Bulk attachment audit/repair apply, raw attachment export, and backup/Snapshot apply are withheld. A request to repair many local-only attachments may receive bounded inspection, diagnosis, and a proposal, but not a private maintenance write.
 - Image removal follows the adapter's recoverable object lifecycle; do not hard-delete copied files.
 
 ## Output

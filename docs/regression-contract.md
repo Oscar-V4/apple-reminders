@@ -1,21 +1,22 @@
 # User-Validated Regression Contract
 
-This document freezes the user-facing behavior that must survive the 0.3
-Interface simplification. A refactor is rejected if any protected behavior
+This document freezes the user-facing behavior that must survive the 0.4
+Interface. A refactor is rejected if any protected behavior
 regresses even when the package becomes smaller or a microbenchmark improves.
 
 ## Public tool surface
 
-The public schema contains exactly 13 tools:
+The public schema contains exactly 15 tools:
 
 - Core: `request_reminders_access`, `list_reminder_lists`, `fetch_reminders`,
   `read_reminder`, `create_reminder`, `change_reminder`, `delete_reminder`, and
   `ensure_reminder_list`.
 - Native Extension: `inspect_reminder_native`, `create_reminder_section`,
   `organize_reminder`, and `change_reminder_attachment`.
+- Recovery: `inspect_recently_deleted` and `recover_deleted_reminder`.
 - Diagnostics: `diagnose_reminders`.
 
-Every input schema is closed and bounded. Bounded reads, filter-bound cursors,
+Every input schema is closed and bounded. Bounded reads, snapshot-bound cursors,
 exact identity, create idempotency, opaque one-use `rev1` References, and
 normalized mutation Receipts are mandatory.
 
@@ -85,11 +86,28 @@ even though optional MCP `outputSchema` descriptors are omitted from
     never directs the access tool back to itself.
 14. The release package resolves only bundled backends and excludes tests,
     databases, backups, caches, screenshots, and other local artifacts.
+15. Recently Deleted list mode issues no write authority. Exact item mode alone
+    issues one short-lived `del1`; recovery consumes it once, rejects changed
+    private guards or cross-account destinations, preserves attachments, and
+    requires exact EventKit read-back before `verified`.
+16. `copy_image` independently revalidates fresh source and destination `rev1`
+    References, consumes both after dispatch, keeps backing paths private,
+    preserves the source, and requires byte-identical SHA-512, size, and
+    dimensions on the exact destination attachment. Decoded UTI normalization
+    is allowed only when the bytes remain exact.
+17. A fetch continuation carries a private digest of the full ordered
+    identifier/revision snapshot. Changed membership or revisions discard the
+    page and return `concurrent_modification/pagination_snapshot_stale`.
+18. Broad cleanup discovers summaries first, obtains each write Reference just
+    in time, operates in authorized 25–40 item chunks, verifies every item, and
+    halts the whole run at the first ambiguous, stale, pending, partial, or
+    failed result.
 
 ## Deliberately withheld behavior
 
-Unused-tag cleanup, attachment audit/repair, backup/Snapshot, restore, log
-purge, flag mutation, and native `show_reminder` are not public 0.3 promises.
+Unused-tag cleanup, raw attachment export, attachment audit/repair, broad
+backup/Snapshot restore, log purge, flag mutation, and native `show_reminder`
+are not public promises.
 Their historical low-level behavior may remain covered by internal tests so
 future work does not accidentally corrupt data, but skills and public MCP tools
 must not expose or fall back to it.
@@ -118,6 +136,7 @@ These are regression budgets, not cross-machine performance claims.
 
 Production ignores backend-path environment overrides. Source integration tests
 inject a `BackendPaths` instance into `mcp.server.main(...)` through the
-source-only harness. Contract tests must exercise the 13-tool schema, Core and
-Native Modules, result validator, packaged startup, and representative live
+source-only harness. Contract tests must exercise the 15-tool schema, Core,
+Native, Recovery, and Diagnostics Modules, result validator, packaged startup,
+and representative live
 workflow without coupling to private route ordering.

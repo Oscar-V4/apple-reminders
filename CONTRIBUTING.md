@@ -26,6 +26,8 @@ clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
   -fsyntax-only plugins/apple-reminders/scripts/remkit_attach_image.m
 clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
   -fsyntax-only plugins/apple-reminders/scripts/reminders_eventkit.m
+clang -x objective-c -fobjc-arc -framework Foundation \
+  -fsyntax-only plugins/apple-reminders/scripts/remkit_recover.m
 plutil -lint plugins/apple-reminders/scripts/eventkit_bridge_info.plist
 ```
 
@@ -53,9 +55,9 @@ its bundled adapter, EventKit bridge, and Doctor.
 - Declare `mcpServers` only when `plugins/apple-reminders/.mcp.json` is substantive and all referenced
   server/schema files are packaged. If the MCP is removed, remove the manifest
   declaration, config, runtime files, documentation, and tests together.
-- Keep the public schema at exactly 13 tools unless a separately reviewed
+- Keep the public schema at exactly 15 tools unless a separately reviewed
   product decision changes the Interface: eight Core, four Native Extension,
-  and one Diagnostics tool.
+  two Recovery, and one Diagnostics tool.
 - Keep MCP inputs closed-schema, bounded, semantically scoped, and exact-ID
   based. Result envelopes and Receipts must pass the centralized validator even
   though optional MCP `outputSchema` descriptors are omitted from discovery.
@@ -78,10 +80,12 @@ The public Interface is:
 - Native Extension: `inspect_reminder_native`,
   `create_reminder_section`, `organize_reminder`, and
   `change_reminder_attachment`;
+- Recovery: `inspect_recently_deleted` and `recover_deleted_reminder`;
 - Diagnostics: `diagnose_reminders`.
 
-Unused-tag cleanup, attachment repair, backup/Snapshot, restore, log purge,
-flag mutation, and `show_reminder` are withheld. The deprecated adapter CLI is
+Unused-tag cleanup, raw attachment export, attachment repair, broad
+backup/Snapshot restore, log purge, flag mutation, and `show_reminder` are
+withheld. The deprecated adapter CLI is
 an internal migration/diagnostic seam and public skills must not fall back to
 it.
 
@@ -106,6 +110,14 @@ must continue to pass `scripts/validate_minis_export.py`.
 - Consume and revalidate a fresh opaque Reference for every existing-item
   mutation. Reject expired, stale, replayed, or failed-revalidation tokens
   before dispatch; consume a token after a possible post-dispatch mutation.
+- Issue a `del1` recovery Reference only from an exact Recently Deleted item
+  read. Keep private store/revision/attachment guards server-side, consume the
+  token once, and never turn list discovery into write authority.
+- Cross-Reminder image copy revalidates and consumes distinct source and
+  destination `rev1` References, keeps backing paths private, preserves the
+  source, and requires exact destination byte-identity evidence.
+- Pagination continuations remain bound to the ordered identifier/revision
+  snapshot that issued them and fail read-only when that snapshot changes.
 - Keep any internal destructive/bulk operation previewable, bounded, and
   recoverable where possible. Its internal safeguards do not make it a public
   capability.

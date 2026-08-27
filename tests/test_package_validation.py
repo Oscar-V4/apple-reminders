@@ -47,7 +47,7 @@ class PluginValidationTests(unittest.TestCase):
         quick_start = readme.split("## Quick Start", 1)[1].split("## First permission", 1)[0]
 
         self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.1",
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0",
             quick_start,
         )
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)

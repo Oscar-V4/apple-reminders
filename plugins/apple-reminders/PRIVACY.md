@@ -16,12 +16,15 @@ Depending on the requested tool and available capability, the plugin can read:
 - account, list, section, tag, and participant-related metadata;
 - image/URL attachment metadata and, when explicitly needed for attachment
   work, local source files;
+- bounded Recently Deleted metadata and exact attachment metadata needed for
+  one-item recovery within Apple's retention window;
 - Reminders store schema, filesystem metadata, and sync-related metadata used
   for capability and verification checks.
 
-Write tools can create, modify, move, complete, reopen, delete, tag, or attach
-content to reminders. Changes can sync through Apple services and can affect
-other devices or shared-list participants.
+Write tools can create, modify, move, complete, reopen, delete, recover, tag,
+or attach/copy content to reminders. Cross-Reminder copy reads one exact local
+backing file internally but does not return its private path. Changes can sync
+through Apple services and can affect other devices or shared-list participants.
 
 ## Execution and Network Boundaries
 
@@ -78,7 +81,8 @@ treat it as a guaranteed recovery point without independent verification.
 The plugin prefers public EventKit or AppleScript behavior for supported
 reminder fields. Advanced features can use:
 
-- Apple's private ReminderKit framework for native image attachments;
+- Apple's private ReminderKit framework for native image attachments, sections,
+  and exact Recently Deleted recovery;
 - direct, schema-gated access to the private Reminders SQLite store for fields
   not exposed by public APIs.
 
@@ -126,7 +130,7 @@ other data that could identify the user or their task history.
 
 - Review exact tool arguments and target IDs before mutations.
 - Use bounded previews for destructive or bulk operations.
-- The 0.3 public Interface does not expose log purge. After removing or stopping
+- The public Interface does not expose log purge. After removing or stopping
   the plugin and confirming that no operation is running, users may remove only
   the plugin-owned support files described in this document.
 - Delete disposable caches, compiled helpers, capability records, idempotency

@@ -15,7 +15,7 @@
       "id": 2,
       "category": "direct",
       "prompt": "아이폰에 안 보이는 첨부파일들 고칠 수 있는지 봐줘.",
-      "expected_output": "Performs bounded native attachment inspection and diagnosis, explains that bulk repair apply and restore are withheld from public 0.3, and presents a read-only proposal without invoking private maintenance writes.",
+      "expected_output": "Performs bounded native attachment inspection and diagnosis, explains that bulk repair apply is withheld, and distinguishes that boundary from exact Recently Deleted recovery without invoking an unexposed maintenance write.",
       "assertions": [
         "Separates observed evidence from a proposed repair.",
         "Does not invoke an unexposed repair or backup command."
@@ -69,6 +69,16 @@
       "assertions": [
         "Does not execute free-form SQL.",
         "Does not bypass the opaque reference or read-back rules."
+      ]
+    },
+    {
+      "id": 8,
+      "category": "direct",
+      "prompt": "A 미리알림의 영수증 사진을 B 미리알림으로 복사한 다음 A를 지워줘.",
+      "expected_output": "Resolves exact active source and destination Reminders, inspects the exact source image attachment ID, calls change_reminder_attachment copy_image with fresh source and destination references plus an idempotency key, verifies the destination first, and only then hands exact one-at-a-time deletion to the organize workflow.",
+      "assertions": [
+        "Does not expose or require a private Reminders attachment path.",
+        "Does not delete the source before the destination copy is verified."
       ]
     }
   ]

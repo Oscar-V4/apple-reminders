@@ -17,6 +17,18 @@
   },
   {
     "prompt": "첨부파일이 아이폰에 안 뜨는 미리알림들을 찾아서 고칠 수 있는지 봐줘.",
-    "expected_behavior": "Runs bounded native attachment inspection and diagnosis, presents local-only or uncertain evidence, and explains that bulk repair/restore apply is withheld from public 0.3 without invoking private maintenance writes."
+    "expected_behavior": "Runs bounded native attachment inspection and diagnosis, presents local-only or uncertain evidence, and explains that bulk repair apply remains withheld without confusing exact Recently Deleted recovery with general attachment repair."
+  },
+  {
+    "prompt": "화면 위 4개를 지웠다가 복구하고 사진을 하나의 미리알림에 모아줘.",
+    "expected_behavior": "Establishes whether top four comes from directly observed current UI or an explicit bounded API snapshot and never conflates the two. It completes and verifies image copies before avoidable deletion; if the exact sources are already deleted, it inspects each exact item for a fresh del1, recovers one at a time, then copies exact active source images to the verified destination and stops on any uncertain receipt."
+  },
+  {
+    "prompt": "최근 삭제된 '치과 예약'을 쇼핑 목록으로 복구해줘.",
+    "expected_behavior": "Uses a bounded Recently Deleted list only for discovery, disambiguates exact IDs, inspects the exact deleted item immediately before recovery, passes its fresh opaque del1 plus the exact compatible same-account list ID and an idempotency key to recover_deleted_reminder, and reports the local macOS/private-framework and 30-day retention boundary."
+  },
+  {
+    "prompt": "지난주 완료한 일 브리핑을 우선순위까지 사람이 읽기 쉽게 보여줘.",
+    "expected_behavior": "Routes to the daily-brief workflow, fetches completed reminders with explicit completion_start and completion_end bounds no wider than 90 days, renders a separate Completed section, preserves timed timezone semantics, and labels Apple/EventKit priorities as high, medium, or low with their numeric values rather than bare pN markers."
   }
 ]

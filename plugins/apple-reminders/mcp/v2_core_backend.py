@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
 import re
 from typing import Any, Callable, Mapping
 
@@ -227,7 +228,13 @@ class CoreBackend:
         initial_eventkit_status = str(payload["status"])
         attachment: dict[str, Any] | None = None
         attachment_status: str | None = None
-        list_arguments = {"reminder_id": reminder_id, "limit": 1}
+        before = payload.get("before")
+        previous_url = before.get("url") if isinstance(before, Mapping) else None
+        list_arguments = {
+            "reminder_id": reminder_id,
+            "attachment_type": "url",
+            "limit": 200,
+        }
         list_payload, list_is_error = self._adapter_call(
             self._build_adapter_argv("list_reminder_attachments", list_arguments)
         )
@@ -253,20 +260,108 @@ class CoreBackend:
                 ),
             )
         else:
-            attach_arguments = {
+            raw_attachments = list_payload.get("attachments")
+            attachments = raw_attachments if isinstance(raw_attachments, list) else []
+            matching_previous = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") == previous_url
+            ]
+            matching_target = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") == url
+            ]
+            mutation_tool = "attach_url_to_reminder"
+            expected_operation = "attach_url"
+            attachment_arguments: dict[str, Any] = {
                 "reminder_id": reminder_id,
                 "url": url,
                 "if_version": reminder_version,
             }
-            attach_payload, attach_is_error = self._adapter_call(
-                self._build_adapter_argv("attach_url_to_reminder", attach_arguments)
+            replacing_previous = (
+                isinstance(previous_url, str)
+                and bool(previous_url)
+                and previous_url != url
             )
+            ambiguity_code: str | None = None
+            reuse_existing = False
+            if list_payload.get("truncated") is True:
+                ambiguity_code = "native_url_attachment_inventory_truncated"
+            elif len(matching_target) > 1:
+                ambiguity_code = "ambiguous_target_url_attachment"
+            elif len(matching_target) == 1 and replacing_previous and matching_previous:
+                # This is the characteristic retry state after the visible B
+                # attachment committed but the composed A -> B Receipt was
+                # uncertain. Replacing A now would create a second B. Preserve
+                # both exact objects and ask for an explicit attachment cleanup.
+                ambiguity_code = "target_url_attachment_already_exists"
+            elif len(matching_target) == 1:
+                reuse_existing = True
+            elif replacing_previous and len(matching_previous) > 1:
+                ambiguity_code = "ambiguous_visible_url_attachment"
+            elif replacing_previous and len(matching_previous) == 1:
+                attachment_id = matching_previous[0].get("id")
+                if not isinstance(attachment_id, str) or not attachment_id:
+                    ambiguity_code = "native_url_attachment_identity_missing"
+                else:
+                    mutation_tool = "replace_reminder_attachment"
+                    expected_operation = "replace_attachment"
+                    attachment_arguments["attachment_id"] = attachment_id
+                    attachment_arguments["idempotency_key"] = (
+                        "core-url-replace-"
+                        + hashlib.sha256(
+                            (
+                                f"{payload.get('operation_id')}\n{reminder_id}\n"
+                                f"{attachment_id}\n{url}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
+
+            if reuse_existing:
+                attachment = copy.deepcopy(dict(matching_target[0]))
+                attachment_status = "unchanged"
+                payload.setdefault("verification", {})["url_attachment"] = {
+                    "state": "read_back",
+                    "write_performed": False,
+                    "final_read": True,
+                    "matched": True,
+                    "attachment_active": True,
+                    "status": "unchanged",
+                }
+                payload.setdefault("recovery", {})["url_attachment"] = {
+                    "semantics": "not_applicable",
+                    "automatic_retry_safe": True,
+                }
+                attach_payload: dict[str, Any] = {}
+                attach_is_error = False
+            elif ambiguity_code is not None:
+                self._url_attachment_partial_receipt(
+                    payload,
+                    code=ambiguity_code,
+                    message=(
+                        "The EventKit URL changed, but the visible URL attachment state "
+                        "could not be selected uniquely without risking a duplicate or "
+                        "removing the wrong object. Existing attachments were preserved; "
+                        "inspect the exact Reminder before any attachment change."
+                    ),
+                )
+                attach_payload = {}
+                attach_is_error = True
+            else:
+                attach_payload, attach_is_error = self._adapter_call(
+                    self._build_adapter_argv(mutation_tool, attachment_arguments)
+                )
             receipt_error = (
                 self._receipt_validator(
                     attach_payload,
-                    expected_operation="attach_url",
+                    expected_operation=expected_operation,
                 )
-                if not attach_is_error
+                if not attach_is_error and ambiguity_code is None
                 else None
             )
             candidate_attachment = (
@@ -287,7 +382,9 @@ class CoreBackend:
                 isinstance(candidate_attachment, dict)
                 and candidate_attachment.get("url") == url
             )
-            if (
+            if reuse_existing or ambiguity_code is not None:
+                pass
+            elif (
                 attach_is_error
                 or receipt_error
                 or not attachment_receipt_complete

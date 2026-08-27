@@ -295,6 +295,17 @@ class EventKitRequestValidationTests(unittest.TestCase):
         self.assertEqual(normalized["offset"], 0)
         self.assertEqual(normalized["sort"], "due")
 
+    def test_native_fetch_fingerprints_ordered_membership_and_revision(self) -> None:
+        source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("OrderedReminderSnapshotFingerprint(matched)", source)
+        self.assertIn("reminder.calendarItemIdentifier", source)
+        self.assertIn("reminder.lastModifiedDate", source)
+        self.assertIn("CC_SHA256", source)
+        self.assertIn('@"snapshot_fingerprint" : snapshotFingerprint', source)
+
     def test_modified_after_only_cannot_bound_native_eventkit_fetch(self) -> None:
         with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
             eventkit_bridge.normalize_request(

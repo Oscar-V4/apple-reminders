@@ -27,6 +27,8 @@ PUBLIC_TOOLS = {
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
     "inspect_reminder_native",
     "ensure_reminder_list",
     "create_reminder_section",
@@ -50,6 +52,7 @@ NATIVE_TOOLS = {
     "organize_reminder",
     "change_reminder_attachment",
 }
+RECOVERY_TOOLS = {"inspect_recently_deleted", "recover_deleted_reminder"}
 DIAGNOSTIC_TOOLS = {"diagnose_reminders"}
 REFERENCE_MUTATIONS = {
     "create_reminder",
@@ -58,6 +61,7 @@ REFERENCE_MUTATIONS = {
     "change_reminder_attachment",
 }
 REFERENCE = "rev1." + "A" * 32
+DELETED_REFERENCE = "del1." + "D" * 32
 REMINDER_ID = "REMINDER-EXACT-1"
 
 TEST_BACKEND_ENVIRONMENTS = {
@@ -250,6 +254,7 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
         "create_reminder",
         "change_reminder",
         "delete_reminder",
+        "recover_deleted_reminder",
         "ensure_reminder_list",
         "create_reminder_section",
         "organize_reminder",
@@ -280,6 +285,15 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
                 "sections": [],
                 "returned": 0,
                 "truncated": False,
+            }
+        elif name == "inspect_recently_deleted":
+            data = {
+                "kind": "list",
+                "items": [],
+                "returned": 0,
+                "limit": 20,
+                "truncated": False,
+                "retention_days": 30,
             }
         return {
             "schema_version": 2,
@@ -351,6 +365,12 @@ VALID_ARGUMENTS: dict[str, dict[str, Any]] = {
         "action": {"kind": "patch", "patch": {"title": "Changed"}},
     },
     "delete_reminder": {"reference": REFERENCE},
+    "inspect_recently_deleted": {"kind": "list"},
+    "recover_deleted_reminder": {
+        "reference": DELETED_REFERENCE,
+        "list_id": "LIST-1",
+        "idempotency_key": "recover-key-0001",
+    },
     "inspect_reminder_native": {
         "kind": "sections",
         "list_id": "LIST-1",
@@ -391,7 +411,7 @@ class McpPackagingTests(unittest.TestCase):
         names = [tool["name"] for tool in tools]
 
         self.assertEqual(payload["schemaVersion"], 2)
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 15)
         self.assertEqual(set(names), PUBLIC_TOOLS)
         self.assertEqual(len(names), len(set(names)))
         compact_discovery = json.dumps(
@@ -456,6 +476,8 @@ print(json.dumps(sorted(
         'v2_core_backend',
         'v2_native',
         'v2_native_backend',
+        'v2_recovery',
+        'v2_recovery_backend',
         'v2_diagnostics',
         'reminders_service',
     )
@@ -485,11 +507,13 @@ class McpProtocolTests(unittest.TestCase):
         self.previous_session = server.SESSION_INITIALIZED
         self.previous_core = server._V2_CORE_FACADE
         self.previous_native = server._V2_NATIVE_FACADE
+        self.previous_recovery = server._V2_RECOVERY_FACADE
         self.previous_diagnostics = getattr(server, "_V2_DIAGNOSTICS_FACADE", None)
         self.previous_paths = server._ACTIVE_BACKEND_PATHS
         server.SESSION_INITIALIZED = False
         server._V2_CORE_FACADE = None
         server._V2_NATIVE_FACADE = None
+        server._V2_RECOVERY_FACADE = None
         server._V2_DIAGNOSTICS_FACADE = None
         server._ACTIVE_BACKEND_PATHS = server.DEFAULT_BACKEND_PATHS
         server.RECENT_CALLS.clear()
@@ -498,6 +522,7 @@ class McpProtocolTests(unittest.TestCase):
         self.server.SESSION_INITIALIZED = self.previous_session
         self.server._V2_CORE_FACADE = self.previous_core
         self.server._V2_NATIVE_FACADE = self.previous_native
+        self.server._V2_RECOVERY_FACADE = self.previous_recovery
         self.server._V2_DIAGNOSTICS_FACADE = self.previous_diagnostics
         self.server._ACTIVE_BACKEND_PATHS = self.previous_paths
         self.server.RECENT_CALLS.clear()
@@ -656,12 +681,14 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_input")
         self.assertEqual(core.calls, [])
 
-    def test_all_13_tools_dispatch_to_their_v2_facades(self) -> None:
+    def test_all_15_tools_dispatch_to_their_v2_facades(self) -> None:
         core = RecordingFacade()
         native = RecordingFacade()
+        recovery = RecordingFacade()
         diagnostics = RecordingFacade()
         self.server._V2_CORE_FACADE = core
         self.server._V2_NATIVE_FACADE = native
+        self.server._V2_RECOVERY_FACADE = recovery
         self.server._V2_DIAGNOSTICS_FACADE = diagnostics
 
         for name in sorted(PUBLIC_TOOLS):
@@ -685,8 +712,15 @@ class McpProtocolTests(unittest.TestCase):
             DIAGNOSTIC_TOOLS,
         )
         self.assertEqual(
-            len(core.calls) + len(native.calls) + len(diagnostics.calls),
-            13,
+            {name for name, _ in recovery.calls},
+            RECOVERY_TOOLS,
+        )
+        self.assertEqual(
+            len(core.calls)
+            + len(native.calls)
+            + len(recovery.calls)
+            + len(diagnostics.calls),
+            15,
         )
 
     def test_post_dispatch_contract_fallback_uses_exact_safe_recovery(self) -> None:
@@ -695,12 +729,14 @@ class McpProtocolTests(unittest.TestCase):
             ("ensure_reminder_list", "list_reminder_lists"),
             ("create_reminder_section", "inspect_reminder_native"),
             ("delete_reminder", "read_reminder"),
+            ("recover_deleted_reminder", "read_reminder"),
         )
         for name, recovery_tool in cases:
             facade = mock.Mock()
             facade.call.side_effect = RuntimeError("lost public facade result")
             self.server._V2_CORE_FACADE = facade
             self.server._V2_NATIVE_FACADE = facade
+            self.server._V2_RECOVERY_FACADE = facade
             self.server.RECENT_CALLS.clear()
 
             with self.subTest(tool=name):
@@ -716,6 +752,15 @@ class McpProtocolTests(unittest.TestCase):
                 self.assertEqual(payload["next_action"]["tool"], recovery_tool)
                 self.assertFalse(
                     payload["next_action"]["retry_original_once"]
+                )
+                summary = json.loads(result["content"][0]["text"])
+                self.assertEqual(summary["outcome"], "attention_required")
+                self.assertTrue(summary["needs_attention"])
+                self.assertTrue(summary["may_have_mutated"])
+                self.assertEqual(summary["write_state"], "unknown")
+                self.assertEqual(summary["evidence_scope"], "no_final_read")
+                self.assertEqual(
+                    summary["next_read_only_action"]["tool"], recovery_tool
                 )
 
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
@@ -765,10 +810,172 @@ class McpProtocolTests(unittest.TestCase):
         text = result["content"][0]["text"]
 
         self.assertEqual(result["structuredContent"], payload)
-        self.assertLess(len(text), 200)
+        self.assertLess(len(text), 512)
         self.assertNotIn("private reminder title", text)
         self.assertNotEqual(text, json.dumps(payload, ensure_ascii=False))
-        self.assertEqual(json.loads(text)["returned"], 1)
+        summary = json.loads(text)
+        self.assertEqual(summary["returned"], 1)
+        self.assertEqual(summary["outcome"], "verified")
+        self.assertFalse(summary["needs_attention"])
+        self.assertFalse(summary["may_have_mutated"])
+        self.assertEqual(summary["write_state"], "not_applicable")
+        self.assertEqual(summary["evidence_scope"], "bounded_public_read")
+        self.assertIsNone(summary["next_read_only_action"])
+
+    def test_text_summary_reports_exact_verified_write_evidence(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "ok": True,
+            "status": "verified",
+            "operation": "organize_reminder.add_tag",
+            "target": {
+                "reminder_id": REMINDER_ID,
+                "section_id": "SECTION-1",
+                "tag": "private tag",
+            },
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+        }
+
+        summary = json.loads(
+            self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+        )
+
+        self.assertEqual(summary["outcome"], "verified")
+        self.assertFalse(summary["needs_attention"])
+        self.assertTrue(summary["may_have_mutated"])
+        self.assertEqual(summary["write_state"], "committed_and_verified")
+        self.assertEqual(summary["evidence_scope"], "matched_exact_final_read")
+        self.assertEqual(
+            summary["target"],
+            {"reminder_id": REMINDER_ID, "section_id": "SECTION-1"},
+        )
+        self.assertNotIn("private tag", json.dumps(summary))
+        self.assertIsNone(summary["next_read_only_action"])
+
+    def test_text_summary_marks_pending_partial_stale_and_failure_for_attention(self) -> None:
+        cases = (
+            (
+                "pending_unknown_write",
+                "committed_verification_pending",
+                True,
+                "unknown",
+                None,
+                False,
+                "sync_pending",
+            ),
+            (
+                "pending_known_write",
+                "committed_verification_pending",
+                True,
+                "committed_unverified",
+                True,
+                False,
+                "sync_pending",
+            ),
+            (
+                "partial",
+                "partial_success",
+                True,
+                "partial",
+                True,
+                True,
+                "sync_pending",
+            ),
+            (
+                "stale",
+                "failed_no_mutation",
+                False,
+                "not_mutated",
+                False,
+                False,
+                "concurrent_modification",
+            ),
+            (
+                "manual_repair",
+                "failed_manual_repair_required",
+                True,
+                "committed_manual_repair_required",
+                True,
+                False,
+                "unexpected_error",
+            ),
+        )
+        for (
+            case_name,
+            status,
+            may_mutate,
+            write_state,
+            write_performed,
+            final_read,
+            error_code,
+        ) in cases:
+            payload = {
+                "schema_version": 2,
+                "ok": status in {"committed_verification_pending", "partial_success"},
+                "status": status,
+                "operation": "change_reminder.patch",
+                "target": {"reminder_id": REMINDER_ID},
+                "verification": {
+                    "state": "partial" if final_read else "pending",
+                    "write_performed": write_performed,
+                    "final_read": final_read,
+                    "matched": False if final_read else None,
+                },
+                "error": {
+                    "code": error_code,
+                    "reason_code": "fixture_reason",
+                    "message": "private failure detail",
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "fresh_read",
+                    "tool": "read_reminder",
+                    "retry_original_once": False,
+                    "message": "read before retry",
+                },
+            }
+
+            with self.subTest(case=case_name):
+                summary = json.loads(
+                    self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+                )
+                self.assertEqual(summary["outcome"], "attention_required")
+                self.assertTrue(summary["needs_attention"])
+                self.assertIs(summary["may_have_mutated"], may_mutate)
+                self.assertEqual(summary["write_state"], write_state)
+                self.assertEqual(summary["target"], {"reminder_id": REMINDER_ID})
+                self.assertEqual(
+                    summary["next_read_only_action"],
+                    {
+                        "kind": "fresh_read",
+                        "tool": "read_reminder",
+                        "retry_original_once": False,
+                    },
+                )
+                self.assertNotIn("private failure detail", json.dumps(summary))
+
+    def test_text_summary_marks_blocked_diagnosis_for_attention(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "ok": True,
+            "status": "verified",
+            "operation": "diagnose_reminders",
+            "data": {"overall": "blocked", "scope": "access"},
+        }
+
+        summary = json.loads(
+            self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+        )
+
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertTrue(summary["needs_attention"])
+        self.assertEqual(summary["overall"], "blocked")
+        self.assertEqual(summary["next_read_only_action"]["tool"], "diagnose_reminders")
 
     def test_explicit_test_backend_injection_serves_list_and_doctor_over_stdio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

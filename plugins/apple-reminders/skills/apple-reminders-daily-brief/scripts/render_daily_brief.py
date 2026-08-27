@@ -9,7 +9,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -23,6 +23,9 @@ class Reminder:
     section: str | None
     due_raw: str | None
     due_date: date | None
+    due_at: datetime | None
+    completion_raw: str | None
+    completion_date: date | None
     all_day: bool
     flagged: bool
     priority: int | None
@@ -33,6 +36,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date", required=True, help="Target local date as YYYY-MM-DD.")
     parser.add_argument("--timezone", required=True, help="IANA timezone such as Asia/Seoul.")
     parser.add_argument("--input", help="Optional JSON input path. Defaults to stdin.")
+    parser.add_argument(
+        "--status",
+        choices=("incomplete", "completed"),
+        default="incomplete",
+        help="Render active reminders by default, or an explicitly bounded completed result.",
+    )
+    parser.add_argument(
+        "--completion-start",
+        help="RFC 3339 lower bound used for the completed fetch.",
+    )
+    parser.add_argument(
+        "--completion-end",
+        help="RFC 3339 upper bound used for the completed fetch.",
+    )
     parser.add_argument("--limit-unscheduled", type=int, default=20, help="Maximum no-due-date reminders to show.")
     return parser.parse_args()
 
@@ -149,22 +166,92 @@ def parse_local_date(raw: str | None, tz: ZoneInfo) -> date | None:
     return parsed.astimezone(tz).date()
 
 
-def due_fields(item: dict[str, Any]) -> tuple[str | None, bool]:
-    """Return one date-like value plus an all-day marker for both contracts."""
+def parse_completion_range(
+    status: str,
+    start_raw: str | None,
+    end_raw: str | None,
+) -> tuple[datetime, datetime] | None:
+    """Require the same explicit completed range that bounded the source fetch."""
+
+    if status not in {"incomplete", "completed"}:
+        raise ValueError("status must be incomplete or completed")
+    if status == "incomplete":
+        if start_raw is not None or end_raw is not None:
+            raise ValueError(
+                "--completion-start and --completion-end require --status completed"
+            )
+        return None
+    if start_raw is None or end_raw is None:
+        raise ValueError(
+            "--status completed requires both --completion-start and --completion-end"
+        )
+
+    parsed: list[datetime] = []
+    for option, value in (
+        ("--completion-start", start_raw),
+        ("--completion-end", end_raw),
+    ):
+        try:
+            candidate = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"{option} must be an RFC 3339 timestamp") from exc
+        if candidate.tzinfo is None or candidate.utcoffset() is None:
+            raise ValueError(f"{option} must include a UTC offset")
+        parsed.append(candidate)
+
+    start, end = parsed
+    if start >= end:
+        raise ValueError("--completion-start must be earlier than --completion-end")
+    if end - start > timedelta(days=90):
+        raise ValueError("completed reminder range must not exceed 90 days")
+    return start, end
+
+
+def due_fields(item: dict[str, Any]) -> tuple[str | None, bool, str | None]:
+    """Return a due value, all-day marker, and source zone for both contracts."""
 
     due = item.get("due")
     if isinstance(due, dict):
         if due.get("kind") == "all_day":
             value = due.get("date")
-            return (value if isinstance(value, str) else None), True
+            return (value if isinstance(value, str) else None), True, None
         if due.get("kind") == "timed":
             value = due.get("date_time") or due.get("local_date_time")
-            return (value if isinstance(value, str) else None), False
+            source_zone = due.get("time_zone")
+            return (
+                value if isinstance(value, str) else None,
+                False,
+                source_zone if isinstance(source_zone, str) else None,
+            )
     value = item.get("display_at") or item.get("due_at")
+    source_zone = item.get("timezone")
     return (
         value if isinstance(value, str) else None,
         bool(item.get("display_date_is_all_day") or item.get("all_day")),
+        source_zone if isinstance(source_zone, str) else None,
     )
+
+
+def parse_local_datetime(
+    raw: str | None,
+    tz: ZoneInfo,
+    source_zone: str | None,
+) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        source_tz = tz
+        if source_zone:
+            try:
+                source_tz = ZoneInfo(source_zone)
+            except (KeyError, ValueError):
+                source_tz = tz
+        parsed = parsed.replace(tzinfo=source_tz)
+    return parsed.astimezone(tz)
 
 
 def reminder_list_name(item: dict[str, Any]) -> str | None:
@@ -176,12 +263,27 @@ def reminder_list_name(item: dict[str, Any]) -> str | None:
     return None
 
 
-def normalize_reminders(raw_items: list[dict[str, Any]], tz: ZoneInfo) -> list[Reminder]:
+def completion_value(item: dict[str, Any]) -> str | None:
+    value = item.get("completion_date") or item.get("completed_at")
+    return value if isinstance(value, str) else None
+
+
+def normalize_reminders(
+    raw_items: list[dict[str, Any]],
+    tz: ZoneInfo,
+    status: str,
+) -> list[Reminder]:
     reminders: list[Reminder] = []
     for index, item in enumerate(raw_items):
-        if item.get("completed") is True:
+        is_completed = item.get("completed") is True
+        if (status == "completed" and not is_completed) or (
+            status == "incomplete" and is_completed
+        ):
             continue
-        due_raw, all_day = due_fields(item)
+        due_raw, all_day, source_zone = due_fields(item)
+        due_at = None if all_day else parse_local_datetime(due_raw, tz, source_zone)
+        completion_raw = completion_value(item)
+        priority = item.get("priority")
         reminders.append(
             Reminder(
                 index=index,
@@ -190,22 +292,46 @@ def normalize_reminders(raw_items: list[dict[str, Any]], tz: ZoneInfo) -> list[R
                 list_name=reminder_list_name(item),
                 section=item.get("section"),
                 due_raw=due_raw,
-                due_date=parse_local_date(due_raw, tz),
+                due_date=(
+                    parse_local_date(due_raw, tz)
+                    if all_day or due_at is None
+                    else due_at.date()
+                ),
+                due_at=due_at,
+                completion_raw=completion_raw,
+                completion_date=parse_local_date(completion_raw, tz),
                 all_day=all_day,
                 flagged=bool(item.get("flagged")),
-                priority=item.get("priority") if isinstance(item.get("priority"), int) else None,
+                priority=(
+                    priority
+                    if isinstance(priority, int) and not isinstance(priority, bool)
+                    else None
+                ),
             )
         )
-    reminders.sort(
-        key=lambda item: (
-            item.due_date or date.max,
-            item.list_name or "",
-            item.section or "",
-            item.title.casefold(),
-            item.identifier,
-            item.index,
+    if status == "completed":
+        reminders.sort(
+            key=lambda item: (
+                item.completion_date is None,
+                -(item.completion_date.toordinal() if item.completion_date else 0),
+                item.list_name or "",
+                item.section or "",
+                item.title.casefold(),
+                item.identifier,
+                item.index,
+            )
         )
-    )
+    else:
+        reminders.sort(
+            key=lambda item: (
+                item.due_date or date.max,
+                item.list_name or "",
+                item.section or "",
+                item.title.casefold(),
+                item.identifier,
+                item.index,
+            )
+        )
     return reminders
 
 
@@ -224,7 +350,32 @@ def due_label(reminder: Reminder) -> str:
     label = reminder.due_date.isoformat()
     if reminder.all_day:
         return f"{label} all-day"
+    if reminder.due_at is not None:
+        zone = getattr(reminder.due_at.tzinfo, "key", None) or reminder.due_at.tzname()
+        return f"{reminder.due_at.strftime('%Y-%m-%d %H:%M')} {zone}"
     return label
+
+
+def completion_label(reminder: Reminder) -> str:
+    if reminder.completion_date is None:
+        return "completed; completion date unavailable"
+    return f"completed {reminder.completion_date.isoformat()}"
+
+
+def priority_label(priority: int | None) -> str | None:
+    """Explain Apple's 0-9 priority scale without an ambiguous bare pN."""
+
+    if priority is None or priority == 0:
+        return None
+    if 1 <= priority <= 4:
+        level = "high"
+    elif priority == 5:
+        level = "medium"
+    elif 6 <= priority <= 9:
+        level = "low"
+    else:
+        return f"unrecognized priority (Apple/EventKit {priority})"
+    return f"{level} priority (Apple/EventKit {priority})"
 
 
 def inert_markdown_text(value: str) -> str:
@@ -257,24 +408,35 @@ def inert_markdown_text(value: str) -> str:
     return rendered
 
 
-def line_for(reminder: Reminder) -> str:
+def line_for(reminder: Reminder, status: str) -> str:
     markers = []
     if reminder.flagged:
         markers.append("flagged")
-    if reminder.priority:
-        markers.append(f"p{reminder.priority}")
+    rendered_priority = priority_label(reminder.priority)
+    if rendered_priority:
+        markers.append(rendered_priority)
     suffix = f" ({', '.join(markers)})" if markers else ""
     title = inert_markdown_text(reminder.title)
     location = inert_markdown_text(location_text(reminder))
     identifier = inert_markdown_text(reminder.identifier)
-    return f"- {title} [{location}] id: {identifier} - {due_label(reminder)}{suffix}"
+    temporal_label = (
+        completion_label(reminder) if status == "completed" else due_label(reminder)
+    )
+    return f"- {title} [{location}] id: {identifier} - {temporal_label}{suffix}"
 
 
-def render_section(title: str, reminders: list[Reminder], empty_text: str, *, limit: int | None = None) -> list[str]:
+def render_section(
+    title: str,
+    reminders: list[Reminder],
+    empty_text: str,
+    *,
+    status: str,
+    limit: int | None = None,
+) -> list[str]:
     lines = [f"## {title}"]
     visible = reminders if limit is None else reminders[:limit]
     if visible:
-        lines.extend(line_for(item) for item in visible)
+        lines.extend(line_for(item, status) for item in visible)
         if limit is not None and len(reminders) > limit:
             lines.append(f"- Omitted {len(reminders) - limit} more no-due-date reminders.")
     else:
@@ -282,9 +444,48 @@ def render_section(title: str, reminders: list[Reminder], empty_text: str, *, li
     return lines
 
 
-def render(payload: Any, target: date, tz: ZoneInfo, limit_unscheduled: int) -> str:
+def render(
+    payload: Any,
+    target: date,
+    tz: ZoneInfo,
+    limit_unscheduled: int,
+    *,
+    status: str = "incomplete",
+    completion_start: str | None = None,
+    completion_end: str | None = None,
+) -> str:
+    completion_range = parse_completion_range(
+        status,
+        completion_start,
+        completion_end,
+    )
     raw_items, truncated, total_matches = payload_reminders(payload)
-    reminders = normalize_reminders(raw_items, tz)
+    reminders = normalize_reminders(raw_items, tz, status)
+
+    if status == "completed":
+        assert completion_range is not None
+        range_start, range_end = (
+            value.astimezone(tz).isoformat() for value in completion_range
+        )
+        lines = [
+            f"# Apple Reminders Brief - {target.isoformat()} ({tz.key})",
+            "",
+            f"Completed reminders reviewed: {len(reminders)}"
+            + (f" of {total_matches}" if total_matches is not None else "")
+            + ("; source was truncated" if truncated else ""),
+            f"Completion range: {range_start} to {range_end}",
+            "",
+        ]
+        lines.extend(
+            render_section(
+                "Completed",
+                reminders,
+                "No completed reminders in this bounded read.",
+                status=status,
+            )
+        )
+        return "\n".join(lines).rstrip() + "\n"
+
     week_end = week_end_for(target)
 
     overdue = [item for item in reminders if item.due_date and item.due_date < target]
@@ -302,13 +503,30 @@ def render(payload: Any, target: date, tz: ZoneInfo, limit_unscheduled: int) -> 
         f"Overdue {len(overdue)} | Due today {len(today)} | Later this week {len(later_week)} | Upcoming {len(upcoming)} | No due date {len(unscheduled)}",
         "",
     ]
-    lines.extend(render_section("Overdue", overdue, "None."))
+    lines.extend(render_section("Overdue", overdue, "None.", status=status))
     lines.append("")
-    lines.extend(render_section("Due Today", today, "Nothing due today."))
+    lines.extend(
+        render_section("Due Today", today, "Nothing due today.", status=status)
+    )
     lines.append("")
-    lines.extend(render_section(f"Later This Week Through {week_end.isoformat()}", later_week, "Nothing else due this week."))
+    lines.extend(
+        render_section(
+            f"Later This Week Through {week_end.isoformat()}",
+            later_week,
+            "Nothing else due this week.",
+            status=status,
+        )
+    )
     lines.append("")
-    lines.extend(render_section("No Due Date", unscheduled, "No unscheduled reminders in this bounded read.", limit=limit_unscheduled))
+    lines.extend(
+        render_section(
+            "No Due Date",
+            unscheduled,
+            "No unscheduled reminders in this bounded read.",
+            status=status,
+            limit=limit_unscheduled,
+        )
+    )
     if upcoming:
         lines.append("")
         lines.append(f"Upcoming after this week: {len(upcoming)} not shown by default.")
@@ -321,7 +539,15 @@ def main() -> int:
         target = date.fromisoformat(args.date)
         tz = ZoneInfo(args.timezone)
         payload = load_payload(args.input)
-        output = render(payload, target, tz, args.limit_unscheduled)
+        output = render(
+            payload,
+            target,
+            tz,
+            args.limit_unscheduled,
+            status=args.status,
+            completion_start=args.completion_start,
+            completion_end=args.completion_end,
+        )
     except (OSError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 2
