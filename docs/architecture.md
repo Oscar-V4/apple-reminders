@@ -83,9 +83,9 @@ user-facing promise.
    - Static private-framework path absence is inconclusive when dyld can load
      from the shared cache.
 7. **Internal adapter and helpers**
-   - Retain only implementation commands required by the public Modules. The
-     obsolete 0.2-era direct Core write, maintenance, cache, backup, and repair
-     CLI is scheduled for physical removal before the 0.4 release.
+   - Retain only the 16 implementation commands required by the public Modules.
+     The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
+     repair CLI has been physically removed rather than hidden behind aliases.
    - Are not a second public API and are not a fallback for skills.
 
 There is no equivalent hosted Codex connector for the user's local native
@@ -176,5 +176,5 @@ share initialization, rate-limit history, or lazy Facade instances.
   states.
 
 Historical adapter backup, repair, cache, log-purge, direct Core-write, and
-UI-handoff routes are not part of the 0.4 runtime contract. Their removal is a
-release-blocking cleanup rather than a reason to expose or fall back to them.
+UI-handoff routes are not part of the 0.4 runtime contract. They were removed
+as a release-blocking cleanup rather than exposed or retained as fallbacks.

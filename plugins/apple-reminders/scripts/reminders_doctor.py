@@ -2,7 +2,7 @@
 """Content-free onboarding and capability doctor for Apple Reminders.
 
 The doctor deliberately avoids reminder rows, list/section/tag names, cached
-payloads, journal contents, AppleScript, EventKit, and private-framework loads.
+payloads, journal contents, EventKit, and private-framework loads.
 It only inspects application metadata, directory/file metadata, SQLite schema,
 anonymous account counts, toolchain availability, and static framework paths.
 """
@@ -738,8 +738,6 @@ def permission_state(status: str, code: str, message: str) -> dict[str, Any]:
 
 def inspect_permission_symptoms(
     store_check: dict[str, Any],
-    *,
-    which: Callable[[str], str | None] = shutil.which,
 ) -> dict[str, Any]:
     store_code = store_check.get("code")
     if store_check.get("status") in {STATUS_OK, STATUS_WARNING}:
@@ -767,38 +765,22 @@ def inspect_permission_symptoms(
             "store_access_not_testable",
             "The local container was absent, so Full Disk Access could not be inferred.",
         )
-    osascript = which("osascript")
-    automation = permission_state(
-        STATUS_UNKNOWN if osascript else STATUS_BLOCKED,
-        "automation_not_probed_to_avoid_prompt" if osascript else "osascript_missing",
-        (
-            "Automation permission was intentionally not exercised because doing so may trigger a TCC prompt."
-            if osascript
-            else "osascript is unavailable, so AppleScript-backed operations cannot run."
-        ),
-    )
     reminders = permission_state(
         STATUS_UNKNOWN,
         "reminders_tcc_not_probed_to_avoid_prompt",
-        "No EventKit, AppleScript, or Reminders process call was made, so "
+        "No EventKit or Reminders process call was made, so "
         "runtime Reminders authorization is unknown.",
     )
-    overall_status = (
-        STATUS_BLOCKED
-        if STATUS_BLOCKED in {full_disk["status"], automation["status"]}
-        else STATUS_OK
-    )
+    overall_status = STATUS_BLOCKED if full_disk["status"] == STATUS_BLOCKED else STATUS_OK
     return check_result(
         overall_status,
         "permission_symptoms_collected",
         "Permission symptoms were collected without triggering authorization prompts.",
         details={
             "tcc_prompt_attempted": False,
-            "automation_process_invoked": False,
             "eventkit_invoked": False,
             "reminders_app_launched": False,
             "full_disk_access": full_disk,
-            "automation": automation,
             "reminders": reminders,
         },
     )
@@ -1069,7 +1051,6 @@ def inspect_redaction_contract(paths: dict[str, Any]) -> dict[str, Any]:
 def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
     store_ready = checks["store_access"]["status"] in {STATUS_OK, STATUS_WARNING}
     command_details = checks["command_schema"].get("details", {}).get("commands", {})
-    public_tool = checks["permissions"]["details"]["automation"]
     helper_ready = checks["helper_toolchain"]["status"] == STATUS_OK
     framework_check = checks["private_frameworks"]
     framework_items = framework_check.get("details", {}).get("frameworks", {})
@@ -1099,10 +1080,6 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
             "status": STATUS_UNKNOWN if store_ready else STATUS_BLOCKED,
             "basis": "write_access_and_semantics_not_probed",
             "requires_runtime_verification": True,
-        },
-        "applescript_operations": {
-            "status": public_tool["status"],
-            "basis": public_tool["code"],
         },
         "reminderkit_image_attachments": {
             "status": STATUS_UNKNOWN if reminderkit_unknown else STATUS_BLOCKED,
@@ -1152,7 +1129,7 @@ def collect_report(
         configured, syntax_check=syntax_check, which=which, runner=runner
     )
     framework_check = inspect_private_frameworks(configured)
-    permission_check = inspect_permission_symptoms(store_check, which=which)
+    permission_check = inspect_permission_symptoms(store_check)
     account_check = inspect_account_visibility(configured, store_check)
     artifacts_check = inspect_local_artifacts(configured)
     redaction_check = inspect_redaction_contract(configured)

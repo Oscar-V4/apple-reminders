@@ -40,39 +40,6 @@ REQUIRED_TABLES = _fields(
 
 
 _RUNTIME_SCHEMA_REQUIREMENTS: SchemaProfile = {
-    "create_reminder_db": _schema(
-        ZREMCDREMINDER="""
-            ZACCOUNT ZALLDAY ZCKCLOUDSTATE ZCKDIRTYFLAGS ZCKIDENTIFIER ZCOMPLETED
-            ZCREATIONDATE ZDACALENDARITEMUNIQUEIDENTIFIER ZDISPLAYDATEDATE
-            ZDISPLAYDATEISALLDAY ZDISPLAYDATETIMEZONE
-            ZDISPLAYDATEUPDATEDFORSECONDSFROMGMT ZDUEDATE
-            ZEFFECTIVEMINIMUMSUPPORTEDAPPVERSION ZFLAGGED ZICSDISPLAYORDER
-            ZIDENTIFIER ZISURGENTSTATEENABLEDFORCURRENTUSER ZLASTMODIFIEDDATE ZLIST
-            ZMARKEDFORDELETION ZMINIMUMSUPPORTEDAPPVERSION ZNOTES ZNOTESDOCUMENT
-            ZPRIORITY ZRESOLUTIONTOKENMAP_V3_JSONDATA ZSPOTLIGHTINDEXCOUNT
-            ZTIMEZONE ZTITLE ZTITLEDOCUMENT Z_ENT Z_FOK_LIST Z_OPT Z_PK
-        """,
-        ZREMCDBASELIST="""
-            ZACCOUNT ZCKCLOUDSTATE ZCKIDENTIFIER ZMARKEDFORDELETION ZNAME
-            ZREMINDERIDSMERGEABLEORDERING_V2_JSON Z_OPT Z_PK
-        """,
-        ZREMCKCLOUDSTATE="""
-            ZCURRENTLOCALVERSION ZLATESTVERSIONSYNCEDTOCLOUD ZLOCALVERSIONDATE
-            ZREMINDER Z_ENT Z_OPT Z_PK
-        """,
-        Z_PRIMARYKEY="Z_ENT Z_MAX Z_NAME",
-    ),
-    "delete_reminder_db": _schema(
-        ZREMCDREMINDER="""
-            ZCKCLOUDSTATE ZCKIDENTIFIER ZLASTMODIFIEDDATE ZLIST
-            ZMARKEDFORDELETION Z_FOK_LIST Z_OPT Z_PK
-        """,
-        ZREMCDBASELIST="""
-            ZCKCLOUDSTATE ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA
-            ZREMINDERIDSMERGEABLEORDERING_V2_JSON Z_OPT Z_PK
-        """,
-        ZREMCKCLOUDSTATE="ZCURRENTLOCALVERSION ZLOCALVERSIONDATE Z_OPT Z_PK",
-    ),
     "recover_deleted_reminder": _schema(
         ZREMCDREMINDER="""
             ZACCOUNT ZCKIDENTIFIER ZCOMPLETED ZCREATIONDATE ZLASTMODIFIEDDATE
@@ -86,28 +53,6 @@ _RUNTIME_SCHEMA_REQUIREMENTS: SchemaProfile = {
             ZMARKEDFORDELETION ZREMINDER2 ZSHA512SUM ZURL ZUTI ZWIDTH
             Z_ENT Z_FOK_REMINDER1 Z_PK
         """,
-    ),
-    "cleanup_tags": _schema(
-        ZREMCDHASHTAGLABEL="""
-            ZACCOUNTIDENTIFIER ZCANONICALNAME ZNAME ZUUIDFORCHANGETRACKING Z_PK
-        """,
-        ZREMCDOBJECT="ZHASHTAGLABEL ZMARKEDFORDELETION Z_ENT Z_PK",
-    ),
-    "update_reminder_db": _schema(
-        ZREMCDREMINDER="""
-            ZALLDAY ZCKCLOUDSTATE ZCKIDENTIFIER ZDISPLAYDATEDATE
-            ZDISPLAYDATEISALLDAY ZDISPLAYDATETIMEZONE ZDUEDATE ZFLAGGED
-            ZLASTMODIFIEDDATE ZNOTES ZNOTESDOCUMENT ZPRIORITY ZTIMEZONE ZTITLE
-            ZTITLEDOCUMENT Z_OPT Z_PK
-        """,
-        ZREMCKCLOUDSTATE="ZCURRENTLOCALVERSION ZLOCALVERSIONDATE Z_OPT Z_PK",
-    ),
-    "set_completion_db": _schema(
-        ZREMCDREMINDER="""
-            ZCKCLOUDSTATE ZCKIDENTIFIER ZCOMPLETED ZCOMPLETIONDATE
-            ZLASTMODIFIEDDATE Z_OPT Z_PK
-        """,
-        ZREMCKCLOUDSTATE="ZCURRENTLOCALVERSION ZLOCALVERSIONDATE Z_OPT Z_PK",
     ),
     "tag_assignment_db": _schema(
         ZREMCDREMINDER="""
@@ -227,16 +172,7 @@ _REMINDER_WRITE_FIELDS = _schema(
 
 
 _DIAGNOSTIC_SCHEMA_REQUIREMENTS: SchemaProfile = {
-    "list_lists": _merge(_LIST_FIELDS),
     "list_sections": _merge(_LIST_FIELDS, _SECTION_FIELDS),
-    "snapshot": _merge(
-        _LIST_FIELDS,
-        _REMINDER_FIELDS,
-        _SECTION_FIELDS,
-        _TAG_FIELDS,
-        _ATTACHMENT_FIELDS,
-    ),
-    "search_reminders": _merge(_LIST_FIELDS, _REMINDER_FIELDS),
     "read_reminder": _merge(
         _LIST_FIELDS, _REMINDER_FIELDS, _TAG_FIELDS, _ATTACHMENT_FIELDS
     ),
@@ -244,33 +180,6 @@ _DIAGNOSTIC_SCHEMA_REQUIREMENTS: SchemaProfile = {
     "read_deleted_reminder": _merge(_DELETED_REMINDER_FIELDS),
     "recover_deleted_reminder": _merge(_DELETED_REMINDER_FIELDS),
     "list_tags": _merge(_TAG_FIELDS),
-    "cache_rebuild": _merge(
-        _LIST_FIELDS,
-        _REMINDER_FIELDS,
-        _SECTION_FIELDS,
-        _TAG_FIELDS,
-        _ATTACHMENT_FIELDS,
-    ),
-    "create_list_db": _merge(_LIST_FIELDS, _CLOUD_WRITE_FIELDS),
-    "create_reminder_db": _merge(
-        _LIST_FIELDS, _REMINDER_FIELDS, _REMINDER_WRITE_FIELDS, _CLOUD_WRITE_FIELDS
-    ),
-    "update_reminder_db": _merge(
-        _LIST_FIELDS, _REMINDER_FIELDS, _REMINDER_WRITE_FIELDS, _CLOUD_WRITE_FIELDS
-    ),
-    "complete_reminder_db": _merge(
-        _LIST_FIELDS, _REMINDER_FIELDS, _REMINDER_WRITE_FIELDS, _CLOUD_WRITE_FIELDS
-    ),
-    "delete_reminder_db": _schema(
-        ZREMCDREMINDER="""
-            Z_PK Z_OPT ZCKIDENTIFIER ZCKCLOUDSTATE ZLASTMODIFIEDDATE ZLIST
-            Z_FOK_LIST ZMARKEDFORDELETION
-        """,
-        ZREMCDBASELIST="""
-            Z_PK Z_OPT ZCKCLOUDSTATE ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA
-        """,
-        ZREMCKCLOUDSTATE="Z_PK ZCURRENTLOCALVERSION ZLOCALVERSIONDATE",
-    ),
     "create_section_db": _merge(
         _LIST_FIELDS, _SECTION_FIELDS, _CLOUD_WRITE_FIELDS
     ),
@@ -282,12 +191,6 @@ _DIAGNOSTIC_SCHEMA_REQUIREMENTS: SchemaProfile = {
     ),
     "remove_tag_db": _merge(
         _REMINDER_FIELDS, _REMINDER_WRITE_FIELDS, _TAG_FIELDS, _CLOUD_WRITE_FIELDS
-    ),
-    "cleanup_tags": _schema(
-        ZREMCDHASHTAGLABEL="""
-            Z_PK ZNAME ZCANONICALNAME ZACCOUNTIDENTIFIER ZUUIDFORCHANGETRACKING
-        """,
-        ZREMCDOBJECT="Z_PK Z_ENT ZHASHTAGLABEL ZMARKEDFORDELETION",
     ),
     "attach_image_db": _merge(
         _REMINDER_FIELDS,
@@ -305,14 +208,6 @@ _DIAGNOSTIC_SCHEMA_REQUIREMENTS: SchemaProfile = {
         _CLOUD_WRITE_FIELDS,
     ),
     "list_attachments": _merge(_REMINDER_FIELDS, _ATTACHMENT_FIELDS),
-    "audit_attachments": _merge(_REMINDER_FIELDS, _ATTACHMENT_FIELDS),
-    "repair_attachments": _merge(
-        _REMINDER_FIELDS,
-        _REMINDER_WRITE_FIELDS,
-        _ATTACHMENT_FIELDS,
-        _ATTACHMENT_SYNC_FIELDS,
-        _CLOUD_WRITE_FIELDS,
-    ),
     "delete_attachment_db": _merge(
         _REMINDER_FIELDS,
         _REMINDER_WRITE_FIELDS,
@@ -336,16 +231,11 @@ SQLITE_COMMAND_SCHEMA_CONTRACT: dict[SchemaBoundary, SchemaProfile] = {
 }
 
 DIAGNOSTIC_RUNTIME_ALIASES = {
-    "create_reminder_db": "create_reminder_db",
-    "update_reminder_db": "update_reminder_db",
-    "complete_reminder_db": "set_completion_db",
-    "delete_reminder_db": "delete_reminder_db",
     "recover_deleted_reminder": "recover_deleted_reminder",
     "create_section_db": "create_section_db",
     "move_to_section_db": "move_to_section_db",
     "add_tag_db": "tag_assignment_db",
     "remove_tag_db": "tag_assignment_db",
-    "cleanup_tags": "cleanup_tags",
     "attach_image_db": "attachment_mutation_db",
     "attach_url_db": "attachment_mutation_db",
     "delete_attachment_db": "attachment_mutation_db",

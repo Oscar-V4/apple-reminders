@@ -85,9 +85,9 @@ The public Interface is:
 
 Unused-tag cleanup, raw attachment export, attachment repair, broad
 backup/Snapshot restore, log purge, flag mutation, and `show_reminder` are
-withheld. The deprecated adapter CLI is
-an internal migration/diagnostic seam and public skills must not fall back to
-it.
+withheld. Their obsolete adapter commands, together with the former direct Core
+write and cache routes, were physically removed before 0.4. Do not add hidden
+aliases, compatibility shims, or public-skill fallbacks for them.
 
 ## Skills and Evals
 
@@ -121,22 +121,21 @@ must continue to pass `scripts/validate_minis_export.py`.
 - Keep any internal destructive/bulk operation previewable, bounded, and
   recoverable where possible. Its internal safeguards do not make it a public
   capability.
-- Prefer EventKit for fields and deletion that its public API supports; keep
-  AppleScript as a narrow internal compatibility path. Do not expose UI handoff
-  until exact selection is observable.
+- Prefer EventKit for fields and deletion that its public API supports. Do not
+  reintroduce an AppleScript mutation fallback or expose UI handoff until exact
+  selection is observable.
 - Gate private SQLite writes on explicit schema requirements, a fresh matching
   internal reminder version for existing-item mutations, transactions,
   read-back, and truthful recovery semantics. The public MCP obtains that
   version by unwrapping/revalidating the Reference. Its delete path stays in
-  EventKit; the adapter's DB delete remains internal and version/capability
-  gated.
+  EventKit; there is no adapter DB-delete fallback.
 - Treat ReminderKit and private store behavior as version-sensitive. Never turn
   a failed private path into an unreported fallback.
 - Never hard-delete reminder rows. A URL attachment object row may be removed
   only under the documented native-parity contract: exact private-schema gate,
   fresh reminder version, one transaction, retained-and-bumped cloud-state
-  tombstone, and read-back. Unused-label cleanup remains an internal,
-  digest-gated Maintenance exception documented historically in ADR 0009.
+  tombstone, and read-back. ADR 0009's unused-label cleanup was historical and
+  its implementation was removed by ADR 0014.
 - Never infer success from process exit status alone.
 - `verified` must name its evidence. Do not translate local/CloudKit evidence
   into “confirmed on iPhone” or guaranteed iCloud/shared-list delivery.

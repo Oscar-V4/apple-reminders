@@ -105,8 +105,8 @@ partial rather than full success.
 Unused-tag cleanup, raw attachment export, attachment repair, backup/Snapshot
 operations, privacy-log purge, flag mutation, and native `show_reminder`
 handoff are withheld from the public Interface. Their obsolete lower-level CLI
-implementations are scheduled for physical removal before the 0.4 release;
-skills and public MCP callers must never route to them.
+implementations were physically removed before the 0.4 release; skills and
+public MCP callers must never recreate or route to them.
 
 The repository also contains a reduced OpenMinis export under
 `minis/apple-reminders/`. It is not part of the installable macOS plugin and
@@ -266,9 +266,13 @@ and bounded. Result shapes and Receipts are enforced centrally even though MCP
 discovery remains below the release budget.
 
 `plugins/apple-reminders/scripts/reminders_adapter.py` is a lower-level implementation seam, not a
-second public API. Its old direct write, Maintenance, backup, repair, log-purge,
-flag, and UI-handoff commands are not a 0.4 compatibility promise and are a
-release-blocking deletion follow-up. Public skills must not fall back to them.
+second public API. It exposes only the 16 commands reached by the public
+Modules. The old direct write, Maintenance, backup, repair, cache, log-purge,
+flag, and UI-handoff routes were physically removed before 0.4, with no hidden
+command aliases or legacy-command shims. Retained Native commands still contain
+their documented schema-gated SQLite diagnostic branches; those are not a
+second Core-write surface. Public skills must not recreate or fall back to the
+removed routes.
 
 ## Local validation
 
@@ -361,9 +365,11 @@ Internal or development operations can create support data under:
 - `~/Library/Application Support/apple-reminders-codex/`
 - `~/Library/Caches/apple-reminders-codex/`
 
-These locations may contain sensitive identifiers, cached metadata, operation
-records, compiled helpers, capability records, or recovery snapshots. Broad
-backup restore, repair, and log-purge operations are not public tools;
+These locations may contain sensitive identifiers, operation records, compiled
+helpers, idempotency metadata, or cache/backup artifacts left by an earlier
+development version. The 0.4 runtime no longer creates reminder metadata
+caches or backup archives. Broad backup restore, repair, and log-purge
+operations are not public tools;
 Recently Deleted recovery is exact and user-directed, never automatic. See
 [PRIVACY.md](PRIVACY.md#user-control) before inspecting,
 sharing, or removing support data.
@@ -373,12 +379,12 @@ new Codex task, and confirm that no Reminders operation is running. In Finder,
 use **Go → Go to Folder…** to inspect each exact path above, then move only the
 `apple-reminders-codex` folder at those two locations to Trash. Do not remove a
 parent `Application Support` or `Caches` directory. This clears local caches,
-compiled helpers, journals, idempotency metadata, and any plugin-managed backup
+compiled helpers, journals, idempotency metadata, and any legacy cache or backup
 files that still exist; it does not undo Reminders or iCloud changes. Empty
 Trash only after deciding that any old recovery artifacts are no longer needed.
 For a full uninstall, also revoke Reminders and Automation access in **System
 Settings → Privacy & Security**, and separately inspect any custom external
-backup directory that you explicitly configured.
+legacy backup directory that you explicitly configured.
 
 ## License and contributions
 

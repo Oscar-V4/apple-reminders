@@ -53,6 +53,20 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   no-write claims to unknown instead of reconstructing state from display
   status.
 
+### Removed
+
+- Removed the obsolete 0.2 adapter CLI surface: direct Core writes, broad
+  snapshot/search/cache routes, backup and log maintenance, unused-label
+  cleanup, attachment audit/repair, and native UI handoff. The shipped parser
+  now exposes exactly the 16 commands reached by the public Modules, with no
+  deprecated command aliases or legacy-command shims. Retained Native commands
+  keep only their documented schema-gated backend branches.
+- Removed the standalone recovery-backup helper and its package/test surface.
+  Recently Deleted recovery remains in the guarded `del1` Module path; durable
+  idempotency storage remains unchanged.
+- Reduced the deterministic release-archive hard ceiling from the temporary
+  1.28 MiB allowance to 1.20 MiB after the deletion recovered package headroom.
+
 ### Fixed
 
 - Made top-level discriminated MCP schemas branch-complete so Codex discovery

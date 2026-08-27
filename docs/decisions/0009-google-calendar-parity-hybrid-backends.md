@@ -5,7 +5,8 @@
 Superseded by ADR 0010 for the 0.3 public Interface. Its hybrid-backend,
 verification, and real-use evidence decisions remain historical constraints on
 the Modules that implement the smaller Interface; its public Maintenance and
-raw-precondition shape do not carry forward.
+raw-precondition shape do not carry forward. ADR 0014 subsequently removed the
+remaining direct Core-write, cleanup, backup, cache, and repair CLI surfaces.
 
 ## Decision
 
@@ -35,23 +36,26 @@ inspection followed by attachment-ID cleanup.
 
 ## Delete Policy
 
-The MCP `delete_reminder` path uses public EventKit with an exact reminder ID and fresh `expected_last_modified`. It verifies that the reminder is absent from the local EventKit store and reports Recently Deleted as expected but unverified until UI evidence is available. An identifier that is already unresolvable is a no-write not-found result, not proof of a prior successful deletion, because EventKit identifiers can change after a full sync. The caller must read current state before retrying. The path never falls back to AppleScript or SQLite. The adapter's capability-gated DB soft-delete remains a diagnostic CLI path only.
+The MCP `delete_reminder` path uses public EventKit with an exact reminder ID and fresh `expected_last_modified`. It verifies that the reminder is absent from the local EventKit store and reports Recently Deleted as expected but unverified until UI evidence is available. An identifier that is already unresolvable is a no-write not-found result, not proof of a prior successful deletion, because EventKit identifiers can change after a full sync. The caller must read current state before retrying. The path never falls back to AppleScript or SQLite. ADR 0014 removed the former capability-gated DB soft-delete CLI path.
 
 ## Cleanup Policy
 
-`cleanup_tags --apply` remains an intentional unused-label maintenance primitive. It requires a bounded scope and preview digest, escapes wildcard characters, reacquires candidates under a write lock, proves that no assignment rows reference each label, and reports exact deleted labels plus backup/recovery semantics. Ordinary `remove_tag` only soft-deletes assignments.
+In the 0.2 design, `cleanup_tags --apply` was an intentional unused-label
+maintenance primitive with bounded scope, a preview digest, literal matching,
+a write lock, zero-reference proof, and read-back. ADR 0014 removed the command
+and backup machinery; ordinary retained `remove_tag` still soft-deletes only the
+exact assignment.
 
-Multi-label cleanup backs up only the selected SQLite store through SQLite's
-online backup interface. Cross-store attachment repair retains the broader
-container archive. Plugin-managed backups are bounded by kind-specific
-count/byte policies; explicit output paths are never auto-pruned.
+The historical implementation backed up a selected SQLite store for cleanup and
+the broader container for cross-store attachment repair. Those backup paths are
+no longer packaged; legacy artifacts remain user-controlled local files.
 
 ## 0.2.x Compatibility Policy
 
 The typed MCP/EventKit tools are the public write seam. Direct adapter public
-write commands remain present but deprecated for the rest of 0.2.x so prior
-working flows are not silently broken. Their removal requires a separately
-reviewed 0.3.0 migration.
+write commands remained present but deprecated through 0.2.x so prior working
+flows were not silently broken. ADR 0014 completed their separately reviewed
+physical removal before 0.4.
 
 ## Evidence Boundary
 

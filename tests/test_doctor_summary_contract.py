@@ -55,8 +55,8 @@ def sample_full_report() -> dict[str, object]:
                 "requires_runtime_verification": True,
             },
             "command_schema": {
-                "create_reminder_db": {"status": "ok", "supported": True},
-                "cleanup_tags": {"status": "blocked", "supported": False},
+                "delete_attachment_db": {"status": "ok", "supported": True},
+                "add_tag_db": {"status": "blocked", "supported": False},
             },
         },
         "errors": [],
@@ -105,7 +105,13 @@ class DoctorSummaryCliTests(unittest.TestCase):
             report["checks"]["platform"]["details"],
             {"large": "do not include in summary"},
         )
-        self.assertIn("create_reminder_db", report["capabilities"]["command_schema"])
+        command_schema = report["capabilities"]["command_schema"]
+        self.assertIn("delete_attachment_db", command_schema)
+        self.assertTrue(
+            {"create_reminder_db", "cleanup_tags", "delete_reminder_db"}.isdisjoint(
+                command_schema
+            )
+        )
 
 
 class DoctorSummaryMcpContractTests(unittest.TestCase):
