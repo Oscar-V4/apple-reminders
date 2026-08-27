@@ -420,6 +420,26 @@ class NativeFacade:
         except FacadeError as exc:
             return self._failure(name, arguments, exc)
         except Exception as exc:  # Keep backend details out of the public envelope.
+            if name in {
+                "create_reminder_section",
+                "organize_reminder",
+                "change_reminder_attachment",
+            }:
+                return self._pending_mutation_result(
+                    self._public_operation(name, arguments),
+                    backend="native_extension",
+                    target=self._target_for_failure(name, arguments),
+                    reason_code="native_facade_failure",
+                    message=(
+                        "The native facade failed after mutation dispatch may have "
+                        "started; read the exact state before retrying."
+                    ),
+                    next_tool=(
+                        "inspect_reminder_native"
+                        if name == "create_reminder_section"
+                        else "read_reminder"
+                    ),
+                )
             return self._failure(
                 name,
                 arguments,
@@ -451,6 +471,18 @@ class NativeFacade:
                 "tool": "request_reminders_access",
                 "retry_original_once": True,
                 "message": "Request Reminders access, then retry this operation once.",
+            }
+        elif error["code"] == "sync_pending":
+            next_tool = (
+                "inspect_reminder_native"
+                if name == "create_reminder_section"
+                else "read_reminder"
+            )
+            next_action = {
+                "kind": "fresh_read",
+                "tool": next_tool,
+                "retry_original_once": False,
+                "message": "Read the exact native state before retrying this operation.",
             }
         if name in {
             "inspect_reminder_native",
@@ -790,12 +822,32 @@ class NativeFacade:
         if not isinstance(action, Mapping):
             raise FacadeError("invalid_input", "invalid_action", "action must be an object")
         command, native_arguments = self._native_action(tool_name, dict(action))
-        guard = self._references.revalidate_reference(reference)
+        try:
+            guard = self._references.revalidate_reference(reference)
+        except ReferenceRejected:
+            raise
+        except Exception as exc:
+            raise FacadeError(
+                "sync_pending",
+                "reference_revalidation_failed",
+                "The exact Reminder reference could not be revalidated before dispatch.",
+                retryable=False,
+            ) from exc
         source_reference: str | None = None
         source_guard: Guard | None = None
         if command == "copy_image":
             source_reference = str(native_arguments.pop("source_reference"))
-            source_guard = self._references.revalidate_reference(source_reference)
+            try:
+                source_guard = self._references.revalidate_reference(source_reference)
+            except ReferenceRejected:
+                raise
+            except Exception as exc:
+                raise FacadeError(
+                    "sync_pending",
+                    "reference_revalidation_failed",
+                    "The exact source Reminder reference could not be revalidated before dispatch.",
+                    retryable=False,
+                ) from exc
             if source_guard.reminder_id == guard.reminder_id:
                 raise FacadeError(
                     "invalid_input",
@@ -927,24 +979,34 @@ class NativeFacade:
                 ):
                     raise RuntimeError("canonical final read violated its contract")
             except Exception:
-                if outcome.mutation_state == "committed":
-                    receipt["status"] = "committed_verification_pending"
-                    receipt["ok"] = True
-                    receipt["error"] = _error(
-                        "sync_pending",
-                        "native_final_read_failed",
-                        "The native write committed, but the canonical final read failed.",
-                        retryable=True,
-                    )
-                    verification = {
-                        "state": "pending",
-                        "write_performed": True,
-                        "final_read": False,
-                    }
-                    recovery = {
-                        "semantics": "read_reminder_before_retry",
-                        "automatic_retry_safe": False,
-                    }
+                if (
+                    outcome.mutation_state == "not_mutated"
+                    and command != "copy_image"
+                ):
+                    self._references.invalidate_reference(reference)
+                receipt["status"] = "committed_verification_pending"
+                receipt["ok"] = True
+                receipt["error"] = _error(
+                    "sync_pending",
+                    "native_final_read_failed",
+                    (
+                        "The native result was verified, but the canonical final "
+                        "read failed. Read the exact Reminder before retrying."
+                    ),
+                    retryable=False,
+                )
+                verification = {
+                    "state": "pending",
+                    "write_performed": (
+                        True if outcome.mutation_state == "committed" else None
+                    ),
+                    "final_read": False,
+                    "matched": None,
+                }
+                recovery = {
+                    "semantics": "read_reminder_before_retry",
+                    "automatic_retry_safe": False,
+                }
                 exact = None
             if exact is not None:
                 if outcome.mutation_state == "not_mutated":
@@ -955,12 +1017,53 @@ class NativeFacade:
                     guard.reminder_id,
                     exact.reference,
                 )
-                verification = {
-                    "state": "read_back",
-                    "write_performed": outcome.mutation_state == "committed",
-                    "final_read": True,
-                    "matched": True,
-                }
+                if not self._native_final_state_matches(
+                    command,
+                    native_arguments,
+                    receipt,
+                    after,
+                ):
+                    self._references.invalidate_reference(exact.reference)
+                    receipt["ok"] = True
+                    receipt["status"] = "committed_verification_pending"
+                    receipt["error"] = _error(
+                        "sync_pending",
+                        "native_final_state_mismatch",
+                        (
+                            "The native final state did not match the requested "
+                            "action; read the exact Reminder before retrying."
+                        ),
+                        retryable=False,
+                    )
+                    receipt["warnings"] = [
+                        {
+                            "code": "verification_pending",
+                            "message": (
+                                "The native result could not be bound to the "
+                                "requested action."
+                            ),
+                        }
+                    ]
+                    after = None
+                    verification = {
+                        "state": "pending",
+                        "write_performed": (
+                            True if outcome.mutation_state == "committed" else None
+                        ),
+                        "final_read": False,
+                        "matched": None,
+                    }
+                    recovery = {
+                        "semantics": "read_reminder_before_retry",
+                        "automatic_retry_safe": False,
+                    }
+                else:
+                    verification = {
+                        "state": "read_back",
+                        "write_performed": outcome.mutation_state == "committed",
+                        "final_read": True,
+                        "matched": True,
+                    }
 
         result: dict[str, Any] = {
             "schema_version": 2,
@@ -1283,24 +1386,202 @@ class NativeFacade:
             result["reference"] = reference
         if tool_name == "organize_reminder":
             result["section"] = _section_from_container(raw)
-            raw_tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
-            result["tags"] = [
-                item for candidate in raw_tags if (item := _tag(candidate)) is not None
-            ][:200]
+            raw_tags = raw.get("tags")
+            tags: list[dict[str, Any]] = []
+            tags_complete = isinstance(raw_tags, list) and len(raw_tags) <= 200
+            if isinstance(raw_tags, list):
+                for candidate in raw_tags:
+                    item = _tag(candidate)
+                    if item is None or NativeFacade._canonical_tag(
+                        item.get("canonical_name") or item.get("name")
+                    ) is None:
+                        tags_complete = False
+                    else:
+                        tags.append(item)
+            result["tags"] = tags[:200] if tags_complete else None
         else:
-            raw_attachments = (
-                raw.get("attachments") if isinstance(raw.get("attachments"), list) else []
+            raw_attachments = raw.get("attachments")
+            attachments: list[dict[str, Any]] = []
+            inventory_complete = (
+                isinstance(raw_attachments, list)
+                and len(raw_attachments) <= 200
+                and raw.get("truncated") is False
             )
-            result["attachments"] = [
-                item
-                for candidate in raw_attachments
-                if (item := _attachment(candidate)) is not None
-            ][:200]
-            if not result["attachments"]:
+            if isinstance(raw_attachments, list):
+                seen_ids: set[str] = set()
+                for candidate in raw_attachments:
+                    item = _attachment(candidate)
+                    if item is None:
+                        inventory_complete = False
+                    else:
+                        attachments.append(item)
+                        canonical_id = NativeFacade._canonical_identifier(
+                            item.get("id")
+                        )
+                        if canonical_id is None or canonical_id in seen_ids:
+                            inventory_complete = False
+                        else:
+                            seen_ids.add(canonical_id)
+            else:
                 single = _attachment(raw.get("attachment"))
                 if single is not None:
-                    result["attachments"] = [single]
+                    attachments = [single]
+            result["attachments"] = attachments[:200]
+            # A true value includes explicit backend truncation, a malformed
+            # row, or a legacy single-item receipt. Negative absence checks
+            # must never treat any of those as a complete inventory.
+            result["truncated"] = not inventory_complete
         return result
+
+    @staticmethod
+    def _native_final_state_matches(
+        command: str,
+        arguments: Mapping[str, Any],
+        receipt: Mapping[str, Any],
+        after: Mapping[str, Any] | None,
+    ) -> bool:
+        if not isinstance(after, Mapping):
+            return False
+        if command == "move_to_section":
+            section = after.get("section")
+            expected_section = NativeFacade._canonical_identifier(
+                arguments.get("section_id")
+            )
+            return (
+                isinstance(section, Mapping)
+                and expected_section is not None
+                and NativeFacade._canonical_identifier(section.get("id"))
+                == expected_section
+            )
+        if command in {"add_tag", "remove_tag"}:
+            canonical = NativeFacade._canonical_tag(arguments.get("tag"))
+            if canonical is None:
+                return False
+            tags = after.get("tags")
+            if not isinstance(tags, list):
+                return False
+            present = any(
+                isinstance(tag, Mapping)
+                and canonical
+                in {
+                    NativeFacade._canonical_tag(tag.get("name")),
+                    NativeFacade._canonical_tag(tag.get("canonical_name")),
+                }
+                for tag in tags
+            )
+            return present if command == "add_tag" else not present
+
+        attachments = (
+            after.get("attachments")
+            if isinstance(after.get("attachments"), list)
+            else []
+        )
+        by_id: dict[str, Mapping[str, Any]] = {}
+        duplicate_ids: set[str] = set()
+        for attachment in attachments:
+            if not isinstance(attachment, Mapping):
+                continue
+            canonical_id = NativeFacade._canonical_identifier(attachment.get("id"))
+            if canonical_id is not None:
+                if canonical_id in by_id:
+                    duplicate_ids.add(canonical_id)
+                by_id[canonical_id] = attachment
+        if command == "delete_attachment":
+            attachment_id = NativeFacade._canonical_identifier(
+                arguments.get("attachment_id")
+            )
+            return (
+                after.get("truncated") is False
+                and attachment_id is not None
+                and attachment_id not in by_id
+            )
+
+        target = receipt.get("target")
+        target = target if isinstance(target, Mapping) else {}
+        expected_id = (
+            target.get("new_attachment_id")
+            if command in {"replace_image", "replace_url"}
+            else target.get("attachment_id")
+        )
+        expected_id = NativeFacade._canonical_identifier(expected_id)
+        if expected_id is None:
+            return False
+        if expected_id in duplicate_ids:
+            return False
+        attachment = by_id.get(expected_id)
+        if not isinstance(attachment, Mapping):
+            return False
+        if command in {"attach_image", "replace_image"}:
+            sync = attachment.get("sync")
+            backend_verification = receipt.get("verification")
+            matches = (
+                attachment.get("type") == "image"
+                and isinstance(sync, Mapping)
+                and sync.get("mobile_visible_likely") is True
+                and isinstance(backend_verification, Mapping)
+                and backend_verification.get("final_attachment_content_matched")
+                is True
+                and backend_verification.get("mobile_visible_likely") is True
+            )
+        elif command in {"attach_url", "replace_url"}:
+            matches = (
+                attachment.get("type") == "url"
+                and attachment.get("url") == arguments.get("url")
+            )
+        elif command == "copy_image":
+            sync = attachment.get("sync")
+            backend_verification = receipt.get("verification")
+            matches = (
+                attachment.get("type") == "image"
+                and isinstance(sync, Mapping)
+                and sync.get("mobile_visible_likely") is True
+                and isinstance(backend_verification, Mapping)
+                and all(
+                    backend_verification.get(field) is True
+                    for field in (
+                        "source_unchanged",
+                        "source_bytes_matched",
+                        "destination_attachment_active",
+                        "destination_content_matched",
+                        "destination_mobile_visible_likely",
+                    )
+                )
+            )
+        else:
+            return False
+        if not matches:
+            return False
+        if command in {"replace_image", "replace_url"}:
+            old_id = NativeFacade._canonical_identifier(arguments.get("attachment_id"))
+            return (
+                after.get("truncated") is False
+                and old_id is not None
+                and old_id not in by_id
+            )
+        return True
+
+    @staticmethod
+    def _canonical_identifier(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.startswith("x-apple-reminder://"):
+            candidate = candidate.removeprefix("x-apple-reminder://")
+        try:
+            return str(uuid.UUID(candidate)).upper()
+        except ValueError:
+            return candidate
+
+    @staticmethod
+    def _canonical_tag(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        canonical = value.strip()
+        while canonical.startswith("#"):
+            canonical = canonical[1:].strip()
+        return canonical.casefold() if canonical else None
 
     @staticmethod
     def _read_success(operation: str, data: dict[str, Any]) -> dict[str, Any]:

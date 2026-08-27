@@ -50,6 +50,7 @@ from reminders_contracts import (  # noqa: E402
 )
 from reminders_image_input import (  # noqa: E402
     ImageInputError,
+    ValidatedImage,
     validate_image_input,
 )
 
@@ -783,9 +784,15 @@ def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
                     "automatic_retry_safe",
                     "code",
                     "final_read",
+                    "final_attachment_content_hash",
+                    "final_attachment_content_matched",
                     "matched",
+                    "mobile_visible_likely",
                     "reason_code",
                     "retryable",
+                    "destination_attachment_active",
+                    "destination_content_matched",
+                    "destination_mobile_visible_likely",
                     "source_bytes_matched",
                     "source_unchanged",
                     "write_performed",
@@ -816,27 +823,77 @@ def load_idempotency_store() -> dict[str, Any]:
     try:
         with IDEMPOTENCY_STORE.open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {"version": 1, "entries": {}}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdapterError(
+            "The durable idempotency store could not be read safely.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+            mutation_not_started=True,
+        ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
-        return {"version": 1, "entries": {}}
+        raise AdapterError(
+            "The durable idempotency store has an unsupported structure.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+            mutation_not_started=True,
+        )
     return payload
 
 
-def prune_idempotency_entries(entries: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+def idempotency_record_in_progress(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    state = value.get("state")
+    if state == "in_progress":
+        return True
+    if state == "complete":
+        return False
+    # Legacy v1 records with a stored result are complete. Any other unknown
+    # shape is treated as an incomplete fence so capacity maintenance fails
+    # closed instead of authorizing a duplicate write.
+    stored_result = value.get("result")
+    return not isinstance(stored_result, dict) or not bool(stored_result)
+
+
+def prune_idempotency_entries(
+    entries: dict[str, Any],
+    *,
+    now: float | None = None,
+    protected_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     current = now if now is not None else time.time()
     cutoff = current - IDEMPOTENCY_RETENTION_DAYS * 86400
     retained = {
         key: value
         for key, value in entries.items()
-        if isinstance(value, dict) and float(value.get("created_at_epoch", 0)) >= cutoff
+        if isinstance(value, dict)
+        and (
+            key in protected_keys
+            or float(value.get("created_at_epoch", 0)) >= cutoff
+        )
     }
-    ordered = sorted(
-        retained.items(),
+    in_progress = sorted(
+        (
+            (key, value)
+            for key, value in retained.items()
+            if idempotency_record_in_progress(value)
+        ),
         key=lambda item: float(item[1].get("created_at_epoch", 0)),
         reverse=True,
-    )[:IDEMPOTENCY_MAX_ENTRIES]
-    return dict(ordered)
+    )
+    completed = sorted(
+        (
+            (key, value)
+            for key, value in retained.items()
+            if not idempotency_record_in_progress(value)
+        ),
+        key=lambda item: float(item[1].get("created_at_epoch", 0)),
+        reverse=True,
+    )
+    remaining_slots = max(0, IDEMPOTENCY_MAX_ENTRIES - len(in_progress))
+    return dict([*in_progress, *completed[:remaining_slots]])
 
 
 def write_idempotency_store(payload: dict[str, Any]) -> None:
@@ -858,10 +915,75 @@ def write_idempotency_store(payload: dict[str, Any]) -> None:
         temp_path.chmod(0o600)
         os.replace(temp_path, IDEMPOTENCY_STORE)
         IDEMPOTENCY_STORE.chmod(0o600)
+        directory_fd = os.open(APP_SUPPORT, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temp_path.unlink(missing_ok=True)
 
 
+def idempotency_outcome_unknown_receipt(
+    operation: str,
+    operation_id: str,
+) -> dict[str, Any]:
+    receipt_operation = {
+        "eventkit_create_reminder": "create_reminder",
+        "copy_image_attachment": "copy_image",
+    }.get(operation, operation)
+    message = (
+        "A prior call crossed its durable idempotency fence, but its final "
+        "Receipt was not persisted. Read the exact target before retrying."
+    )
+    return operation_receipt(
+        status="committed_verification_pending",
+        operation=receipt_operation,
+        operation_id=operation_id,
+        backend="idempotency_fence",
+        target={},
+        before={},
+        after={},
+        verification={
+            "state": "pending",
+            "write_performed": None,
+            "final_read": False,
+        },
+        recovery={
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        },
+        warnings=[
+            {
+                "code": "verification_pending",
+                "message": message,
+            }
+        ],
+        error={
+            "code": "sync_pending",
+            "reason_code": "idempotency_outcome_unknown",
+            "message": message,
+            "retryable": False,
+        },
+    )
+
+
+def adapter_error_proves_no_mutation(error: AdapterError) -> bool:
+    """Mirror the adapter's public failure boundary for callback exceptions."""
+
+    details = error.details
+    if details.get("mutation_not_started") is True:
+        return True
+    if (
+        details.get("partial_failure") is True
+        or details.get("mutation_outcome_unknown") is True
+    ):
+        return False
+    return details.get("result_status") not in {
+        "committed_verification_pending",
+        "partial_success",
+        "failed_manual_repair_required",
+    }
 def execute_idempotent(
     *,
     operation: str,
@@ -878,7 +1000,10 @@ def execute_idempotent(
         IDEMPOTENCY_LOCK.chmod(0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         payload = load_idempotency_store()
-        entries = prune_idempotency_entries(payload.get("entries", {}))
+        entries = prune_idempotency_entries(
+            payload.get("entries", {}),
+            protected_keys=frozenset({key_hash}),
+        )
         record = entries.get(key_hash)
         if record:
             if record.get("input_hash") != input_hash:
@@ -887,20 +1012,112 @@ def execute_idempotent(
                     code="concurrent_modification",
                     operation=operation,
                 )
-            replay = dict(record.get("result") or {})
+            stored_result = record.get("result")
+            if (
+                record.get("state") == "complete"
+                or (
+                    "state" not in record
+                    and isinstance(stored_result, dict)
+                    and bool(stored_result)
+                )
+            ):
+                replay = dict(stored_result or {})
+            else:
+                operation_id = record.get("operation_id")
+                if not isinstance(operation_id, str) or not operation_id:
+                    operation_id = new_operation_id()
+                replay = idempotency_outcome_unknown_receipt(
+                    operation,
+                    operation_id,
+                )
             replay["replayed"] = True
             replay["idempotency_key_hash"] = key_hash
             return replay
 
-        result = callback()
+        while len(entries) >= IDEMPOTENCY_MAX_ENTRIES:
+            completed_keys = [
+                entry_key
+                for entry_key, entry in entries.items()
+                if not idempotency_record_in_progress(entry)
+            ]
+            if not completed_keys:
+                raise AdapterError(
+                    "The durable idempotency fence capacity is occupied by unresolved operations.",
+                    code="unexpected_error",
+                    reason_code="idempotency_capacity_exhausted",
+                    mutation_not_started=True,
+                )
+            oldest_key = min(
+                completed_keys,
+                key=lambda item: float(entries[item].get("created_at_epoch", 0)),
+            )
+            entries.pop(oldest_key)
+        created_at_epoch = time.time()
+        fence_operation_id = new_operation_id()
         entries[key_hash] = {
             "operation": operation,
             "input_hash": input_hash,
-            "created_at_epoch": time.time(),
+            "created_at_epoch": created_at_epoch,
+            "state": "in_progress",
+            "operation_id": fence_operation_id,
+        }
+        try:
+            write_idempotency_store(
+                {
+                    "version": 1,
+                    "entries": prune_idempotency_entries(
+                        entries,
+                        protected_keys=frozenset({key_hash}),
+                    ),
+                }
+            )
+        except OSError as exc:
+            raise AdapterError(
+                "The idempotency fence could not be persisted before dispatch.",
+                code="unexpected_error",
+                reason_code="idempotency_fence_write_failed",
+                mutation_not_started=True,
+            ) from exc
+
+        try:
+            result = callback()
+        except AdapterError as exc:
+            if not adapter_error_proves_no_mutation(exc):
+                raise
+            entries.pop(key_hash, None)
+            try:
+                write_idempotency_store(
+                    {"version": 1, "entries": prune_idempotency_entries(entries)}
+                )
+            except OSError as cleanup_exc:
+                # The callback itself proved no write, but the durable fence
+                # could not be removed. Keep the on-disk fence fail-closed so
+                # a retry cannot accidentally redispatch under uncertainty.
+                raise AdapterError(
+                    "The no-write callback failed and its idempotency fence could not be cleared.",
+                    code="unexpected_error",
+                    reason_code="idempotency_fence_cleanup_failed",
+                    mutation_not_started=True,
+                ) from cleanup_exc
+            raise
+        entries[key_hash] = {
+            "operation": operation,
+            "input_hash": input_hash,
+            "created_at_epoch": created_at_epoch,
+            "state": "complete",
+            "operation_id": fence_operation_id,
             "result": idempotency_result_snapshot(result),
         }
         try:
-            write_idempotency_store({"version": 1, "entries": prune_idempotency_entries(entries)})
+            write_idempotency_store(
+                {
+                    "version": 1,
+                    "entries": prune_idempotency_entries(
+                        entries,
+                        protected_keys=frozenset({key_hash}),
+                    ),
+                }
+            )
         except OSError as exc:
             result.setdefault("warnings", []).append(
                 {
@@ -1864,6 +2081,22 @@ def image_copy_content_identity(attachment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def image_attachment_content_hash(attachment: dict[str, Any]) -> str:
+    """Hash direct-attachment byte/type evidence without persisting raw fields."""
+
+    digest = attachment.get("sha512")
+    return stable_hash(
+        {
+            "type": attachment.get("type"),
+            "uti": attachment.get("uti"),
+            "sha512": digest.casefold() if isinstance(digest, str) else digest,
+            "file_size": attachment.get("file_size"),
+            "width": attachment.get("width"),
+            "height": attachment.get("height"),
+        }
+    )
+
+
 def exact_source_image_path(attachment: dict[str, Any]) -> Path:
     """Resolve one active image's private backing bytes without exposing their path.
 
@@ -2414,9 +2647,20 @@ def attach_image_reminderkit_record(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
     image: Path,
+    *,
+    validated_image: ValidatedImage | None = None,
 ) -> dict[str, Any]:
     if not image.exists():
         raise AdapterError(f"Image not found: {image.name}")
+    if validated_image is None:
+        try:
+            validated_image = validate_image_input(image)
+        except ImageInputError as exc:
+            raise AdapterError(
+                str(exc),
+                code="invalid_input",
+                reason_code=exc.reason_code,
+            ) from exc
     before_rows = active_attachment_rows(
         con,
         reminder["Z_PK"],
@@ -2424,23 +2668,51 @@ def attach_image_reminderkit_record(
     )
     before_ids = {row["ZCKIDENTIFIER"] for row in before_rows}
     helper = reminderkit_attach_helper()
-    try:
-        proc = subprocess.run(
-            [str(helper), reminder["ZCKIDENTIFIER"], str(image)],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    ensure_private_dir(CACHE_DIR)
+    suffix = ".png" if validated_image.format == "png" else ".jpg"
+    with tempfile.TemporaryDirectory(prefix="attach-image.", dir=CACHE_DIR) as temp_dir:
+        snapshot_path = Path(temp_dir) / f"input{suffix}"
+        shutil.copyfile(validated_image.path, snapshot_path)
+        snapshot_path.chmod(0o600)
+        try:
+            snapshot_bytes = snapshot_path.read_bytes()
+        except OSError as exc:
+            raise AdapterError(
+                "The validated image snapshot could not be read",
+                code="invalid_input",
+                reason_code="image_snapshot_unreadable",
+            ) from exc
+        snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
+        if (
+            snapshot_sha256 != validated_image.sha256
+            or len(snapshot_bytes) != validated_image.bytes
+        ):
+            raise AdapterError(
+                "The image changed before native attachment dispatch",
+                code="concurrent_modification",
+                reason_code="image_changed_before_dispatch",
+            )
+        expected_sha512 = hashlib.sha512(snapshot_bytes).hexdigest()
+        expected_uti = (
+            "public.png" if validated_image.format == "png" else "public.jpeg"
         )
-    except subprocess.TimeoutExpired as exc:
-        raise AdapterError(
-            "ReminderKit image attachment timed out",
-            code="sync_pending",
-            image=image.name,
-            partial_failure=True,
-            mutation_outcome_unknown=True,
-        ) from exc
+        try:
+            proc = subprocess.run(
+                [str(helper), reminder["ZCKIDENTIFIER"], str(snapshot_path)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AdapterError(
+                "ReminderKit image attachment timed out",
+                code="sync_pending",
+                image=image.name,
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+            ) from exc
     raw = (proc.stdout or "").strip()
     try:
         payload = json.loads(raw) if raw else {}
@@ -2542,9 +2814,10 @@ def attach_image_reminderkit_record(
             ),
         )
     helper_image_uti = payload.get("image_uti")
-    if helper_image_uti not in {"public.jpeg", "public.png"} or attachment.get(
-        "uti"
-    ) != helper_image_uti:
+    if (
+        helper_image_uti != expected_uti
+        or attachment.get("uti") != expected_uti
+    ):
         raise AttachmentVerificationError(
             "Image attachment content type did not survive native read-back",
             row=selected,
@@ -2558,6 +2831,26 @@ def attach_image_reminderkit_record(
                 else "missing"
             ),
             stored_image_uti=attachment.get("uti"),
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
+    if (
+        not isinstance(attachment.get("sha512"), str)
+        or attachment["sha512"].casefold() != expected_sha512.casefold()
+        or attachment.get("file_size") != validated_image.bytes
+        or attachment.get("width") != validated_image.width
+        or attachment.get("height") != validated_image.height
+    ):
+        raise AttachmentVerificationError(
+            "Image attachment bytes or decoded dimensions did not match the dispatched snapshot",
+            row=selected,
+            reason_code="native_image_content_mismatch",
+            retryable=False,
+            partial_failure=True,
+            attachment=attachment,
             cleanup_command=(
                 "delete_attachment "
                 f"--id {reminder['ZCKIDENTIFIER']} "
@@ -6819,12 +7112,20 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
         before = reminder_mutation_snapshot(reminder)
         if args.backend == "reminderkit":
             try:
-                result = attach_image_reminderkit_record(con, reminder, image)
+                result = attach_image_reminderkit_record(
+                    con,
+                    reminder,
+                    image,
+                    validated_image=getattr(args, "_validated_image", None),
+                )
                 status = "verified"
                 verification = {
                     "state": "read_back",
                     "mobile_visible_likely": True,
                     "sync_status": "verified_mobile_visible",
+                    "final_attachment_content_hash": image_attachment_content_hash(
+                        result["attachment"]
+                    ),
                 }
                 recovery = {
                     "semantics": "delete_attachment_with_fresh_reference",
@@ -7626,7 +7927,11 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                     required=True,
                 )
                 try:
-                    new_result = attach_image_reminderkit_record(con, reminder, source)
+                    new_result = attach_image_reminderkit_record(
+                        con,
+                        reminder,
+                        source,
+                    )
                 except AttachmentVerificationError as attach_exc:
                     new_result = attach_exc.compensation_result()
                     raise
@@ -8022,6 +8327,7 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
                     con,
                     reminder,
                     Path(args.image).expanduser().resolve(),
+                    validated_image=getattr(args, "_validated_image", None),
                 )
             except AttachmentVerificationError as attach_exc:
                 new_result = attach_exc.compensation_result()
@@ -8141,6 +8447,11 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             verification={
                 "state": "read_back",
                 **readback,
+                "final_attachment_content_hash": (
+                    image_attachment_content_hash(new_attachment)
+                    if args.image
+                    else None
+                ),
                 "old_attachment_cloud_state_retained": deleted.get(
                     "cloud_state_tombstone_retained"
                 ),
@@ -8787,6 +9098,7 @@ def main(argv: list[str] | None = None) -> int:
                     reason_code=exc.reason_code,
                 ) from exc
             args.image = str(validated_image.path)
+            args._validated_image = validated_image
             args._validated_image_sha256 = validated_image.sha256
         return args.func(args)
     except AdapterError as exc:

@@ -66,6 +66,23 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   page inside one pinned read transaction, with page revisions checked against
   the fingerprint. Missing or expired deleted items now retain typed
   `not_found` errors.
+- Bound every terminal Core create/change and ordinary Native mutation to the
+  requested field or action before returning `verified` or issuing a fresh
+  `rev1`. A contradictory final read or post-dispatch projection failure now
+  preserves a possible write and requires a fresh read instead of claiming
+  success or `failed_no_mutation`; pre-dispatch Reference read failures remain
+  proven no-write results.
+- Canonicalized native UUID and tag comparisons and require complete,
+  non-truncated inventories before proving a tag or attachment absent. Image
+  success now binds a mode-0600 validated snapshot to the final SHA-512, byte
+  size, dimensions, decoded UTI, and mobile-visible CloudKit evidence.
+- Added a content-free durable idempotency fence before commit-capable adapter
+  callbacks. Store damage or a failed pre-dispatch fence stops the write, while
+  a crash or final-Receipt persistence failure blocks redispatch and returns
+  verification-pending on replay. The current key survives wall-clock jumps,
+  and unresolved fences cannot be evicted merely to make capacity for a new
+  write. A callback failure that affirmatively occurred before mutation clears
+  its fence for a safe retry; possible-commit failures retain it.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public

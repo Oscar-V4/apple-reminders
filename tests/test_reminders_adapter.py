@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -20,6 +21,24 @@ SPEC = importlib.util.spec_from_file_location("reminders_adapter", ADAPTER_PATH)
 assert SPEC and SPEC.loader
 reminders_adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reminders_adapter)
+
+
+def validated_image_fixture(
+    path: Path,
+    *,
+    width: int = 100,
+    height: int = 50,
+    image_format: str = "png",
+) -> object:
+    data = path.read_bytes()
+    return reminders_adapter.ValidatedImage(
+        path=path.resolve(),
+        format=image_format,
+        bytes=len(data),
+        width=width,
+        height=height,
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
 
 
 class ReminderTextDocumentTests(unittest.TestCase):
@@ -1302,6 +1321,7 @@ class CrossReminderImageCopyTests(unittest.TestCase):
                     "final_read": True,
                     "matched": True,
                     "source_unchanged": True,
+                    "final_attachment_content_hash": "a" * 64,
                 },
                 "recovery": {
                     "semantics": "not_applicable",
@@ -1314,6 +1334,10 @@ class CrossReminderImageCopyTests(unittest.TestCase):
         self.assertTrue(snapshot["verification"]["write_performed"])
         self.assertTrue(snapshot["verification"]["final_read"])
         self.assertTrue(snapshot["verification"]["matched"])
+        self.assertEqual(
+            snapshot["verification"]["final_attachment_content_hash"],
+            "a" * 64,
+        )
         self.assertFalse(snapshot["recovery"]["automatic_retry_safe"])
         self.assertNotIn("private_path", snapshot)
 
@@ -1339,6 +1363,7 @@ class AttachmentSyncTests(unittest.TestCase):
         def attach_without_lock(
             active: sqlite3.Connection,
             *_: object,
+            **__: object,
         ) -> dict[str, object]:
             self.assertFalse(active.in_transaction)
             return {
@@ -2332,6 +2357,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -2414,6 +2440,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -2431,9 +2458,9 @@ class AttachmentSyncTests(unittest.TestCase):
             "ZREMINDER2": 1,
             "Z_FOK_REMINDER1": 1024,
             "ZFILENAME": "new.png",
-            "ZSHA512SUM": "sha",
+            "ZSHA512SUM": hashlib.sha512(b"synthetic").hexdigest(),
             "ZUTI": "public.png",
-            "ZFILESIZE": 12,
+            "ZFILESIZE": len(b"synthetic"),
             "ZWIDTH": 100,
             "ZHEIGHT": 50,
             "ZURL": None,
@@ -2526,6 +2553,7 @@ class AttachmentSyncTests(unittest.TestCase):
                     con,
                     {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                     image,
+                    validated_image=validated_image_fixture(image),
                 )
 
         self.assertTrue(result["attached"])
@@ -2551,6 +2579,14 @@ class AttachmentSyncTests(unittest.TestCase):
                 "stored_image_uti",
                 "public.png",
                 "native_image_content_type_mismatch",
+            ),
+            (
+                "content_mismatch",
+                "data",
+                "public.png",
+                None,
+                None,
+                "native_image_content_mismatch",
             ),
         )
         for (
@@ -2645,6 +2681,7 @@ class AttachmentSyncTests(unittest.TestCase):
                             con,
                             {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                             image,
+                            validated_image=validated_image_fixture(image),
                         )
                 finally:
                     con.close()
@@ -2653,7 +2690,10 @@ class AttachmentSyncTests(unittest.TestCase):
                 self.assertEqual(raised.exception.reason_code, reason_code)
                 self.assertFalse(raised.exception.retryable)
                 self.assertTrue(raised.exception.details["partial_failure"])
-                self.assertEqual(raised.exception.details[detail_key], detail_value)
+                if detail_key is not None:
+                    self.assertEqual(
+                        raised.exception.details[detail_key], detail_value
+                    )
                 self.assertIn(
                     "delete_attachment",
                     raised.exception.details["cleanup_command"],
@@ -2713,6 +2753,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -2769,6 +2810,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()

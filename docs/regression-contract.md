@@ -143,6 +143,30 @@ even though optional MCP `outputSchema` descriptors are omitted from
     read transaction, and hydrated page revisions must match the fingerprint.
     A fresh unchanged EventKit URL with any non-target native URL is a no-write
     ambiguity, including the stale-A-only state where B is absent.
+25. A terminal Core create/change or ordinary Native mutation is not
+    `verified` until a canonical final state matches the requested fields or
+    closed action. Contradictory final state issues no fresh Reference and
+    requires a fresh read; an exception while projecting a post-dispatch Native
+    result cannot become `failed_no_mutation`, while an exception during
+    pre-dispatch Reference revalidation cannot become a possible-commit result.
+    Downgrading `unchanged` after a failed final read must remain a
+    contract-valid pending result with unknown write state.
+26. Native UUID comparisons use canonical UUID spelling and tag comparisons
+    use the adapter's hash-prefix-insensitive canonical form. Removing a tag or
+    deleting/replacing an attachment requires a complete, valid,
+    non-truncated inventory; omitted, malformed, oversized, or truncated rows
+    cannot prove absence. Verified image attach/replace/copy binds one stable
+    mode-0600 pre-dispatch snapshot to final digest, size, dimensions, decoded
+    UTI where applicable, and affirmative mobile-visible CloudKit evidence.
+27. Commit-capable idempotent adapter work persists a content-free
+    `in_progress` fence before dispatch. An unreadable store or failed fence
+    prevents dispatch; an incomplete fence on replay blocks the callback and
+    returns outcome-unknown. The current key is protected from wall-clock
+    pruning, and unresolved fences are never capacity-evicted to admit a new
+    mutation; a full unresolved store fails closed before dispatch. An adapter
+    callback error that the existing receipt boundary proves happened before
+    mutation atomically clears its fence, while partial or outcome-unknown
+    errors keep the fence and block redispatch.
 
 ## Deliberately withheld behavior
 

@@ -156,7 +156,10 @@ class WorkflowHardeningTests(unittest.TestCase):
                 set(copy_action["required"]),
                 {"kind", "source_reference", "attachment_id", "idempotency_key"},
             )
-            self.assertIn("Cross-reminder image copy | **Supported**", matrix)
+            self.assertIn(
+                "Cross-reminder image copy | **Supported with platform boundary**",
+                matrix,
+            )
             self.assertIn('{"kind":"copy_image"', public_interface)
             self.assertIn("source stays unchanged", attachment_skill)
             self.assertIn(

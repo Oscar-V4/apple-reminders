@@ -654,7 +654,7 @@ class V2CoreFacadeTests(unittest.TestCase):
 
     def test_create_translates_list_id_and_returns_one_final_reference(self) -> None:
         eventkit = FakeEventKit()
-        created = native_reminder(title="Buy oat milk")
+        created = {**native_reminder(title="Buy oat milk"), "notes": "Unsweetened"}
         eventkit.queue(
             "create_reminder",
             mutation_receipt("create_reminder", {}, created),
@@ -687,6 +687,97 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["after"]["list_id"], "LIST-1")
         self.assertEqual(result["after"]["reference"], "rev1." + "A" * 32)
         self.assertTrue(result["verification"]["final_read"])
+
+    def test_create_final_read_must_match_the_requested_fields(self) -> None:
+        eventkit = FakeEventKit()
+        created = native_reminder(title="Requested title")
+        eventkit.queue(
+            "create_reminder",
+            mutation_receipt("create_reminder", {}, created),
+            mutation=True,
+        )
+        eventkit.queue(
+            "read_reminder",
+            read_receipt(native_reminder(title="Conflicting title")),
+        )
+
+        result = facade(eventkit).create_reminder(
+            {
+                "list_id": "LIST-1",
+                "title": "Requested title",
+                "idempotency_key": "capture-final-mismatch",
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["matched"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertEqual(result["error"]["reason_code"], "create_final_state_mismatch")
+        self.assertNotIn("rev1.", repr(result))
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+
+    def test_unchanged_create_with_failed_final_read_is_contract_valid_pending(self) -> None:
+        eventkit = FakeEventKit()
+        created = native_reminder(title="Already present")
+        unchanged = mutation_receipt("create_reminder", {}, created)
+        unchanged["status"] = "unchanged"
+        unchanged["verification"]["write_performed"] = False
+        unchanged["recovery"]["automatic_retry_safe"] = True
+        eventkit.queue("create_reminder", unchanged, mutation=True)
+        eventkit.queue(
+            "read_reminder",
+            {
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "read_reminder",
+                "error": {
+                    "code": "sync_pending",
+                    "reason_code": "exact_read_unavailable",
+                    "message": "The exact read is temporarily unavailable.",
+                    "retryable": True,
+                },
+            },
+            is_error=True,
+        )
+
+        result = facade(eventkit).create_reminder(
+            {
+                "list_id": "LIST-1",
+                "title": "Already present",
+                "idempotency_key": "capture-unchanged-final-read-failure",
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+        self.assertEqual(result["next_action"]["tool"], "fetch_reminders")
+        validate_public_result("create_reminder", result, "unknown")
+
+    def test_unchanged_delete_without_absence_proof_is_contract_valid_pending(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("read_reminder", read_receipt(before))
+        unchanged = mutation_receipt("delete_reminder", before, before)
+        unchanged["status"] = "unchanged"
+        unchanged["verification"]["write_performed"] = False
+        unchanged["verification"].pop("local_absence", None)
+        unchanged["recovery"]["automatic_retry_safe"] = True
+        eventkit.queue("delete_reminder", unchanged, mutation=True)
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})["data"][
+            "reminder"
+        ]["reference"]
+
+        result = subject.delete_reminder({"reference": reference})
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+        self.assertEqual(result["next_action"]["tool"], "read_reminder")
+        validate_public_result("delete_reminder", result, "unknown")
 
     def test_create_partial_success_never_issues_a_writable_reference(self) -> None:
         eventkit = FakeEventKit()
@@ -1130,6 +1221,77 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
         self.assertEqual(result["warnings"][0]["code"], "native_receipt_preserved")
         self.assertNotIn("calendar_id", repr(result))
+
+    def test_change_final_read_must_match_the_requested_action(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        committed = native_reminder(
+            title="Requested title",
+            last_modified="2026-08-25T02:00:00.000Z",
+        )
+        conflicting = native_reminder(
+            title="Conflicting title",
+            last_modified="2026-08-25T03:00:00.000Z",
+        )
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue(
+            "update_reminder",
+            mutation_receipt("update_reminder", before, committed),
+            mutation=True,
+        )
+        eventkit.queue("read_reminder", read_receipt(conflicting))
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})["data"][
+            "reminder"
+        ]["reference"]
+
+        result = subject.change_reminder(
+            {
+                "reference": reference,
+                "action": {
+                    "kind": "patch",
+                    "patch": {"title": "Requested title"},
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["matched"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertEqual(result["error"]["reason_code"], "final_state_mismatch")
+        self.assertNotIn("rev1.", repr(result))
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+
+    def test_unchanged_receipt_with_mismatched_final_state_preserves_uncertainty(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        unchanged = mutation_receipt("update_reminder", before, before)
+        unchanged["status"] = "unchanged"
+        unchanged["verification"]["write_performed"] = False
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("update_reminder", unchanged, mutation=True)
+        eventkit.queue(
+            "read_reminder",
+            read_receipt(native_reminder(title="Conflicting title")),
+        )
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})["data"][
+            "reminder"
+        ]["reference"]
+
+        result = subject.change_reminder(
+            {
+                "reference": reference,
+                "action": {"kind": "patch", "patch": {"title": "Requested title"}},
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertIsNone(result["verification"]["matched"])
+        self.assertNotIn("rev1.", repr(result))
+        validate_public_result("change_reminder", result, "unknown")
 
     def test_change_projection_strips_private_url_attachment_fields(self) -> None:
         result = _change_reminder(

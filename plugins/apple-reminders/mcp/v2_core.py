@@ -44,6 +44,7 @@ from reminders_service import (  # noqa: E402
     ReferenceRejected,
     SetCompletionAction,
     Snapshot,
+    reminder_matches_fields,
 )
 if __package__:  # Package import in tests; script-local import in the stdio server.
     from .v2_contract import MUTATION_STATUSES, SUCCESS_STATUSES
@@ -1513,6 +1514,33 @@ class V2CoreFacade:
                     reason_code="create_final_read_failed",
                     message="The create committed, but a fresh exact reference could not be issued.",
                 )
+            expected_fields = {
+                "list_id": list_id,
+                "title": title,
+                **{
+                    field: copy.deepcopy(arguments[field])
+                    for field in (
+                        "notes",
+                        "url",
+                        "priority",
+                        "due",
+                        "alarms",
+                        "recurrence_rules",
+                    )
+                    if field in arguments
+                },
+            }
+            if not reminder_matches_fields(exact.reminder, expected_fields):
+                self._references.invalidate_reference(exact.reference)
+                return self._mark_final_state_mismatch(
+                    receipt,
+                    reason_code="create_final_state_mismatch",
+                    message=(
+                        "The create returned an exact Reminder, but its final state "
+                        "did not match the requested fields. Read the list before "
+                        "another create."
+                    ),
+                )
             receipt["after"] = _change_reminder(
                 exact.reminder,
                 reference=exact.reference,
@@ -1696,7 +1724,16 @@ class V2CoreFacade:
             receipt["before"] = None
             receipt["after"] = None
 
-        if result.reference_error == "final_read_failed":
+        if result.reference_error == "final_state_mismatch":
+            receipt = self._mark_final_state_mismatch(
+                receipt,
+                reason_code="final_state_mismatch",
+                message=(
+                    "The canonical final Reminder did not match the requested "
+                    "change. Read the exact Reminder before another mutation."
+                ),
+            )
+        elif result.reference_error == "final_read_failed":
             receipt["status"] = "committed_verification_pending"
             receipt["ok"] = True
             receipt["verification"] = {
@@ -1791,11 +1828,21 @@ class V2CoreFacade:
         result["status"] = "committed_verification_pending"
         result["after"] = None
         existing_verification = _deep_dict(result.get("verification"))
+        prior_write = existing_verification.get("write_performed")
         result["verification"] = {
             "state": "pending",
-            "write_performed": existing_verification.get("write_performed", True),
+            # Once the terminal final read cannot be bound, a prior unchanged
+            # claim is no longer enough to prove the entire operation was a
+            # no-write. Preserve affirmative commit evidence, otherwise keep
+            # the mutation outcome unknown rather than emit a contract-invalid
+            # pending receipt with write_performed=false.
+            "write_performed": True if prior_write is True else None,
             "final_read": False,
             "matched": None,
+        }
+        result["recovery"] = {
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
         }
         warnings = _warnings(result.get("warnings"))
         warnings.append(
@@ -1816,6 +1863,26 @@ class V2CoreFacade:
             error,
             operation=str(result.get("operation") or ""),
         )
+        return result
+
+    def _mark_final_state_mismatch(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        reason_code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        result = self._mark_final_read_pending(
+            receipt,
+            reason_code=reason_code,
+            message=message,
+        )
+        result["verification"]["write_performed"] = None
+        result["verification"]["matched"] = None
+        result["recovery"] = {
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        }
         return result
 
     def _unknown_mutation_result(

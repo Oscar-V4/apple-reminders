@@ -25,10 +25,10 @@
       "id": 3,
       "category": "direct",
       "prompt": "취업캠프 준비 미리알림의 기존 참고 링크를 새 URL로 바꿔줘.",
-      "expected_output": "Resolves the exact reminder and attachment, gets a fresh opaque reference, calls change_reminder_attachment with replace_url and the exact attachment ID, and reports final read-back state.",
+      "expected_output": "Resolves the exact Reminder, gets a fresh opaque reference, and treats the existing Reminder URL as one Core hybrid change: calls change_reminder with patch.url so EventKit metadata, the visible native URL attachment, and the final exact read remain composed. It uses replace_url only when the user explicitly means one additional exact attachment rather than the Reminder URL.",
       "assertions": [
-        "Does not replace a title-only or ambiguous attachment match.",
-        "Does not omit the fresh opaque reference."
+        "Does not replace a title-only or ambiguous Reminder match.",
+        "Does not change only the visible attachment while leaving the Core Reminder URL stale."
       ]
     },
     {

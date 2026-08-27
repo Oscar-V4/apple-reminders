@@ -101,11 +101,14 @@ class References:
         self.fail_fresh_read = False
         self.guards: dict[str, Guard] = {}
         self.rejections: set[str] = set()
+        self.revalidation_errors: set[str] = set()
 
     def revalidate_reference(self, reference: str) -> Guard:
         self.resolved.append(reference)
         if self.reject or reference in self.rejections:
             raise ReferenceRejected("concurrent_modification", "Read the reminder again")
+        if reference in self.revalidation_errors:
+            raise RuntimeError("exact reference backend unavailable")
         return self.guards.get(reference, self.guard)
 
     def invalidate_reference(self, reference: str) -> None:
@@ -743,6 +746,56 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertFalse(result["verification"]["final_read"])
         validate_public_result("organize_reminder", result, "unknown")
 
+    def test_reference_backend_failure_before_dispatch_is_proven_no_write(self) -> None:
+        cases = (
+            (
+                "organize_reminder",
+                {"kind": "add_tag", "tag": "next"},
+                f"rev1.{'d' * 32}",
+            ),
+            (
+                "change_reminder_attachment",
+                {
+                    "kind": "copy_image",
+                    "source_reference": f"rev1.{'s' * 32}",
+                    "attachment_id": "ATTACHMENT-SOURCE",
+                    "idempotency_key": "copy-image-pre-dispatch-failure",
+                },
+                f"rev1.{'s' * 32}",
+            ),
+        )
+        for tool_name, action, failing_reference in cases:
+            with self.subTest(tool_name=tool_name):
+                backend = Backend()
+                references = References()
+                destination_reference = f"rev1.{'d' * 32}"
+                references.guards[f"rev1.{'s' * 32}"] = Guard(
+                    reminder_id="REMINDER-SOURCE",
+                    store_identity="STORE-SOURCE",
+                    public_concurrency_value="2026-08-25T00:00:00Z",
+                )
+                references.revalidation_errors.add(failing_reference)
+                facade = self.make_facade(backend, references=references)
+
+                result = facade.call(
+                    tool_name,
+                    {"reference": destination_reference, "action": action},
+                )
+
+                self.assertEqual(result["status"], "failed_no_mutation")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "sync_pending")
+                self.assertEqual(
+                    result["error"]["reason_code"],
+                    "reference_revalidation_failed",
+                )
+                self.assertEqual(result["verification"]["write_performed"], False)
+                self.assertTrue(result["recovery"]["automatic_retry_safe"])
+                self.assertEqual(backend.native_mutations, [])
+                self.assertEqual(backend.native_copy_mutations, [])
+                self.assertEqual(references.invalidated, [])
+                validate_public_result(tool_name, result, "not_mutated")
+
     def test_malformed_post_dispatch_outcome_is_unknown_and_consumes_reference(self) -> None:
         backend = Backend()
         references = References()
@@ -836,37 +889,247 @@ class NativeFacadeTests(unittest.TestCase):
                 "state": "pending",
                 "write_performed": True,
                 "final_read": False,
+                "matched": None,
             },
         )
         self.assertEqual(result["recovery"]["semantics"], "read_reminder_before_retry")
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
         validate_public_result("organize_reminder", result, "committed")
 
-    def test_attachment_change_uses_closed_action_and_guarded_port(self) -> None:
+    def test_unchanged_native_result_with_failed_final_read_is_valid_pending(self) -> None:
         backend = Backend()
         references = References()
+        references.fail_fresh_read = True
+        receipt = mutation_payload(
+            "remove_tag",
+            status="unchanged",
+            after={"reminder_id": "REMINDER-1", "section": None, "tags": []},
+        )
+        receipt["verification"]["write_performed"] = False
+        receipt["recovery"] = {
+            "semantics": "not_applicable",
+            "automatic_retry_safe": True,
+        }
+        backend.native_mutation_payloads["remove_tag"] = MutationOutcome(
+            receipt=receipt,
+            mutation_state="not_mutated",
+        )
+        facade = self.make_facade(backend, references=references)
+        reference = f"rev1.{'x' * 32}"
+
+        result = facade.call(
+            "organize_reminder",
+            {
+                "reference": reference,
+                "action": {"kind": "remove_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+        self.assertEqual(result["error"]["reason_code"], "native_final_read_failed")
+        self.assertEqual(references.invalidated, [reference])
+        self.assertNotIn("rev1.", repr(result))
+        validate_public_result("organize_reminder", result, "unknown")
+
+    def test_native_terminal_receipt_must_match_the_requested_action(self) -> None:
+        backend = Backend()
         backend.native_mutation_payloads["attach_url"] = MutationOutcome(
             receipt=mutation_payload(
                 "attach_url",
+                after={"reminder_id": "REMINDER-1", "attachments": []},
+            ),
+            mutation_state="committed",
+        )
+        facade = self.make_facade(backend)
+
+        result = facade.call(
+            "change_reminder_attachment",
+            {
+                "reference": f"rev1.{'x' * 32}",
+                "action": {"kind": "attach_url", "url": "https://example.com/item"},
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["matched"])
+        self.assertFalse(result["verification"]["final_read"])
+        self.assertEqual(result["error"]["reason_code"], "native_final_state_mismatch")
+        self.assertNotIn("rev1.", repr(result))
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+
+    def test_facade_final_state_matching_canonicalizes_native_identifiers_and_tags(self) -> None:
+        old_upper = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+        old_lower = old_upper.lower()
+        new_upper = "11111111-2222-4333-8444-555555555555"
+        existing = {
+            "attachments": [{"id": old_upper, "type": "image"}],
+            "truncated": False,
+        }
+        replaced_but_not_deleted = {
+            "attachments": [
+                {"id": old_upper, "type": "image"},
+                {"id": new_upper, "type": "image"},
+            ],
+            "truncated": False,
+        }
+
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "delete_attachment", {"attachment_id": old_lower}, {}, existing
+            )
+        )
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "replace_image",
+                {"attachment_id": old_lower},
+                {"target": {"new_attachment_id": new_upper.lower()}},
+                replaced_but_not_deleted,
+            )
+        )
+        self.assertTrue(
+            NativeFacade._native_final_state_matches(
+                "move_to_section",
+                {"section_id": old_lower},
+                {},
+                {"section": {"id": old_upper}},
+            )
+        )
+        self.assertTrue(
+            NativeFacade._native_final_state_matches(
+                "add_tag", {"tag": "#Next"}, {}, {"tags": [{"name": "next"}]}
+            )
+        )
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "remove_tag", {"tag": "next"}, {}, {"reminder_id": "REMINDER-1"}
+            )
+        )
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "delete_attachment",
+                {"attachment_id": old_lower},
+                {},
+                {"attachments": [], "truncated": True},
+            )
+        )
+        self.assertTrue(
+            NativeFacade._native_final_state_matches(
+                "delete_attachment",
+                {"attachment_id": old_lower},
+                {},
+                {"attachments": [], "truncated": False},
+            )
+        )
+        oversized_attachments = NativeFacade._native_state(
+            "change_reminder_attachment",
+            {
+                "attachments": [
+                    {
+                        "id": f"ATTACHMENT-{index}",
+                        "type": "url",
+                        "url": f"https://example.com/{index}",
+                    }
+                    for index in range(201)
+                ],
+                "truncated": False,
+            },
+            "REMINDER-1",
+            None,
+        )
+        self.assertIsNotNone(oversized_attachments)
+        self.assertTrue(oversized_attachments["truncated"])
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "delete_attachment",
+                {"attachment_id": "ATTACHMENT-200"},
+                {},
+                oversized_attachments,
+            )
+        )
+        oversized_tags = NativeFacade._native_state(
+            "organize_reminder",
+            {"tags": [{"name": f"tag-{index}"} for index in range(201)]},
+            "REMINDER-1",
+            None,
+        )
+        self.assertIsNotNone(oversized_tags)
+        self.assertIsNone(oversized_tags["tags"])
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "remove_tag", {"tag": "tag-200"}, {}, oversized_tags
+            )
+        )
+
+    def test_post_dispatch_projection_failure_is_never_false_no_mutation(self) -> None:
+        backend = Backend()
+        references = References()
+        backend.native_mutation_payloads["add_tag"] = MutationOutcome(
+            receipt=mutation_payload(
+                "add_tag",
                 after={
                     "reminder_id": "REMINDER-1",
-                    "attachments": [
+                    "section": None,
+                    "tags": [
                         {
-                            "id": "ATTACHMENT-1",
-                            "type": "url",
-                            "url": "https://example.com",
-                            "sync": {
-                                "fields_available": True,
-                                "mobile_visible_likely": True,
-                                "has_server_record": True,
-                                "in_cloud": 1,
-                                "current_local_version": 8,
-                                "latest_synced_version": 8,
-                            },
+                            "id": "TAG-1",
+                            "name": "next",
+                            "active_count": "not-an-int",
                         }
                     ],
                 },
             ),
+            mutation_state="committed",
+        )
+        facade = self.make_facade(backend, references=references)
+        reference = f"rev1.{'x' * 32}"
+
+        result = facade.call(
+            "organize_reminder",
+            {
+                "reference": reference,
+                "action": {"kind": "add_tag", "tag": "next"},
+            },
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["verification"]["write_performed"])
+        self.assertFalse(result["recovery"]["automatic_retry_safe"])
+        self.assertEqual(result["error"]["reason_code"], "native_facade_failure")
+        self.assertIn(reference, references.invalidated)
+
+    def test_attachment_change_uses_closed_action_and_guarded_port(self) -> None:
+        backend = Backend()
+        references = References()
+        receipt = mutation_payload(
+            "attach_url",
+            after={
+                "reminder_id": "REMINDER-1",
+                "attachments": [
+                    {
+                        "id": "ATTACHMENT-1",
+                        "type": "url",
+                        "url": "https://example.com",
+                        "sync": {
+                            "fields_available": True,
+                            "mobile_visible_likely": True,
+                            "has_server_record": True,
+                            "in_cloud": 1,
+                            "current_local_version": 8,
+                            "latest_synced_version": 8,
+                        },
+                    }
+                ],
+            },
+        )
+        receipt["target"] = {
+            "reminder_id": "REMINDER-1",
+            "attachment_id": "ATTACHMENT-1",
+        }
+        backend.native_mutation_payloads["attach_url"] = MutationOutcome(
+            receipt=receipt,
             mutation_state="committed",
         )
         facade = self.make_facade(backend, references=references)
@@ -920,6 +1183,15 @@ class NativeFacadeTests(unittest.TestCase):
             "source_attachment_id": "ATTACHMENT-SOURCE",
             "attachment_id": "ATTACHMENT-NEW",
         }
+        receipt["verification"].update(
+            {
+                "source_unchanged": True,
+                "source_bytes_matched": True,
+                "destination_attachment_active": True,
+                "destination_content_matched": True,
+                "destination_mobile_visible_likely": True,
+            }
+        )
         backend.native_mutation_payloads["copy_image"] = MutationOutcome(
             receipt=receipt,
             mutation_state="committed",
@@ -973,6 +1245,38 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertNotIn("image_path", str(result))
         self.assertNotIn("source_reference", str(result))
         validate_public_result("change_reminder_attachment", result, "committed")
+
+    def test_image_success_requires_mobile_visibility_and_backend_content_proof(self) -> None:
+        attachment = {
+            "id": "ATTACHMENT-NEW",
+            "type": "image",
+            "sync": {"mobile_visible_likely": False},
+        }
+        receipt = {
+            "target": {"attachment_id": "ATTACHMENT-NEW"},
+            "verification": {
+                "final_attachment_content_matched": True,
+                "mobile_visible_likely": True,
+            },
+        }
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "attach_image",
+                {},
+                receipt,
+                {"attachments": [attachment], "truncated": False},
+            )
+        )
+        attachment["sync"]["mobile_visible_likely"] = True
+        receipt["verification"]["final_attachment_content_matched"] = False
+        self.assertFalse(
+            NativeFacade._native_final_state_matches(
+                "attach_image",
+                {},
+                receipt,
+                {"attachments": [attachment], "truncated": False},
+            )
+        )
 
     def test_copy_image_stale_source_fails_before_native_dispatch(self) -> None:
         backend = Backend()

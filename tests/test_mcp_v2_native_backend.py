@@ -80,7 +80,10 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             "operation": "attach_url",
             "operation_id": "22222222-2222-4222-8222-222222222222",
             "backend": "sqlite_private",
-            "target": {"reminder_id": REMINDER_ID},
+            "target": {
+                "reminder_id": REMINDER_ID,
+                "attachment_id": "ATTACHMENT-1",
+            },
             "before": {},
             "after": {},
             "verification": {"state": "read_back"},
@@ -155,6 +158,186 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             ),
         )
         self.assertEqual(outcome.receipt["after"]["reminder"]["id"], REMINDER_ID)
+
+    def test_terminal_mutation_is_pending_when_private_final_state_misses_action(self) -> None:
+        receipt = {
+            "ok": True,
+            "status": "verified",
+            "operation": "attach_url",
+            "operation_id": "22222222-2222-4222-8222-222222222222",
+            "backend": "sqlite_private",
+            "target": {"reminder_id": REMINDER_ID, "attachment_id": "ATTACHMENT-1"},
+            "before": {},
+            "after": {"attachment": {"id": "ATTACHMENT-1", "type": "url", "url": "https://example.com/item"}},
+            "verification": {"state": "read_back", "write_performed": True},
+            "recovery": {"semantics": "delete_attachment"},
+        }
+        adapter_replies = iter(
+            [
+                ({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 12, "attachments": []}, False),
+                (receipt, False),
+                ({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 13, "attachments": []}, False),
+            ]
+        )
+        backend = self.make_backend(
+            bridge_call=mock.Mock(return_value=verified_public_reminder()),
+            adapter_call=mock.Mock(side_effect=lambda _argv: next(adapter_replies)),
+            argv_calls=[],
+        )
+
+        outcome = backend.mutate(
+            GUARD,
+            "attach_url",
+            {"url": "https://example.com/item"},
+        )
+
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
+        self.assertEqual(outcome.receipt["error"]["reason_code"], "native_final_state_mismatch")
+        self.assertFalse(outcome.receipt["recovery"]["automatic_retry_safe"])
+
+    def test_final_state_matching_canonicalizes_native_identifiers_and_tags(self) -> None:
+        old_upper = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+        old_lower = old_upper.lower()
+        new_upper = "11111111-2222-4333-8444-555555555555"
+        existing = {
+            "attachments": [{"id": old_upper, "type": "image"}],
+            "truncated": False,
+        }
+        replaced_but_not_deleted = {
+            "attachments": [
+                {"id": old_upper, "type": "image"},
+                {"id": new_upper, "type": "image"},
+            ],
+            "truncated": False,
+        }
+
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "delete_attachment", {"attachment_id": old_lower}, {}, existing
+            )
+        )
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "replace_image",
+                {"attachment_id": old_lower},
+                {"target": {"new_attachment_id": new_upper.lower()}},
+                replaced_but_not_deleted,
+            )
+        )
+        self.assertTrue(
+            NativeBackend._final_state_matches(
+                "move_to_section",
+                {"section_id": old_lower},
+                {},
+                {"section_id": old_upper},
+            )
+        )
+        self.assertTrue(
+            NativeBackend._final_state_matches(
+                "add_tag", {"tag": "#Next"}, {}, {"tags": [{"name": "next"}]}
+            )
+        )
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "remove_tag", {"tag": "next"}, {}, {"id": REMINDER_ID}
+            )
+        )
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "remove_tag", {"tag": "next"}, {}, {"tags": [{}]}
+            )
+        )
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "delete_attachment",
+                {"attachment_id": old_lower},
+                {},
+                {"attachments": [{"type": "image"}], "truncated": False},
+            )
+        )
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "delete_attachment",
+                {"attachment_id": old_lower},
+                {},
+                {"attachments": [], "truncated": True},
+            )
+        )
+        self.assertTrue(
+            NativeBackend._final_state_matches(
+                "delete_attachment",
+                {"attachment_id": old_lower},
+                {},
+                {"attachments": [], "truncated": False},
+            )
+        )
+
+    def test_image_final_state_binds_snapshot_content_and_mobile_visibility(self) -> None:
+        expected = {
+            "id": "ATTACHMENT-NEW",
+            "type": "image",
+            "uti": "public.png",
+            "sha512": "a" * 128,
+            "file_size": 100,
+            "width": 10,
+            "height": 20,
+        }
+        payload = {"target": {"attachment_id": "ATTACHMENT-NEW"}}
+        adapter_after = {"attachment": copy.deepcopy(expected)}
+        final_attachment = {
+            **expected,
+            "sync": {"mobile_visible_likely": False},
+        }
+
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "attach_image",
+                {},
+                payload,
+                {"attachments": [final_attachment], "truncated": False},
+                adapter_after=adapter_after,
+            )
+        )
+        final_attachment["sync"]["mobile_visible_likely"] = True
+        final_attachment["sha512"] = "b" * 128
+        self.assertFalse(
+            NativeBackend._final_state_matches(
+                "attach_image",
+                {},
+                payload,
+                {"attachments": [final_attachment], "truncated": False},
+                adapter_after=adapter_after,
+            )
+        )
+        final_attachment["sha512"] = "a" * 128
+        self.assertTrue(
+            NativeBackend._final_state_matches(
+                "attach_image",
+                {},
+                payload,
+                {"attachments": [final_attachment], "truncated": False},
+                adapter_after=adapter_after,
+            )
+        )
+        replay_payload = {
+            "target": {"attachment_id": "ATTACHMENT-NEW"},
+            "replayed": True,
+            "verification": {
+                "final_attachment_content_hash": NativeBackend._image_content_hash(
+                    expected
+                )
+            },
+        }
+        self.assertTrue(
+            NativeBackend._final_state_matches(
+                "attach_image",
+                {},
+                replay_payload,
+                {"attachments": [final_attachment], "truncated": False},
+                adapter_after={"attachment": {"id": "ATTACHMENT-NEW"}},
+            )
+        )
 
     def test_private_reads_reject_missing_or_conflicting_exact_identity(self) -> None:
         for payload in (
@@ -298,6 +481,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             "width": 10,
             "height": 10,
             "marked_for_deletion": False,
+            "sync": {"mobile_visible_likely": True},
         }
         destination_attachment = {
             **source_attachment,

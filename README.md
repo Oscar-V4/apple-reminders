@@ -97,11 +97,16 @@ smaller than the internal development surface:
 | Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
 | Diagnostics | `diagnose_reminders` |
 
-Core reminder work does not depend on Native Extension availability. Unused-tag
-cleanup, raw attachment export, attachment repair, backup/Snapshot operations,
-privacy-log purge, flag mutation, and native `show_reminder` handoff are withheld from the public
-Interface. Their lower-level implementations may remain for development and
-compatibility, but skills and public MCP callers must not route to them.
+Core reads and non-URL Reminder writes do not depend on Native Extension
+availability. Core create/change with a non-null URL is the documented hybrid
+exception: EventKit metadata can commit before the guarded native step that
+reconciles the visible URL attachment, so unavailable native support returns a
+partial rather than full success.
+Unused-tag cleanup, raw attachment export, attachment repair, backup/Snapshot
+operations, privacy-log purge, flag mutation, and native `show_reminder`
+handoff are withheld from the public Interface. Their lower-level
+implementations may remain for development and compatibility, but skills and
+public MCP callers must not route to them.
 
 The repository also contains a reduced OpenMinis export under
 `minis/apple-reminders/`. It is not part of the installable macOS plugin and
