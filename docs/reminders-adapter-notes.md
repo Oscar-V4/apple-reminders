@@ -68,8 +68,28 @@ These names are version-sensitive observations, not stable Apple API.
   rejected, and missing evidence within the bounded window remains partial or
   pending.
 - Image replacement creates the new attachment through ReminderKit, then
-  soft-deletes the exact old attachment. If removal fails, compensation is
+  removes the exact old attachment through the change item's native
+  `removeAttachment:` selector. If removal fails, native compensation is
   attempted and full success is not reported.
+- A direct `ZMARKEDFORDELETION=1` update was observed to leave both the old
+  1-pixel image and its replacement visible in macOS Reminders even though the
+  adapter's active-row query returned one image. It is therefore not accepted
+  as UI-removal evidence.
+- ReminderKit removal detaches the old attachment from the exact Reminder while
+  retaining its object/CloudKit state as a sync tombstone. Verification follows
+  that relationship rather than requiring physical row deletion.
+- All direct SQLite connections are closed during the native removal save.
+  Holding or immediately reopening a read-write connection can delay the
+  Core Data relationship update; bounded read-only verification starts only
+  after the native save has had a short settle window.
+- Native attach retains its bounded read connection but never starts a SQLite
+  write transaction around the ReminderKit helper. A live public-MCP
+  reproduction measured 30.6 seconds and returned verification-pending with a
+  write lock, versus 4.55 seconds and `verified` after removing that lock.
+- If native removal times out, loses its result, or cannot complete exact
+  relationship read-back, no compensating deletion runs. The receipt requires
+  an exact attachment inspection before any retry so a committed old removal
+  cannot be followed by deletion of the only remaining image.
 
 The historical DB image backend and local-only attachment repair remain
 internal diagnostic/Maintenance paths. Attachment repair, its container backup,
@@ -80,8 +100,8 @@ and automatic restoration are withheld from the public Interface.
 A native add/replace/delete round trip showed that URL replacement removes the
 old `ZREMCDOBJECT` row, retains its `ZREMCKCLOUDSTATE` row as a sync tombstone,
 and gives the new URL the previous display order. URL deletion likewise retains
-and bumps the cloud-state tombstone. Image removal continues to use its own
-soft-delete behavior.
+and bumps the cloud-state tombstone. Image removal instead uses ReminderKit to
+detach the exact attachment while retaining its CloudKit tombstone.
 
 The live evidence was captured on macOS 26.5.2 (25F84), Reminders 7.0, with
 schema fingerprint

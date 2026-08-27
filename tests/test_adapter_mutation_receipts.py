@@ -1850,6 +1850,33 @@ class MutationReceiptTests(unittest.TestCase):
                     "sync": {"mobile_visible_likely": True},
                 },
             )
+
+            def native_remove(
+                db_path: Path,
+                reminder: dict[str, object],
+                row: dict[str, object],
+            ) -> dict[str, object]:
+                external = sqlite3.connect(db_path)
+                try:
+                    external.execute(
+                        "update ZREMCDOBJECT set ZREMINDER2=null where Z_PK=?",
+                        (row["Z_PK"],),
+                    )
+                    external.execute(
+                        "update ZREMCDREMINDER set Z_OPT=Z_OPT+1 where Z_PK=?",
+                        (reminder["Z_PK"],),
+                    )
+                    external.commit()
+                finally:
+                    external.close()
+                return {
+                    "id": row["ZCKIDENTIFIER"],
+                    "row_deleted": False,
+                    "detached_from_reminder": True,
+                    "cloud_state_tombstone_retained": True,
+                    "native_reminderkit": True,
+                }
+
             with (
                 mock.patch.object(adapter, "resolve_database", return_value=db),
                 mock.patch.object(adapter, "APP_SUPPORT", support),
@@ -1859,6 +1886,11 @@ class MutationReceiptTests(unittest.TestCase):
                     "attach_image_reminderkit_record",
                     side_effect=replacements,
                 ) as attach,
+                mock.patch.object(
+                    adapter,
+                    "remove_image_reminderkit_record",
+                    side_effect=native_remove,
+                ),
                 mock.patch.object(adapter, "log_action", return_value=None),
                 mock.patch.object(adapter, "json_out") as output,
             ):
@@ -1867,7 +1899,7 @@ class MutationReceiptTests(unittest.TestCase):
             con = sqlite3.connect(db)
             try:
                 states = con.execute(
-                    "select ZCKIDENTIFIER,ZMARKEDFORDELETION from ZREMCDOBJECT "
+                    "select ZCKIDENTIFIER,ZMARKEDFORDELETION,ZREMINDER2 from ZREMCDOBJECT "
                     "where ZCKIDENTIFIER like 'REPAIR-ATTACH%' order by ZCKIDENTIFIER"
                 ).fetchall()
             finally:
@@ -1877,7 +1909,8 @@ class MutationReceiptTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "verified")
         self.assertEqual(receipt["after"]["counts"]["repaired"], 2)
         self.assertEqual(receipt["after"]["counts"]["failed"], 0)
-        self.assertEqual([row[1] for row in states], [1, 1])
+        self.assertEqual([row[1] for row in states], [0, 0])
+        self.assertEqual([row[2] for row in states], [None, None])
         self.assertEqual(attach.call_count, 2)
 
     def test_main_maps_partial_failure_to_manual_repair_or_compensated_status(self) -> None:

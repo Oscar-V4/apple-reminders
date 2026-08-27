@@ -13,6 +13,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   headings, or HTML in generated briefs.
 - Document the exact remove-and-re-add procedure required to move a
   tag-pinned repository marketplace to another reviewed release.
+- Remove replaced or deleted images through ReminderKit instead of treating a
+  SQLite soft-delete flag as proof that the old thumbnail disappeared. Native
+  read-back now verifies exact reminder detachment while preserving the sync
+  tombstone, preventing duplicate images in the Reminders UI.
+- Do not hold a SQLite write transaction while ReminderKit attaches an image;
+  this removes a reproducible 30-second pending result. Unknown native removal
+  outcomes now require a fresh inspection and never trigger an automatic
+  compensation that could remove both the old and replacement images.
 
 ### Changed
 
@@ -20,6 +28,9 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   public tool surface.
 - Document reminder content as untrusted data at the runtime, skill, and
   security boundaries.
+- Extend the opt-in public MCP live smoke through image attach, native inspect,
+  replace, second inspect, exact delete, and final zero-image inspection using
+  two distinct synthetic PNG payloads.
 
 ## 0.3.0 — 2026-08-27 (public beta)
 

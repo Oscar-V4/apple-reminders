@@ -225,8 +225,14 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     )
 
 
-def _write_tiny_png(path: Path) -> None:
-    pixels = zlib.compress(b"\x00\x1f\x6f\xff")
+def _write_tiny_png(
+    path: Path,
+    *,
+    rgb: bytes = b"\x1f\x6f\xff",
+) -> None:
+    if len(rgb) != 3:
+        raise ValueError("rgb must contain exactly three bytes")
+    pixels = zlib.compress(b"\x00" + rgb)
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
         + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
@@ -524,12 +530,49 @@ def run_public_mcp_smoke(
             fresh_reference("move_to_section"),
         )
 
+        def attachment_mutation_state(
+            value: Mapping[str, Any],
+            step: str,
+            *,
+            expected_image_count: int,
+            forbidden_image_id: str | None = None,
+        ) -> tuple[str, str | None]:
+            receipt = _verified(value, step)
+            after = _mapping(receipt.get("after"), step)
+            attachments = after.get("attachments")
+            if not isinstance(attachments, list):
+                raise SmokeFailure(f"{step} omitted attachment read-back")
+            images = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping) and item.get("type") == "image"
+            ]
+            has_exact_url = any(
+                isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") == url
+                for item in attachments
+            )
+            if len(images) != expected_image_count or not has_exact_url:
+                raise SmokeFailure(
+                    f"{step} did not preserve the exact URL and image count"
+                )
+            image_id = None
+            if images:
+                image_id = _nonempty_string(images[0].get("id"), step)
+            if forbidden_image_id is not None and any(
+                item.get("id") == forbidden_image_id for item in images
+            ):
+                raise SmokeFailure(f"{step} retained the replaced image")
+            return _nonempty_string(after.get("reference"), step), image_id
+
         with tempfile.TemporaryDirectory(
             prefix="apple-reminders-live-smoke-"
         ) as temporary:
             image_path = Path(temporary) / "synthetic.png"
             _write_tiny_png(image_path)
-            reference = call(
+
+            reference, old_image_id = call(
                 "attach_image",
                 "change_reminder_attachment",
                 {
@@ -540,17 +583,32 @@ def run_public_mcp_smoke(
                         "idempotency_key": f"live-smoke-image-{token}",
                     },
                 },
-                fresh_reference("attach_image"),
+                lambda value: attachment_mutation_state(
+                    value,
+                    "attach_image",
+                    expected_image_count=1,
+                ),
             )
+        old_image_id = _nonempty_string(old_image_id, "attach_image")
 
-        def native_evidence(value: Mapping[str, Any]) -> str:
-            inspected = _verified(value, "inspect_native")
-            data = _mapping(inspected.get("data"), "inspect_native")
-            section_state = _mapping(data.get("section"), "inspect_native")
+        def native_evidence(
+            value: Mapping[str, Any],
+            step: str,
+            *,
+            expected_image_id: str | None,
+        ) -> str:
+            inspected = _verified(value, step)
+            data = _mapping(inspected.get("data"), step)
+            section_state = _mapping(data.get("section"), step)
             attachments = data.get("attachments")
-            has_image = isinstance(attachments, list) and any(
-                isinstance(item, Mapping) and item.get("type") == "image"
-                for item in attachments
+            images = (
+                [
+                    item
+                    for item in attachments
+                    if isinstance(item, Mapping) and item.get("type") == "image"
+                ]
+                if isinstance(attachments, list)
+                else []
             )
             has_exact_url = isinstance(attachments, list) and any(
                 isinstance(item, Mapping)
@@ -559,23 +617,24 @@ def run_public_mcp_smoke(
                 for item in attachments
             )
 
-            image_mobile_visible = isinstance(attachments, list) and any(
-                isinstance(item, Mapping)
-                and item.get("type") == "image"
-                and isinstance(item.get("sync"), Mapping)
-                and item["sync"].get("mobile_visible_likely") is True
-                for item in attachments
-            )
+            expected_image_count = 0 if expected_image_id is None else 1
+            image_matches = len(images) == expected_image_count
+            if expected_image_id is not None and image_matches:
+                image_matches = (
+                    images[0].get("id") == expected_image_id
+                    and isinstance(images[0].get("sync"), Mapping)
+                    and images[0]["sync"].get("mobile_visible_likely") is True
+                )
             if (
                 section_state.get("id") != section_id
-                or not has_image
+                or not image_matches
                 or not has_exact_url
-                or not image_mobile_visible
+                or data.get("truncated") is not False
             ):
                 raise SmokeFailure(
-                    "native evidence did not prove section, URL, and mobile-visible image state"
+                    f"{step} did not prove exact section, URL, and image state"
                 )
-            return _nonempty_string(data.get("reference"), "inspect_native")
+            return _nonempty_string(data.get("reference"), step)
 
         reference = call(
             "inspect_native",
@@ -586,7 +645,81 @@ def run_public_mcp_smoke(
                 "include": ["section", "attachments", "sync"],
                 "limit": 20,
             },
-            native_evidence,
+            lambda value: native_evidence(
+                value,
+                "inspect_native",
+                expected_image_id=old_image_id,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="apple-reminders-live-smoke-replacement-"
+        ) as temporary:
+            replacement_path = Path(temporary) / "replacement.png"
+            _write_tiny_png(replacement_path, rgb=b"\xff\x6f\x1f")
+            reference, new_image_id = call(
+                "replace_image",
+                "change_reminder_attachment",
+                {
+                    "reference": reference,
+                    "action": {
+                        "kind": "replace_image",
+                        "attachment_id": old_image_id,
+                        "image_path": str(replacement_path.resolve()),
+                        "idempotency_key": f"live-smoke-replacement-{token}",
+                    },
+                },
+                lambda value: attachment_mutation_state(
+                    value,
+                    "replace_image",
+                    expected_image_count=1,
+                    forbidden_image_id=old_image_id,
+                ),
+            )
+        new_image_id = _nonempty_string(new_image_id, "replace_image")
+        reference = call(
+            "inspect_replaced_image",
+            "inspect_reminder_native",
+            {
+                "kind": "reminder",
+                "reference": reference,
+                "include": ["section", "attachments", "sync"],
+                "limit": 20,
+            },
+            lambda value: native_evidence(
+                value,
+                "inspect_replaced_image",
+                expected_image_id=new_image_id,
+            ),
+        )
+        reference, _ = call(
+            "delete_image",
+            "change_reminder_attachment",
+            {
+                "reference": reference,
+                "action": {"kind": "delete", "attachment_id": new_image_id},
+            },
+            lambda value: attachment_mutation_state(
+                value,
+                "delete_image",
+                expected_image_count=0,
+                forbidden_image_id=new_image_id,
+            ),
+        )
+        reference = call(
+            "inspect_deleted_image",
+            "inspect_reminder_native",
+            {
+                "kind": "reminder",
+                "reference": reference,
+                "include": ["section", "attachments", "sync"],
+                "limit": 20,
+            },
+            lambda value: native_evidence(
+                value,
+                "inspect_deleted_image",
+                expected_image_id=None,
+            ),
         )
 
         def deleted(value: Mapping[str, Any]) -> None:
