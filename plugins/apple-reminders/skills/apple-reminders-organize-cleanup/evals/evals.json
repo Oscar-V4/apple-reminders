@@ -65,7 +65,7 @@
       "id": 7,
       "category": "direct",
       "prompt": "최근 삭제된 항목 중 정확히 이 네 개를 원래 계정의 작업 목록으로 복구해줘.",
-      "expected_output": "Uses bounded Recently Deleted discovery, inspects each exact ID just in time for a fresh del1, recovers one at a time into an exact compatible same-account list with unique idempotency keys, and halts on the first non-verified result.",
+      "expected_output": "Uses snapshot-bound paged Recently Deleted discovery when needed, restarts from page one after pagination_snapshot_stale, inspects each exact ID just in time for a fresh del1, compares deleted account_id with destination source.id, recovers one at a time with unique idempotency keys, and halts on the first non-verified result.",
       "assertions": [
         "Does not recover from a list result or title-only match.",
         "Reports the local macOS private-framework and 30-day retention boundary."
@@ -75,10 +75,11 @@
       "id": 8,
       "category": "direct",
       "prompt": "화면 맨 위 4개를 사진 하나로 모은 다음 정리해줘.",
-      "expected_output": "Determines whether top means directly observed current UI order or an explicit bounded API snapshot with a supported sort, records exact IDs and the evidence basis, verifies all destination image copies before any source deletion, and then applies fresh-reference deletes one at a time within the approved scope.",
+      "expected_output": "Treats 'screen top' as literal UI identity and stops if it cannot observe and map the rows exactly; an API sort is used only after explicit user agreement. Clarifies whether 'one image' means several separate image attachments on one Reminder (supported) or one composited bitmap (unsupported). It copies and verifies only the agreed result, while 'organize' alone authorizes no source deletion.",
       "assertions": [
         "Does not call API order the current UI order.",
-        "Does not delete a source while any destination dependency is unresolved."
+        "Does not claim to composite image bytes.",
+        "Does not infer source deletion from 정리."
       ]
     }
   ]

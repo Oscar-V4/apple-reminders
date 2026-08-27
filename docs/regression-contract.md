@@ -98,7 +98,7 @@ even though optional MCP `outputSchema` descriptors are omitted from
     preserves the source, and requires byte-identical SHA-512, size, and
     dimensions on the exact destination attachment. Decoded UTI normalization
     is allowed only when the bytes remain exact.
-17. A fetch continuation carries a private digest of the full ordered
+17. A fetch continuation carries a cursor-contained digest of the full ordered
     identifier/revision snapshot. Changed membership or revisions discard the
     page and return `concurrent_modification/pagination_snapshot_stale`.
 18. Broad cleanup discovers summaries first, obtains each write Reference just
@@ -118,6 +118,26 @@ even though optional MCP `outputSchema` descriptors are omitted from
     are contract failures. Adapter-missing and launch-failed phases preserve a
     proven no-write result; timeout or malformed post-launch output remains an
     unknown possible write.
+22. Recently Deleted discovery is reachable beyond the first page. Its opaque
+    cursor binds the exact account filter, limit, and full ordered deleted-item
+    identity/revision snapshot. Drift rejects a continuation as
+    `pagination_snapshot_stale`; callers discard the partial inventory and
+    restart without a cursor. The snapshot digest is not returned as a
+    standalone field; it is carried only inside the semantically opaque cursor
+    and is neither a secret nor a write precondition.
+23. Literal UI-relative selection is never silently reinterpreted as API
+    order. If the current UI cannot be observed and mapped to exact IDs, the
+    workflow stops and requires explicit user agreement before using a named
+    API scope and sort. “Organize” alone is not delete authority, and native
+    image copy does not claim to composite several images into one bitmap.
+24. URL composition treats a malformed, mismatched, or incomplete native
+    attachment inventory as uncertainty and performs no native attachment
+    write. A `failed_no_mutation` recovery Receipt cannot erase non-empty
+    post-state or other mutation evidence. Verified recovery binds its raw
+    target/before/after identities and attachment counts to the authorized
+    item, destination, and proof tuple. The native deleted-item guard is fetched
+    again immediately before the ReminderKit save. Snapshot-stale active and
+    deleted pages direct callers back to the same read without a cursor.
 
 ## Deliberately withheld behavior
 

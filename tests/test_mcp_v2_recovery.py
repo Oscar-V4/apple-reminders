@@ -104,6 +104,12 @@ def verified_receipt() -> dict[str, Any]:
     }
 
 
+def verified_adapter_receipt() -> dict[str, Any]:
+    receipt = verified_receipt()
+    receipt["backend"] = "reminderkit_private"
+    return receipt
+
+
 def failed_no_mutation_receipt() -> dict[str, Any]:
     receipt = verified_receipt()
     receipt.update(
@@ -153,6 +159,34 @@ class FakeBackend:
         return RecoveryOutcome(verified_receipt(), "committed")
 
 
+class PagedBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.snapshot_fingerprint = "d" * 64
+        self.offsets: list[int] = []
+        second = copy.deepcopy(DELETED)
+        second["id"] = "33333333-3333-4333-8333-333333333333"
+        second["title"] = "Second synthetic deleted reminder"
+        self.items = [copy.deepcopy(DELETED), second]
+
+    def list_deleted(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        offset = int(arguments.get("offset", 0))
+        limit = int(arguments.get("limit", 20))
+        self.offsets.append(offset)
+        page = self.items[offset : offset + limit]
+        next_offset = offset + len(page)
+        has_more = next_offset < len(self.items)
+        return {
+            "items": copy.deepcopy(page),
+            "returned": len(page),
+            "limit": limit,
+            "total_matched": len(self.items),
+            "has_more": has_more,
+            "next_offset": next_offset if has_more else None,
+            "snapshot_fingerprint": self.snapshot_fingerprint,
+        }
+
+
 class RecoveryFacadeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.backend = FakeBackend()
@@ -174,6 +208,72 @@ class RecoveryFacadeTests(unittest.TestCase):
         self.assertEqual(result["data"]["returned"], 1)
         self.assertNotIn("reference", result["data"]["items"][0])
         self.assertNotIn("attachments", result["data"]["items"][0])
+
+    def test_list_cursor_reaches_later_deleted_items_without_exposing_snapshot(self) -> None:
+        backend = PagedBackend()
+        facade = RecoveryFacade(backend)
+
+        first = facade.call(
+            "inspect_recently_deleted",
+            {"kind": "list", "account_id": "ACCOUNT-1", "limit": 1},
+        )
+        validate_public_result("inspect_recently_deleted", first)
+        cursor = first["data"]["next_cursor"]
+        self.assertTrue(first["data"]["has_more"])
+        self.assertIsInstance(cursor, str)
+        self.assertNotIn(backend.snapshot_fingerprint, repr(first))
+
+        second = facade.call(
+            "inspect_recently_deleted",
+            {
+                "kind": "list",
+                "account_id": "ACCOUNT-1",
+                "limit": 1,
+                "cursor": cursor,
+            },
+        )
+        validate_public_result("inspect_recently_deleted", second)
+        self.assertEqual(backend.offsets, [0, 1])
+        self.assertEqual(
+            second["data"]["items"][0]["id"],
+            "33333333-3333-4333-8333-333333333333",
+        )
+        self.assertFalse(second["data"]["has_more"])
+        self.assertIsNone(second["data"]["next_cursor"])
+
+    def test_list_cursor_rejects_snapshot_drift_without_returning_a_page(self) -> None:
+        backend = PagedBackend()
+        facade = RecoveryFacade(backend)
+        first = facade.call(
+            "inspect_recently_deleted",
+            {"kind": "list", "limit": 1},
+        )
+        backend.snapshot_fingerprint = "e" * 64
+
+        stale = facade.call(
+            "inspect_recently_deleted",
+            {
+                "kind": "list",
+                "limit": 1,
+                "cursor": first["data"]["next_cursor"],
+            },
+        )
+
+        validate_public_result("inspect_recently_deleted", stale, "not_mutated")
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["status"], "failed_no_mutation")
+        self.assertEqual(stale["error"]["code"], "concurrent_modification")
+        self.assertEqual(
+            stale["error"]["reason_code"],
+            "pagination_snapshot_stale",
+        )
+        self.assertEqual(
+            stale["next_action"]["tool"],
+            "inspect_recently_deleted",
+        )
+        self.assertFalse(stale["next_action"]["retry_original_once"])
+        self.assertIn("without a cursor", stale["next_action"]["message"])
+        self.assertNotIn("data", stale)
 
     def test_exact_read_issues_one_opaque_del1_without_private_guard(self) -> None:
         result = self.facade.call(
@@ -408,6 +508,38 @@ class RecoveryBackendTests(unittest.TestCase):
                     "read_reminder",
                 )
 
+    def test_failed_no_mutation_with_after_evidence_remains_unknown(self) -> None:
+        adapter_payload = failed_no_mutation_receipt()
+        adapter_payload["after"] = {
+            "reminder": {
+                "id": REMINDER_ID,
+                "list_id": LIST_ID,
+                "attachment_count": 1,
+            }
+        }
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (adapter_payload, True),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        outcome = backend.recover(
+            GUARD,
+            LIST_ID,
+            "backend-key-after-is-commit-evidence",
+        )
+
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(
+            outcome.receipt["status"],
+            "committed_verification_pending",
+        )
+        self.assertIsNone(outcome.receipt["verification"]["write_performed"])
+        self.assertEqual(
+            outcome.receipt["error"]["reason_code"],
+            "invalid_recovery_receipt",
+        )
+
     def test_actual_adapter_pre_dispatch_no_write_shape_stays_not_mutated(self) -> None:
         adapter_payload = failed_no_mutation_receipt()
         adapter_payload["verification"] = {
@@ -471,7 +603,7 @@ class RecoveryBackendTests(unittest.TestCase):
                     field_present=field_present,
                     value=value,
                 ):
-                    adapter_payload = verified_receipt()
+                    adapter_payload = verified_adapter_receipt()
                     if field_present:
                         adapter_payload["verification"][field] = value
                     else:
@@ -511,7 +643,7 @@ class RecoveryBackendTests(unittest.TestCase):
             ("after_attachment_count", 2),
         ):
             with self.subTest(field=field, value=value):
-                adapter_payload = verified_receipt()
+                adapter_payload = verified_adapter_receipt()
                 adapter_payload["verification"][field] = value
                 bridge_call = mock.Mock()
                 backend = RecoveryBackend(
@@ -538,6 +670,86 @@ class RecoveryBackendTests(unittest.TestCase):
                     "recover_deleted_reminder",
                     {"schema_version": 2, **outcome.receipt},
                     "unknown",
+                )
+                bridge_call.assert_not_called()
+
+    def test_verified_recovery_requires_raw_identity_and_count_consistency(self) -> None:
+        def wrong_target_reminder(payload):
+            payload["target"]["reminder_id"] = "OTHER-REMINDER"
+
+        def wrong_target_list(payload):
+            payload["target"]["list_id"] = "OTHER-LIST"
+
+        def wrong_before_id(payload):
+            payload["before"]["deleted_reminder"]["id"] = "OTHER-REMINDER"
+
+        def wrong_before_deleted_at(payload):
+            payload["before"]["deleted_reminder"]["deleted_at"] = "2020-01-01T00:00:00Z"
+
+        def wrong_before_count(payload):
+            payload["before"]["deleted_reminder"]["attachment_count"] = 2
+
+        def wrong_after_id(payload):
+            payload["after"]["reminder"]["id"] = "OTHER-REMINDER"
+
+        def wrong_after_list(payload):
+            payload["after"]["reminder"]["list_id"] = "OTHER-LIST"
+
+        def wrong_after_count(payload):
+            payload["after"]["reminder"]["attachment_count"] = 0
+
+        def wrong_backend(payload):
+            payload["backend"] = "native_extension"
+
+        def verified_with_error(payload):
+            payload["error"] = {
+                "code": "unexpected_error",
+                "reason_code": "contradictory_verified_error",
+                "message": "A verified receipt cannot also be an error.",
+                "retryable": False,
+            }
+
+        def automatic_retry(payload):
+            payload["recovery"]["automatic_retry_safe"] = True
+
+        contradictions = (
+            wrong_target_reminder,
+            wrong_target_list,
+            wrong_before_id,
+            wrong_before_deleted_at,
+            wrong_before_count,
+            wrong_after_id,
+            wrong_after_list,
+            wrong_after_count,
+            wrong_backend,
+            verified_with_error,
+            automatic_retry,
+        )
+        for mutate in contradictions:
+            with self.subTest(contradiction=mutate.__name__):
+                adapter_payload = verified_adapter_receipt()
+                mutate(adapter_payload)
+                bridge_call = mock.Mock()
+                backend = RecoveryBackend(
+                    adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                    bridge_call=bridge_call,
+                    receipt_validator=lambda payload, **_: None,
+                )
+
+                outcome = backend.recover(
+                    GUARD,
+                    LIST_ID,
+                    "backend-key-raw-identity-proof",
+                )
+
+                self.assertEqual(outcome.mutation_state, "unknown")
+                self.assertEqual(
+                    outcome.receipt["status"],
+                    "committed_verification_pending",
+                )
+                self.assertEqual(
+                    outcome.receipt["error"]["reason_code"],
+                    "invalid_recovery_receipt",
                 )
                 bridge_call.assert_not_called()
 

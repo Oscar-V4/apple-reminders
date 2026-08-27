@@ -309,6 +309,61 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
             if_native_guard_digest=guard.get("native_guard_digest", "c" * 64),
         )
 
+    def test_deleted_inventory_pages_over_one_snapshot_bound_order(self) -> None:
+        rows = [
+            {
+                "Z_PK": 2,
+                "ZCKIDENTIFIER": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "Z_OPT": 8,
+                "ZLASTMODIFIEDDATE": 200.0,
+            },
+            {
+                "Z_PK": 1,
+                "ZCKIDENTIFIER": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "Z_OPT": 7,
+                "ZLASTMODIFIEDDATE": 100.0,
+            },
+        ]
+        connection = mock.Mock()
+        connection.execute.return_value.fetchall.return_value = rows
+
+        def public_snapshot(_connection, row):
+            return ({"id": row["ZCKIDENTIFIER"]}, {"private": "not public"})
+
+        args = argparse.Namespace(db=None, account_id=None, limit=1, offset=1)
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                return_value=connection,
+            ),
+            mock.patch.object(reminders_adapter, "require_command_capability"),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_reminder_snapshot",
+                side_effect=public_snapshot,
+            ),
+            mock.patch.object(reminders_adapter, "json_out") as emit,
+        ):
+            result = reminders_adapter.cmd_list_deleted_reminders(args)
+
+        self.assertEqual(result, 0)
+        payload = emit.call_args.args[0]
+        self.assertEqual(
+            payload["deleted_reminders"],
+            [{"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}],
+        )
+        self.assertEqual(payload["total_matched"], 2)
+        self.assertFalse(payload["has_more"])
+        self.assertIsNone(payload["next_offset"])
+        self.assertRegex(payload["snapshot_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("private", repr(payload))
+
     def test_helper_crash_without_receipt_preserves_possible_write(self) -> None:
         completed = subprocess.CompletedProcess(
             args=["remkit_recover"],
@@ -481,6 +536,11 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
         self.assertIn("pre_save_guard_matched", source)
         self.assertIn("concurrent_modification", source)
         self.assertNotIn("triggerCloudKitOnlySyncWithReason:", source)
+        staged = source.index("undeleteReminderWithID:usingUndo:")
+        immediate_guard = source.index("preSaveDeletedReminder")
+        saved = source.index("saveSynchronouslyWithError:", immediate_guard)
+        self.assertLess(staged, immediate_guard)
+        self.assertLess(immediate_guard, saved)
 
     def test_post_save_destination_read_failure_is_pending_not_no_mutation(self) -> None:
         digest = reminders_adapter.deleted_attachment_digest([])

@@ -29,7 +29,7 @@ The six discovered tools are `find_chats`, `read_messages`, `search_messages`,
 | --- | --- |
 | Stable `chat_guid` before send | Exact list/reminder/attachment IDs before mutation |
 | Page-local identity | Short-lived one-use `rev1` and deleted-item `del1` References |
-| Cursor-bound reads | Opaque v3 cursor with ordered ID/revision snapshot drift rejection |
+| Cursor-bound reads | Opaque v3 active-item cursor plus a snapshot-bound Recently Deleted cursor, both with ordered identity/revision drift rejection |
 | Attachment metadata without paths | Native inspection returns bounded metadata and never a private backing path |
 | Dedicated exact image access | Closed `copy_image` moves exact bytes internally without exporting them |
 | Approval-aware send | Broad/destructive skills show the bounded target set unless standing delegation covers it |
@@ -38,6 +38,10 @@ The six discovered tools are `find_chats`, `read_messages`, `search_messages`,
 The comparison directly motivated snapshot-stale pagination behavior and the
 choice to close the consolidation workflow with an internal exact copy rather
 than publish private attachment paths.
+
+Recently Deleted discovery is paged rather than capped at its first 200 items.
+Its cursor is reusable only with the identical account and limit; membership or
+revision drift rejects the next page and requires a restart from page one.
 
 ## Intentional differences
 

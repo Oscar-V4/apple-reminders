@@ -292,7 +292,11 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
                 "items": [],
                 "returned": 0,
                 "limit": 20,
+                "total_matched": 0,
                 "truncated": False,
+                "has_more": False,
+                "next_cursor": None,
+                "pagination_exhausted": False,
                 "retention_days": 30,
             }
         return {
@@ -1106,6 +1110,40 @@ class McpProtocolTests(unittest.TestCase):
                     },
                 )
                 self.assertNotIn("private failure detail", json.dumps(summary))
+
+    def test_stale_page_summary_recommends_restarting_the_same_read_without_cursor(self) -> None:
+        for operation in ("fetch_reminders", "inspect_recently_deleted"):
+            payload = {
+                "schema_version": 2,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": operation,
+                "error": {
+                    "code": "concurrent_modification",
+                    "reason_code": "pagination_snapshot_stale",
+                    "message": "The ordered page snapshot changed.",
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "fresh_read",
+                    "tool": operation,
+                    "retry_original_once": False,
+                    "message": f"Restart {operation} without a cursor.",
+                },
+            }
+
+            summary = json.loads(
+                self.server.tool_result(payload, is_error=True)["content"][0]["text"]
+            )
+
+            self.assertEqual(
+                summary["next_read_only_action"],
+                {
+                    "kind": "fresh_read",
+                    "tool": operation,
+                    "retry_original_once": False,
+                },
+            )
 
     def test_text_summary_marks_blocked_diagnosis_for_attention(self) -> None:
         payload = {

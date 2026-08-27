@@ -1044,7 +1044,9 @@ class V2CoreFacadeTests(unittest.TestCase):
             result["error"]["message"],
         )
         self.assertNotIn("data", result)
-        self.assertNotIn("next_action", result)
+        self.assertEqual(result["next_action"]["tool"], "fetch_reminders")
+        self.assertFalse(result["next_action"]["retry_original_once"])
+        self.assertIn("without a cursor", result["next_action"]["message"])
         validate_public_result("fetch_reminders", result)
 
     def test_fetch_does_not_issue_a_cursor_without_a_snapshot_fingerprint(self) -> None:

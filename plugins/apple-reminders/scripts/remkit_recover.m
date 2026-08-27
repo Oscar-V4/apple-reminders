@@ -195,6 +195,29 @@ int main(int argc, const char **argv) {
             nil
         );
 
+        // The initial guard protects setup, but destination/account/capability
+        // work can take time. Re-fetch immediately before the save so a native
+        // deleted-item change cannot slip through that TOCTOU window.
+        error = nil;
+        id preSaveDeletedReminder = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(
+            store,
+            @selector(fetchReminderIncludingMarkedForDeleteWithObjectID:error:),
+            reminderObjectID,
+            &error
+        );
+        if (!preSaveDeletedReminder) return Fail(@"concurrent_modification", error, NO);
+        NSError *preSaveGuardError = nil;
+        NSString *preSaveGuardDigest = NativeGuardDigest(
+            preSaveDeletedReminder,
+            &preSaveGuardError
+        );
+        if (!preSaveGuardDigest) {
+            return Fail(@"native_guard_unavailable", preSaveGuardError, NO);
+        }
+        if (![preSaveGuardDigest isEqualToString:expectedGuardDigest]) {
+            return Fail(@"concurrent_modification", nil, NO);
+        }
+
         error = nil;
         BOOL saved = ((BOOL (*)(id, SEL, NSError **))objc_msgSend)(
             saveRequest, @selector(saveSynchronouslyWithError:), &error

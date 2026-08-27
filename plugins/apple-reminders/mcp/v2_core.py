@@ -517,7 +517,12 @@ def _next_action(
         and operation == "fetch_reminders"
         and reason == "pagination_snapshot_stale"
     ):
-        return None
+        return {
+            "kind": "fresh_read",
+            "tool": "fetch_reminders",
+            "retry_original_once": False,
+            "message": "Restart fetch_reminders without a cursor.",
+        }
     if code in {"concurrent_modification", "sync_pending"}:
         fresh_read_tool = {
             "create_reminder": "fetch_reminders",

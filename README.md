@@ -11,11 +11,17 @@ Try prompts such as:
 - `오늘 마감이거나 기한이 지난 리마인더를 보여줘.`
 - `쇼핑 목록에 우유 사기를 추가해줘.`
 - `이 리마인더를 완료하고 다시 읽어서 확인해줘.`
+- `최근 삭제된 '치과 예약'을 정확히 찾아 원래 계정의 쇼핑 목록으로 복구해줘.`
+- `이 네 미리알림의 사진을 하나의 미리알림에 각각 복사해줘.`
 
 This repository hosts the Apple Reminders community plugin. The MCP and adapters run locally,
 but results are returned to Codex as described in [PRIVACY.md](PRIVACY.md).
 This is an independent community project, not an Apple or OpenAI product or
 endorsed integration.
+
+See the [workflow capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
+for supported journeys, explicit evidence boundaries, and deliberately
+withheld operations.
 
 ## Requirements
 
@@ -112,7 +118,8 @@ found in actual use:
 - URL create/change as one hybrid operation: EventKit metadata, the visible
   native URL attachment, and a final exact EventKit read;
 - native ReminderKit image attachment and section saves with CloudKit evidence;
-- exact Recently Deleted recovery through one-use `del1` References;
+- snapshot-bound paged Recently Deleted discovery and exact recovery through
+  one-use `del1` References;
 - byte-verified cross-Reminder image copy without private-path disclosure;
 - snapshot-bound pagination that rejects changed membership or revisions;
 - exact-list section scope and fresh-version tag changes;
@@ -154,7 +161,7 @@ reached every participant in a shared list.
 | Local MCP | Closed input schemas, routing, concise text, and validated structured results | Runs with the Codex host user's local process permissions |
 | Core Module | EventKit-backed list/reminder operations and opaque References | Public API behavior is still account-, permission-, and sync-dependent |
 | Native Extension Module | Sections, tags, and native image/URL attachments | Uses version-sensitive private interfaces and exact read-back gates |
-| Recovery Module | Bounded Recently Deleted reads and exact one-item recovery | macOS-only, private-framework, same-account, and 30-day retention boundary |
+| Recovery Module | Snapshot-bound paged Recently Deleted reads and exact one-item recovery | macOS-only, private-framework, same-account, and 30-day retention boundary |
 | Diagnostics Module | Content-free targeted diagnosis | Does not prove write semantics, iCloud convergence, or device visibility |
 
 The MCP can make changes that sync through the user's Apple account and affect

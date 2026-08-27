@@ -291,7 +291,7 @@ class McpToolsV2SchemaTests(unittest.TestCase):
         list_branch, item_branch = deleted["oneOf"]
         self.assertEqual(
             set(list_branch["properties"]),
-            {"kind", "account_id", "limit"},
+            {"kind", "account_id", "limit", "cursor"},
         )
         self.assertEqual(
             set(item_branch["properties"]),

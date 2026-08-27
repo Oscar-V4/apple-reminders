@@ -790,6 +790,10 @@ class PublicV2ResultContractTests(unittest.TestCase):
             "rowid",
             "image_path",
             "container_path",
+            "store_identity",
+            "private_version",
+            "attachment_digest",
+            "native_guard_digest",
         ):
             fixture = read_success("diagnose_reminders")
             fixture["data"] = {"nested": {key: "private"}}
@@ -803,6 +807,8 @@ class PublicV2ResultContractTests(unittest.TestCase):
             "Open ~/Library/Reminders/Container_v1/Stores/Stores.sqlite",
             "Failed at /Users/example/Library/Reminders/Stores.sqlite",
             "remkit_recover: REMStore saveSynchronouslyWithError: failed",
+            "/System/Library/PrivateFrameworks/ReminderKit.framework failed",
+            "/Library/Application Support/apple-reminders-codex/state.json failed",
         ):
             fixture = read_failure("inspect_recently_deleted", "unexpected_error")
             fixture["error"]["message"] = detail  # type: ignore[index]

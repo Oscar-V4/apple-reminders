@@ -130,6 +130,7 @@ PRIVATE_ERROR_TEXT_PATTERN = re.compile(
     r"(?:"
     r"~/(?:Library|Documents|Desktop|Downloads|Applications|private|var|tmp)\b"
     r"|/(?:Users|private|var|tmp|Volumes)/"
+    r"|/(?:System/Library/PrivateFrameworks|Library/(?:Application Support|Group Containers|Reminders))/"
     r"|(?:^|\W)Library/Reminders/"
     r"|\bContainer_v\d+\b"
     r"|\bStores(?:-wal|-shm)?\.sqlite\b"
@@ -211,6 +212,10 @@ EXACT_FORBIDDEN_FIELDS = frozenset(
         "z_pk",
         "z_ent",
         "z_opt",
+        "store_identity",
+        "private_version",
+        "attachment_digest",
+        "native_guard_digest",
     }
 )
 
@@ -694,6 +699,8 @@ def _validate_next_action(
         "create_reminder": "fetch_reminders",
         "ensure_reminder_list": "list_reminder_lists",
         "create_reminder_section": "inspect_reminder_native",
+        "fetch_reminders": "fetch_reminders",
+        "inspect_recently_deleted": "inspect_recently_deleted",
     }.get(tool_name, "read_reminder")
     if tool_name == "recover_deleted_reminder" and error_code == "concurrent_modification":
         sync_pending_tool = "inspect_recently_deleted"
@@ -1019,7 +1026,95 @@ def _validate_read_result(
         expected_deleted_reference_path: str | None = None
         if tool_name == "inspect_recently_deleted":
             kind = result["data"].get("kind")
-            if kind == "item":
+            if kind == "list":
+                data = result["data"]
+                _closed_fields(
+                    data,
+                    required={
+                        "kind",
+                        "items",
+                        "returned",
+                        "limit",
+                        "total_matched",
+                        "truncated",
+                        "has_more",
+                        "next_cursor",
+                        "pagination_exhausted",
+                        "retention_days",
+                    },
+                    allowed={
+                        "kind",
+                        "items",
+                        "returned",
+                        "limit",
+                        "total_matched",
+                        "truncated",
+                        "has_more",
+                        "next_cursor",
+                        "pagination_exhausted",
+                        "retention_days",
+                    },
+                    path="$.data",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                    missing_code="invalid_read_envelope",
+                )
+                items = data.get("items")
+                returned = data.get("returned")
+                limit = data.get("limit")
+                total_matched = data.get("total_matched")
+                has_more = data.get("has_more")
+                next_cursor = data.get("next_cursor")
+                pagination_exhausted = data.get("pagination_exhausted")
+                if (
+                    not isinstance(items, list)
+                    or not isinstance(returned, int)
+                    or isinstance(returned, bool)
+                    or returned != len(items)
+                    or not isinstance(limit, int)
+                    or isinstance(limit, bool)
+                    or not 1 <= limit <= 200
+                    or returned > limit
+                    or not isinstance(total_matched, int)
+                    or isinstance(total_matched, bool)
+                    or total_matched < returned
+                    or not isinstance(has_more, bool)
+                    or data.get("truncated") is not has_more
+                    or not isinstance(pagination_exhausted, bool)
+                    or data.get("retention_days") != 30
+                ):
+                    _fail(
+                        "invalid_read_envelope",
+                        "$.data",
+                        "Recently Deleted list bounds or counts are inconsistent",
+                        tool_name=tool_name,
+                        mutation_state=mutation_state,
+                    )
+                if next_cursor is not None and (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor
+                    or len(next_cursor) > 4096
+                ):
+                    _fail(
+                        "invalid_read_envelope",
+                        "$.data.next_cursor",
+                        "Recently Deleted next_cursor must be opaque and bounded",
+                        tool_name=tool_name,
+                        mutation_state=mutation_state,
+                    )
+                if (
+                    (not has_more and (next_cursor is not None or pagination_exhausted))
+                    or (has_more and next_cursor is None and not pagination_exhausted)
+                    or (has_more and next_cursor is not None and pagination_exhausted)
+                ):
+                    _fail(
+                        "invalid_read_envelope",
+                        "$.data.next_cursor",
+                        "Recently Deleted continuation state is inconsistent",
+                        tool_name=tool_name,
+                        mutation_state=mutation_state,
+                    )
+            elif kind == "item":
                 deleted_reminder = result["data"].get("deleted_reminder")
                 if not isinstance(deleted_reminder, Mapping):
                     _fail(
@@ -1036,7 +1131,7 @@ def _validate_read_result(
                     mutation_state=mutation_state,
                 )
                 expected_deleted_reference_path = "$.data.deleted_reminder.reference"
-            elif kind != "list":
+            else:
                 _fail(
                     "invalid_read_envelope",
                     "$.data.kind",

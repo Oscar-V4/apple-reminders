@@ -80,6 +80,7 @@ JOURNAL_RETENTION_DAYS = 30
 IDEMPOTENCY_RETENTION_DAYS = 30
 IDEMPOTENCY_MAX_ENTRIES = 500
 RECENTLY_DELETED_RETENTION_DAYS = 30
+RECENTLY_DELETED_SNAPSHOT_LIMIT = 10_000
 
 RESULT_STATUSES = set(RESULT_RECEIPT_STATUSES)
 ERROR_CODES = set(STABLE_ERROR_CODES)
@@ -236,6 +237,13 @@ def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
 
 
@@ -3624,6 +3632,8 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
 def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
     if args.limit > 200:
         raise AdapterError("Deleted Reminder reads are limited to 200 items")
+    if args.offset > RECENTLY_DELETED_SNAPSHOT_LIMIT:
+        raise AdapterError("Deleted Reminder cursor offset is out of range")
     db = resolve_database(args.db)
     con = connect_read_only(db)
     try:
@@ -3645,19 +3655,44 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
             order by r.ZLASTMODIFIEDDATE desc,r.Z_PK desc
             limit ?
             """,
-            [*params, args.limit + 1],
+            [*params, RECENTLY_DELETED_SNAPSHOT_LIMIT + 1],
         ).fetchall()
+        if len(rows) > RECENTLY_DELETED_SNAPSHOT_LIMIT:
+            raise AdapterError(
+                "Recently Deleted is too large for one safe ordered snapshot",
+                code="ambiguous_scope",
+                reason_code="deleted_snapshot_too_large",
+            )
+        snapshot_fingerprint = stable_hash(
+            [
+                {
+                    "id": row["ZCKIDENTIFIER"],
+                    "version": row["Z_OPT"],
+                    "modified": row["ZLASTMODIFIEDDATE"],
+                    "pk": row["Z_PK"],
+                }
+                for row in rows
+            ]
+        )
+        page = rows[args.offset : args.offset + args.limit]
         items = [
             deleted_reminder_snapshot(con, dict(row))[0]
-            for row in rows[: args.limit]
+            for row in page
         ]
+        next_offset = args.offset + len(items)
+        has_more = next_offset < len(rows)
         json_out(
             {
                 "ok": True,
                 "deleted_reminders": items,
                 "returned": len(items),
                 "limit": args.limit,
-                "truncated": len(rows) > args.limit,
+                "offset": args.offset,
+                "total_matched": len(rows),
+                "has_more": has_more,
+                "next_offset": next_offset if has_more else None,
+                "truncated": has_more,
+                "snapshot_fingerprint": snapshot_fingerprint,
                 "retention_days": RECENTLY_DELETED_RETENTION_DAYS,
             }
         )
@@ -8446,6 +8481,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_db(p)
     p.add_argument("--account-id")
     p.add_argument("--limit", type=positive_int, default=20)
+    p.add_argument("--offset", type=nonnegative_int, default=0)
     p.set_defaults(func=cmd_list_deleted_reminders)
 
     p = sub.add_parser("read_deleted_reminder")

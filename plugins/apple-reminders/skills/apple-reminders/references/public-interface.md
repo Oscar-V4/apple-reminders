@@ -25,17 +25,19 @@ Omitted patch fields remain unchanged. `null` clears only fields whose input sch
 
 ## Selection and destructive composition
 
-- “Top,” “first,” and “visible” are evidence-relative. Directly observe the current Reminders UI and resolve every visible row to one exact ID, or capture one bounded `fetch_reminders` API snapshot with exact list/filter/status, one supported sort (`due`, `modified`, or `title`), limit, IDs, and truncation. Stop on duplicate UI-to-ID mapping. State which basis was used; API order is not current UI order.
+- “Top,” “first,” and “visible” are evidence-relative. A literal UI-relative request requires direct observation of the current Reminders UI and exact row-to-ID resolution. If that is unavailable, stop and show the proposed `fetch_reminders` scope/sort; capture that bounded API snapshot only after the user explicitly accepts API order as a reinterpretation. Stop on duplicate UI-to-ID mapping. State which basis was used; API order is not current UI order.
 - A v3 cursor is reusable only with identical filters, sort, and limit. It privately binds the ordered Reminder IDs and revisions; a later membership/revision change fails the page read as `concurrent_modification` / `pagination_snapshot_stale`. Discard the partial paged set and restart without a cursor. Re-read every exact item immediately before mutation because the pagination fingerprint is not a write precondition.
 - Finish and verify every non-destructive dependency before source deletion. For attachment consolidation, copy each exact image to the destination and verify it there before obtaining fresh source references and deleting one source at a time.
 
 ## Recently Deleted recovery
 
-- `inspect_recently_deleted {kind:"list", account_id?, limit?}`: return a bounded local inventory. List mode issues no recovery reference and no full attachment list.
+- `inspect_recently_deleted {kind:"list", account_id?, limit?, cursor?}`: return a bounded local inventory. Its opaque Recently Deleted cursor binds the identical account and limit plus the ordered deleted-item identity/revision snapshot. On `pagination_snapshot_stale`, discard the partial inventory and restart without a cursor. List mode issues no recovery reference and no full attachment list.
 - `inspect_recently_deleted {kind:"item", reminder_id, attachment_limit?}`: re-read one exact deleted Reminder, verify available image backing bytes, capture private-store and native ReminderKit snapshot guards, return bounded attachment metadata, and issue one opaque `del1` recovery reference. Missing integrity evidence fails closed and issues no Reference.
 - `recover_deleted_reminder {reference, list_id, idempotency_key}`: consume a fresh `del1` and recover that exact Reminder into an exact compatible same-account list. `verified` requires a matched native pre-save guard, equal pre/native/post attachment counts, actual image-byte SHA-512 preservation, and an exact active EventKit read-back.
 
 `del1` is distinct from `rev1`: it is short-lived, one-use, opaque, and valid only for the deleted snapshot that issued it. Inspect the exact item again after an expired, consumed, or stale-token result. Do not automatically retry an unknown recovery outcome.
+
+The deleted item's `account_id` and a destination Reminder List's `source.id` identify the same account boundary used by recovery. Compare those exact values before choosing among duplicate list titles.
 
 This recovery surface is bounded by the local 30-day Recently Deleted retention window and depends on compatible private ReminderKit frameworks and local Reminders store schema. It is macOS-only and version-sensitive. A successful local UI observation or recovery run is evidence for that Mac and moment, not a generic platform, account, iCloud, or iPhone guarantee.
 

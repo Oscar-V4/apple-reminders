@@ -162,6 +162,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [],
+                        "truncated": False,
                     },
                     False,
                 ),
@@ -891,6 +892,77 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             [name for name, _ in argv_calls], ["list_reminder_attachments"]
         )
         self.assertEqual(adapter_call.call_count, 1)
+
+    def test_malformed_url_inventory_never_dispatches_an_attachment_write(self) -> None:
+        url = "https://example.com/already-visible"
+        base_payload = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": url},
+            "after": {"id": REMINDER_ID, "url": url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": False,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": True,
+            },
+        }
+        malformed_inventories = (
+            {"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 7},
+            {
+                "ok": True,
+                "reminder_id": "WRONG-REMINDER",
+                "reminder_version": 7,
+                "attachments": [],
+                "truncated": False,
+            },
+            {
+                "ok": True,
+                "reminder_id": REMINDER_ID,
+                "reminder_version": 7,
+                "attachments": [{"id": "URL-1", "type": "url"}],
+                "truncated": False,
+            },
+            {
+                "ok": True,
+                "reminder_id": REMINDER_ID,
+                "reminder_version": 7,
+                "attachments": [],
+            },
+        )
+
+        for inventory in malformed_inventories:
+            with self.subTest(inventory=inventory):
+                adapter_call = mock.Mock(return_value=(inventory, False))
+                argv_calls: list[tuple[str, dict[str, Any]]] = []
+                result = make_backend(
+                    bridge_call=mock.Mock(),
+                    adapter_call=adapter_call,
+                    build_adapter_argv=lambda name, arguments: (
+                        argv_calls.append((name, copy.deepcopy(arguments))) or [name]
+                    ),
+                )._ensure_visible_url_attachment(copy.deepcopy(base_payload), url)
+
+                self.assertEqual(result["status"], "failed_no_mutation")
+                self.assertEqual(result["error"]["code"], "ambiguous_scope")
+                self.assertEqual(
+                    result["error"]["reason_code"],
+                    "native_url_attachment_inventory_invalid",
+                )
+                self.assertEqual(
+                    [name for name, _ in argv_calls],
+                    ["list_reminder_attachments"],
+                )
+                self.assertEqual(adapter_call.call_count, 1)
 
 
 if __name__ == "__main__":

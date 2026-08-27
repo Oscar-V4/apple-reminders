@@ -279,6 +279,20 @@ class CoreBackend:
             )
 
         initial_eventkit_status = str(payload["status"])
+
+        def inventory_failure(*, code: str, message: str) -> dict[str, Any]:
+            if initial_eventkit_status == "unchanged":
+                return self._url_attachment_no_write_ambiguity_receipt(
+                    payload,
+                    code=code,
+                    message=message,
+                )
+            return self._url_attachment_partial_receipt(
+                payload,
+                code=code,
+                message=message,
+            )
+
         attachment: dict[str, Any] | None = None
         attachment_status: str | None = None
         before = payload.get("before")
@@ -294,6 +308,7 @@ class CoreBackend:
         reminder_version = list_payload.get("reminder_version")
         if (
             list_is_error
+            or list_payload.get("ok") is not True
             or not isinstance(reminder_version, int)
             or isinstance(reminder_version, bool)
             or reminder_version < 0
@@ -303,8 +318,7 @@ class CoreBackend:
                 if isinstance(list_payload.get("error"), dict)
                 else {}
             )
-            self._url_attachment_partial_receipt(
-                payload,
+            return inventory_failure(
                 code=str(error.get("code") or "native_url_attachment_precondition_failed"),
                 message=(
                     "The EventKit write succeeded, but the plugin could not obtain a "
@@ -314,7 +328,36 @@ class CoreBackend:
             )
         else:
             raw_attachments = list_payload.get("attachments")
-            attachments = raw_attachments if isinstance(raw_attachments, list) else []
+            inventory_valid = (
+                list_payload.get("reminder_id") == reminder_id
+                and isinstance(raw_attachments, list)
+                and isinstance(list_payload.get("truncated"), bool)
+            )
+            seen_attachment_ids: set[str] = set()
+            if inventory_valid:
+                for item in raw_attachments:
+                    item_id = item.get("id") if isinstance(item, Mapping) else None
+                    if (
+                        not isinstance(item, Mapping)
+                        or not isinstance(item_id, str)
+                        or not item_id
+                        or item_id in seen_attachment_ids
+                        or item.get("type") != "url"
+                        or not isinstance(item.get("url"), str)
+                        or not item.get("url")
+                    ):
+                        inventory_valid = False
+                        break
+                    seen_attachment_ids.add(item_id)
+            if not inventory_valid:
+                return inventory_failure(
+                    code="native_url_attachment_inventory_invalid",
+                    message=(
+                        "The plugin could not prove a complete exact URL attachment "
+                        "inventory, so it performed no native attachment write."
+                    ),
+                )
+            attachments = raw_attachments
             matching_previous = [
                 item
                 for item in attachments

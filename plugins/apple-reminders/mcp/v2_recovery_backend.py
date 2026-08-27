@@ -117,6 +117,75 @@ def _public_recovered_after(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _raw_recovery_commit_evidence(payload: Mapping[str, Any]) -> bool:
+    """Detect facts that contradict a claimed pre-write failure."""
+
+    after = payload.get("after")
+    if isinstance(after, Mapping) and bool(after):
+        return True
+    if after is not None and not isinstance(after, Mapping):
+        return True
+    for field in (
+        "saved",
+        "mutation_attempted",
+        "may_have_mutated",
+        "partial_failure",
+    ):
+        if payload.get(field) is True:
+            return True
+    return False
+
+
+def _canonical_local_identifier(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = value.removeprefix("x-apple-reminder://")
+    try:
+        return str(uuid.UUID(candidate)).upper()
+    except ValueError:
+        return candidate
+
+
+def _verified_raw_recovery_matches(
+    payload: Mapping[str, Any],
+    guard: DeletedGuard,
+    list_id: str,
+    counts: tuple[Any, Any, Any],
+) -> bool:
+    """Bind raw adapter success claims to the exact authorized recovery."""
+
+    target = payload.get("target")
+    raw_before = payload.get("before")
+    deleted = (
+        raw_before.get("deleted_reminder")
+        if isinstance(raw_before, Mapping)
+        else None
+    )
+    raw_after = payload.get("after")
+    reminder = raw_after.get("reminder") if isinstance(raw_after, Mapping) else None
+    recovery = payload.get("recovery")
+    expected_reminder = _canonical_local_identifier(guard.reminder_id)
+    expected_list = _canonical_local_identifier(list_id)
+    return (
+        payload.get("ok") is True
+        and payload.get("backend") == "reminderkit_private"
+        and "error" not in payload
+        and isinstance(target, Mapping)
+        and _canonical_local_identifier(target.get("reminder_id")) == expected_reminder
+        and _canonical_local_identifier(target.get("list_id")) == expected_list
+        and isinstance(deleted, Mapping)
+        and _canonical_local_identifier(deleted.get("id")) == expected_reminder
+        and deleted.get("deleted_at") == guard.deleted_at
+        and deleted.get("attachment_count") == counts[0]
+        and isinstance(reminder, Mapping)
+        and _canonical_local_identifier(reminder.get("id")) == expected_reminder
+        and _canonical_local_identifier(reminder.get("list_id")) == expected_list
+        and reminder.get("attachment_count") == counts[2]
+        and isinstance(recovery, Mapping)
+        and recovery.get("automatic_retry_safe") is not True
+    )
+
+
 class RecoveryBackend:
     def __init__(
         self,
@@ -130,7 +199,15 @@ class RecoveryBackend:
         self._receipt_validator = receipt_validator
 
     def list_deleted(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-        argv = ["list_deleted_reminders", "--limit", str(int(arguments.get("limit", 20)))]
+        limit = int(arguments.get("limit", 20))
+        offset = int(arguments.get("offset", 0))
+        argv = [
+            "list_deleted_reminders",
+            "--limit",
+            str(limit),
+            "--offset",
+            str(offset),
+        ]
         account_id = arguments.get("account_id")
         if isinstance(account_id, str) and account_id:
             argv.extend(["--account-id", account_id])
@@ -141,8 +218,11 @@ class RecoveryBackend:
         return {
             "items": copy.deepcopy(items),
             "returned": len(items),
-            "limit": int(arguments.get("limit", 20)),
-            "truncated": payload.get("truncated") is True,
+            "limit": limit,
+            "total_matched": payload.get("total_matched"),
+            "has_more": payload.get("has_more") is True,
+            "next_offset": payload.get("next_offset"),
+            "snapshot_fingerprint": payload.get("snapshot_fingerprint"),
         }
 
     def read_deleted(self, reminder_id: str, attachment_limit: int) -> DeletedSnapshot:
@@ -358,6 +438,7 @@ class RecoveryBackend:
                 not in {"not_performed", "not_needed", "read_back"}
                 or raw_verification.get("write_performed") is not False
                 or raw_verification.get("final_read") not in {None, False}
+                or _raw_recovery_commit_evidence(payload)
             ):
                 return self._pending(
                     guard,
@@ -434,6 +515,12 @@ class RecoveryBackend:
                 or raw_verification.get("attachment_bytes_verified") is not True
                 or raw_verification.get("attachment_counts_match") is not True
                 or not counts_proven
+                or not _verified_raw_recovery_matches(
+                    payload,
+                    guard,
+                    list_id,
+                    counts,
+                )
             ):
                 return self._pending(
                     guard,

@@ -7,6 +7,7 @@ lived, one-use ``del1`` capability only after an exact deleted-item read.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -38,12 +39,14 @@ RECOVERY_PUBLIC_REASON_CODES = frozenset(
         "deleted_image_bytes_unavailable",
         "deleted_image_digest_unavailable",
         "deleted_reminder_not_recoverable",
+        "deleted_snapshot_too_large",
         "eventkit_recovery_readback_pending",
         "expired_or_consumed_deleted_reference",
         "idempotency_key_conflict",
         "invalid_adapter_response",
         "invalid_deleted_guard",
         "invalid_deleted_reference",
+        "invalid_deleted_cursor",
         "invalid_deleted_snapshot",
         "invalid_deleted_read_kind",
         "invalid_native_recovery_guard",
@@ -52,6 +55,7 @@ RECOVERY_PUBLIC_REASON_CODES = frozenset(
         "invalid_recovery_receipt",
         "native_recovery_guard_timeout",
         "native_recovery_outcome_unknown",
+        "pagination_snapshot_stale",
         "recovery_dispatch_failed",
         "recovery_not_dispatched",
         "recovery_post_write_verification_failed",
@@ -68,7 +72,11 @@ RECOVERY_DEFAULT_REASON_BY_CODE = {
     "sync_pending": "native_recovery_outcome_unknown",
     "schema_mismatch": "recently_deleted_schema_mismatch",
     "unexpected_error": "recently_deleted_operation_failed",
+    "ambiguous_scope": "deleted_snapshot_too_large",
 }
+DELETED_CURSOR_FIELDS = ("kind", "account_id", "limit")
+DELETED_SNAPSHOT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_DELETED_CURSOR_OFFSET = 10_000
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,12 @@ class RecoveryOutcome:
 class _DeletedGrant:
     guard: DeletedGuard
     expires_at: float
+
+
+@dataclass(frozen=True)
+class _DeletedCursor:
+    offset: int
+    snapshot_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -160,7 +174,11 @@ def recovery_error_message(code: str, reason_code: str) -> str:
     if code == "not_found":
         return "The deleted Reminder is not available in Recently Deleted."
     if code == "concurrent_modification":
+        if reason_code == "pagination_snapshot_stale":
+            return "Recently Deleted changed; restart discovery without a cursor."
         return "The deleted Reminder changed; inspect the exact item again before recovery."
+    if code == "ambiguous_scope":
+        return "Recently Deleted is too large for one safe snapshot; narrow it to one account."
     if code == "permission_denied":
         return "Reminders access is unavailable for this local operation."
     if code == "unsupported_capability":
@@ -201,7 +219,85 @@ def _read_failure(exc: RecoveryBackendError) -> dict[str, Any]:
             "retry_original_once": False,
             "message": "Grant Reminders access, then inspect Recently Deleted again.",
         }
+    elif (
+        exc.code == "concurrent_modification"
+        and recovery_reason_code(exc.code, exc.reason_code)
+        == "pagination_snapshot_stale"
+    ):
+        result["next_action"] = {
+            "kind": "fresh_read",
+            "tool": "inspect_recently_deleted",
+            "retry_original_once": False,
+            "message": "Restart inspect_recently_deleted without a cursor.",
+        }
     return result
+
+
+def _deleted_cursor_fingerprint(arguments: Mapping[str, Any]) -> str:
+    immutable = {
+        field: copy.deepcopy(arguments[field])
+        for field in DELETED_CURSOR_FIELDS
+        if field in arguments
+    }
+    encoded = json.dumps(
+        immutable,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _encode_deleted_cursor(
+    offset: int,
+    arguments: Mapping[str, Any],
+    snapshot_fingerprint: str,
+) -> str:
+    if DELETED_SNAPSHOT_PATTERN.fullmatch(snapshot_fingerprint) is None:
+        raise ValueError("deleted snapshot fingerprint must be a SHA-256 digest")
+    value = {
+        "v": 1,
+        "o": offset,
+        "f": _deleted_cursor_fingerprint(arguments),
+        "s": snapshot_fingerprint,
+    }
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_deleted_cursor(
+    cursor: Any,
+    arguments: Mapping[str, Any],
+) -> _DeletedCursor:
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("cursor must be a non-empty opaque string")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(cursor + padding, altchars=b"-_", validate=True)
+        decoded = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is not a valid Recently Deleted cursor") from exc
+    if not isinstance(decoded, dict) or set(decoded) != {"v", "o", "f", "s"}:
+        raise ValueError("cursor has an unsupported structure")
+    offset = decoded.get("o")
+    snapshot_fingerprint = decoded.get("s")
+    if (
+        decoded.get("v") != 1
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or not 0 <= offset <= MAX_DELETED_CURSOR_OFFSET
+        or not isinstance(snapshot_fingerprint, str)
+        or DELETED_SNAPSHOT_PATTERN.fullmatch(snapshot_fingerprint) is None
+    ):
+        raise ValueError("cursor has an unsupported offset or snapshot")
+    if decoded.get("f") != _deleted_cursor_fingerprint(arguments):
+        raise ValueError("cursor cannot be reused with a different account or limit")
+    if _encode_deleted_cursor(offset, arguments, snapshot_fingerprint) != cursor:
+        raise ValueError("cursor is not in canonical form")
+    return _DeletedCursor(
+        offset=offset,
+        snapshot_fingerprint=snapshot_fingerprint,
+    )
 
 
 def _public_attachment(value: Any) -> dict[str, Any] | None:
@@ -376,7 +472,29 @@ class RecoveryFacade:
         kind = arguments.get("kind")
         try:
             if kind == "list":
-                raw = self._backend.list_deleted(arguments)
+                effective = copy.deepcopy(dict(arguments))
+                effective.setdefault("limit", 20)
+                try:
+                    cursor_state = (
+                        _decode_deleted_cursor(effective["cursor"], effective)
+                        if "cursor" in effective
+                        else None
+                    )
+                except ValueError as exc:
+                    raise RecoveryBackendError(
+                        "invalid_input",
+                        "invalid_deleted_cursor",
+                        str(exc),
+                    ) from exc
+                backend_arguments = {
+                    field: copy.deepcopy(effective[field])
+                    for field in ("account_id", "limit")
+                    if field in effective
+                }
+                backend_arguments["offset"] = (
+                    cursor_state.offset if cursor_state is not None else 0
+                )
+                raw = self._backend.list_deleted(backend_arguments)
                 raw_items = raw.get("items") if isinstance(raw, Mapping) else None
                 if not isinstance(raw_items, list):
                     raise RecoveryBackendError(
@@ -384,13 +502,66 @@ class RecoveryFacade:
                         "invalid_deleted_list",
                         "The local Recently Deleted read returned an invalid bounded page.",
                     )
-                limit = int(arguments.get("limit", 20))
+                limit = int(effective["limit"])
+                has_more = raw.get("has_more") is True or raw.get("truncated") is True
+                snapshot_fingerprint = raw.get("snapshot_fingerprint")
+                valid_snapshot = (
+                    isinstance(snapshot_fingerprint, str)
+                    and DELETED_SNAPSHOT_PATTERN.fullmatch(snapshot_fingerprint) is not None
+                )
+                if (has_more or cursor_state is not None) and not valid_snapshot:
+                    raise RecoveryBackendError(
+                        "unexpected_error",
+                        "invalid_deleted_list",
+                        "Recently Deleted did not provide a safe ordered snapshot.",
+                    )
+                if (
+                    cursor_state is not None
+                    and snapshot_fingerprint != cursor_state.snapshot_fingerprint
+                ):
+                    raise RecoveryBackendError(
+                        "concurrent_modification",
+                        "pagination_snapshot_stale",
+                        "Recently Deleted changed after the previous page.",
+                    )
                 items = [
                     public
                     for raw_item in raw_items[:limit]
                     if (public := _public_deleted(raw_item, include_attachments=False))
                     is not None
                 ]
+                next_offset = raw.get("next_offset")
+                if (
+                    has_more
+                    and valid_snapshot
+                    and isinstance(next_offset, int)
+                    and not isinstance(next_offset, bool)
+                    and 0 <= next_offset <= MAX_DELETED_CURSOR_OFFSET
+                ):
+                    next_cursor = _encode_deleted_cursor(
+                        next_offset,
+                        effective,
+                        snapshot_fingerprint,
+                    )
+                else:
+                    next_cursor = None
+                if has_more and next_cursor is None:
+                    raise RecoveryBackendError(
+                        "unexpected_error",
+                        "invalid_deleted_list",
+                        "Recently Deleted did not provide a reachable continuation.",
+                    )
+                total_matched = raw.get("total_matched", len(items))
+                if (
+                    not isinstance(total_matched, int)
+                    or isinstance(total_matched, bool)
+                    or total_matched < len(items)
+                ):
+                    raise RecoveryBackendError(
+                        "unexpected_error",
+                        "invalid_deleted_list",
+                        "Recently Deleted returned inconsistent bounded counts.",
+                    )
                 return {
                     "schema_version": 2,
                     "ok": True,
@@ -401,7 +572,11 @@ class RecoveryFacade:
                         "items": items,
                         "returned": len(items),
                         "limit": limit,
-                        "truncated": raw.get("truncated") is True,
+                        "total_matched": total_matched,
+                        "truncated": has_more,
+                        "has_more": has_more,
+                        "next_cursor": next_cursor,
+                        "pagination_exhausted": False,
                         "retention_days": 30,
                     },
                 }

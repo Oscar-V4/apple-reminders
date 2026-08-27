@@ -24,6 +24,13 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Bound pagination to a private ordered ID-and-revision SHA-256 snapshot.
   Continuation now fails read-only with `pagination_snapshot_stale` when list
   membership or revisions change between pages.
+- Added a separate snapshot-bound Recently Deleted cursor so deleted items
+  beyond the first 200 remain reachable. Continuations bind the identical
+  account and limit and restart from page one after snapshot drift.
+- Literal UI-relative selection now requires direct current-UI identity.
+  API order is offered only as an explicitly approved reinterpretation;
+  ambiguous “organize” requests do not authorize deletion or imply bitmap
+  compositing.
 - Broad cleanup now discovers summaries first, obtains write References just
   in time, processes authorized 25–40 item chunks, verifies each item, and
   stops the entire run on the first uncertain Receipt.
@@ -42,6 +49,15 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   attachments contain B plus another URL, the plugin performs no write,
   returns an ambiguity, and requires exact attachment inspection rather than
   reporting `unchanged` or guessing which link to delete.
+- Rejected malformed, mismatched, or incomplete native URL inventories before
+  any attachment write, preventing a hidden existing URL from being duplicated.
+- Re-fetched and hashed the deleted Reminder immediately before the native
+  recovery save, and prevented non-empty post-state from being laundered into
+  a `failed_no_mutation` Receipt.
+- Bound verified recovery's raw target, before/after identity, deletion time,
+  destination, and attachment counts to the authorized item and proof tuple.
+  Snapshot-stale active and deleted pages now point to the same read without a
+  cursor instead of falling back to diagnosis.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public

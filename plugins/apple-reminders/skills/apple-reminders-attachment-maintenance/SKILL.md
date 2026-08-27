@@ -34,6 +34,8 @@ For `attach_image` and `replace_image`, the source path must be an absolute regu
 
 For consolidation, inspect all dependencies, copy and verify every destination image first, then hand any authorized source deletion to `$apple-reminders-organize-cleanup`. After each copy, use the returned fresh destination reference for the next mutation. Stop the chain on a stale, missing, ambiguous, pending, partial, or manual-repair result.
 
+Cross-Reminder copy can place several source images as separate attachments on one destination Reminder. It cannot generate one composited bitmap. Clarify that distinction before acting on “make these one image,” and never interpret “organize” alone as permission to delete the source Reminders.
+
 ## URL behavior
 
 - A URL supplied to Core `create_reminder` or `change_reminder` is already a combined EventKit + visible-attachment operation. Do not add it again after `verified`.

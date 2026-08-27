@@ -76,6 +76,8 @@ class WorkflowHardeningTests(unittest.TestCase):
         self.assertIn("UI order and API order are different evidence", matrix)
         self.assertIn("A local UI observation proves only", matrix)
         self.assertIn("Stop on duplicate UI-to-ID mapping", primary)
+        self.assertIn("explicitly agrees to reinterpret", primary)
+        self.assertIn("does not authorize deletion", organize)
 
     def test_pagination_docs_match_v3_snapshot_drift_contract(self) -> None:
         runtime = read(CORE_RUNTIME)
@@ -97,6 +99,24 @@ class WorkflowHardeningTests(unittest.TestCase):
             self.assertIn(phrase, combined)
         self.assertNotIn("does not freeze later pages", combined)
         self.assertNotIn("not snapshot-isolated", combined)
+
+    def test_recently_deleted_inventory_has_snapshot_bound_reachable_pages(self) -> None:
+        recovery = read(PLUGIN / "mcp" / "v2_recovery.py")
+        adapter = read(PLUGIN / "scripts" / "reminders_adapter.py")
+        combined = "\n".join(
+            read(path)
+            for path in (PRIMARY_SKILL, ORGANIZE_SKILL, PUBLIC_INTERFACE, MATRIX)
+        )
+
+        self.assertIn("_encode_deleted_cursor", recovery)
+        self.assertIn("pagination_snapshot_stale", recovery)
+        self.assertIn("snapshot_fingerprint", adapter)
+        for phrase in (
+            "Recently Deleted cursor",
+            "identical account and limit",
+            "restart without a cursor",
+        ):
+            self.assertIn(phrase, combined)
 
     def test_dependency_first_copy_precedes_source_deletion(self) -> None:
         organize = read(ORGANIZE_SKILL)
