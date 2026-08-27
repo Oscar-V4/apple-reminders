@@ -398,22 +398,22 @@ class CoreBackend:
                 ambiguity_code = "native_url_attachment_inventory_truncated"
             elif len(matching_target) > 1:
                 ambiguity_code = "ambiguous_target_url_attachment"
+            elif (
+                initial_eventkit_status == "unchanged"
+                and other_url_attachments
+            ):
+                # A fresh same-URL retry no longer carries the A -> B lineage
+                # from an earlier partial composed write. Any non-target URL
+                # could be an intentional link or the stale A, whether or not B
+                # is already present. Appending B in the A-only case would
+                # create the same ambiguous A+B state and falsely claim success.
+                no_write_ambiguity = True
             elif len(matching_target) == 1 and replacing_previous and matching_previous:
                 # This is the characteristic retry state after the visible B
                 # attachment committed but the composed A -> B Receipt was
                 # uncertain. Replacing A now would create a second B. Preserve
                 # both exact objects and ask for an explicit attachment cleanup.
                 ambiguity_code = "target_url_attachment_already_exists"
-            elif (
-                len(matching_target) == 1
-                and initial_eventkit_status == "unchanged"
-                and other_url_attachments
-            ):
-                # A fresh same-URL request no longer carries the A -> B lineage
-                # from an earlier partial composed write. One B plus another URL
-                # could be either intentional multi-attachment state or a stale A.
-                # Never infer which object to delete from this state alone.
-                no_write_ambiguity = True
             elif len(matching_target) == 1:
                 reuse_existing = True
             elif replacing_previous and len(matching_previous) > 1:
@@ -454,16 +454,20 @@ class CoreBackend:
                 attach_payload: dict[str, Any] = {}
                 attach_is_error = False
             elif no_write_ambiguity:
-                attachment = copy.deepcopy(dict(matching_target[0]))
+                attachment = (
+                    copy.deepcopy(dict(matching_target[0]))
+                    if matching_target
+                    else None
+                )
                 self._url_attachment_no_write_ambiguity_receipt(
                     payload,
                     code="ambiguous_visible_url_attachment",
                     message=(
-                        "The EventKit URL was already unchanged and one matching "
-                        "visible URL attachment exists, but other URL attachments are "
-                        "also present. No attachment was changed because the plugin "
-                        "cannot infer whether another object is an intentional link or "
-                        "a stale replacement source. Inspect the exact native "
+                        "The EventKit URL was already unchanged, but a non-target URL "
+                        "attachment is still present. No attachment was changed because "
+                        "the plugin cannot infer whether that object is an intentional "
+                        "link or a stale replacement source, and it cannot safely append "
+                        "another target attachment. Inspect the exact native "
                         "attachments before cleaning up one exact attachment ID."
                     ),
                 )

@@ -177,10 +177,12 @@ def _verified_raw_recovery_matches(
         and _canonical_local_identifier(deleted.get("id")) == expected_reminder
         and deleted.get("deleted_at") == guard.deleted_at
         and deleted.get("attachment_count") == counts[0]
+        and deleted.get("attachment_digest") == guard.attachment_digest
         and isinstance(reminder, Mapping)
         and _canonical_local_identifier(reminder.get("id")) == expected_reminder
         and _canonical_local_identifier(reminder.get("list_id")) == expected_list
         and reminder.get("attachment_count") == counts[2]
+        and reminder.get("attachment_digest") == guard.attachment_digest
         and isinstance(recovery, Mapping)
         and recovery.get("automatic_retry_safe") is not True
     )

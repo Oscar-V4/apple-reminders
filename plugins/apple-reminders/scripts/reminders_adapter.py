@@ -3638,6 +3638,11 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
     con = connect_read_only(db)
     try:
         require_command_capability(con, "recover_deleted_reminder")
+        # Python's sqlite3 driver does not open a transaction for SELECTs. Pin
+        # both the bounded identity snapshot and the page hydration query to
+        # one read transaction so the emitted rows cannot drift from the
+        # fingerprint between statements.
+        con.execute("begin")
         where = [
             "coalesce(r.ZMARKEDFORDELETION,0)=1",
             "r.ZLASTMODIFIEDDATE>=?",
@@ -3646,9 +3651,9 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
         if args.account_id:
             where.append("a.ZCKIDENTIFIER=?")
             params.append(normalize_uuid(args.account_id))
-        rows = con.execute(
+        snapshot_rows = con.execute(
             f"""
-            select r.*
+            select r.Z_PK,r.ZCKIDENTIFIER,r.Z_OPT,r.ZLASTMODIFIEDDATE
             from ZREMCDREMINDER r
             left join ZREMCDOBJECT a on a.Z_PK=r.ZACCOUNT and a.Z_ENT=14
             where {" and ".join(where)}
@@ -3657,7 +3662,7 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
             """,
             [*params, RECENTLY_DELETED_SNAPSHOT_LIMIT + 1],
         ).fetchall()
-        if len(rows) > RECENTLY_DELETED_SNAPSHOT_LIMIT:
+        if len(snapshot_rows) > RECENTLY_DELETED_SNAPSHOT_LIMIT:
             raise AdapterError(
                 "Recently Deleted is too large for one safe ordered snapshot",
                 code="ambiguous_scope",
@@ -3671,16 +3676,50 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
                     "modified": row["ZLASTMODIFIEDDATE"],
                     "pk": row["Z_PK"],
                 }
-                for row in rows
+                for row in snapshot_rows
             ]
         )
-        page = rows[args.offset : args.offset + args.limit]
+        page_snapshot = snapshot_rows[args.offset : args.offset + args.limit]
+        page_pks = [int(row["Z_PK"]) for row in page_snapshot]
+        if page_pks:
+            placeholders = ",".join("?" for _ in page_pks)
+            page_rows = con.execute(
+                f"select r.* from ZREMCDREMINDER r where r.Z_PK in ({placeholders})",
+                page_pks,
+            ).fetchall()
+            rows_by_pk = {int(row["Z_PK"]): row for row in page_rows}
+            if set(rows_by_pk) != set(page_pks):
+                raise AdapterError(
+                    "Recently Deleted changed while reading the requested page",
+                    code="concurrent_modification",
+                    reason_code="pagination_snapshot_stale",
+                )
+            snapshot_by_pk = {int(row["Z_PK"]): row for row in page_snapshot}
+            for pk, row in rows_by_pk.items():
+                expected = snapshot_by_pk[pk]
+                if (
+                    row["ZCKIDENTIFIER"],
+                    row["Z_OPT"],
+                    row["ZLASTMODIFIEDDATE"],
+                ) != (
+                    expected["ZCKIDENTIFIER"],
+                    expected["Z_OPT"],
+                    expected["ZLASTMODIFIEDDATE"],
+                ):
+                    raise AdapterError(
+                        "Recently Deleted changed while reading the requested page",
+                        code="concurrent_modification",
+                        reason_code="pagination_snapshot_stale",
+                    )
+            page = [rows_by_pk[pk] for pk in page_pks]
+        else:
+            page = []
         items = [
             deleted_reminder_snapshot(con, dict(row))[0]
             for row in page
         ]
         next_offset = args.offset + len(items)
-        has_more = next_offset < len(rows)
+        has_more = next_offset < len(snapshot_rows)
         json_out(
             {
                 "ok": True,
@@ -3688,7 +3727,7 @@ def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
                 "returned": len(items),
                 "limit": args.limit,
                 "offset": args.offset,
-                "total_matched": len(rows),
+                "total_matched": len(snapshot_rows),
                 "has_more": has_more,
                 "next_offset": next_offset if has_more else None,
                 "truncated": has_more,

@@ -135,9 +135,14 @@ even though optional MCP `outputSchema` descriptors are omitted from
     write. A `failed_no_mutation` recovery Receipt cannot erase non-empty
     post-state or other mutation evidence. Verified recovery binds its raw
     target/before/after identities and attachment counts to the authorized
-    item, destination, and proof tuple. The native deleted-item guard is fetched
-    again immediately before the ReminderKit save. Snapshot-stale active and
-    deleted pages direct callers back to the same read without a cursor.
+    item, destination, and proof tuple; both raw attachment-set digests must
+    equal the private `del1` guard digest. The native deleted-item guard is
+    fetched again immediately before the ReminderKit save. Snapshot-stale
+    active and deleted pages direct callers back to the same read without a
+    cursor. Recently Deleted fingerprinting and page hydration share a pinned
+    read transaction, and hydrated page revisions must match the fingerprint.
+    A fresh unchanged EventKit URL with any non-target native URL is a no-write
+    ambiguity, including the stale-A-only state where B is absent.
 
 ## Deliberately withheld behavior
 

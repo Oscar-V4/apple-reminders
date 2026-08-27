@@ -58,6 +58,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   destination, and attachment counts to the authorized item and proof tuple.
   Snapshot-stale active and deleted pages now point to the same read without a
   cursor instead of falling back to diagnosis.
+- Required both raw recovery attachment-set digests to equal the private
+  `del1` guard before `verified`, and made a fresh unchanged URL retry with
+  stale A but no B fail without a native write instead of appending B.
+- Reduced Recently Deleted pagination exposure by reading only ordered
+  identity/revision columns for the snapshot and full content for the current
+  page inside one pinned read transaction, with page revisions checked against
+  the fingerprint. Missing or expired deleted items now retain typed
+  `not_found` errors.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public

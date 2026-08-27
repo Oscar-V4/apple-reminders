@@ -107,6 +107,10 @@ def verified_receipt() -> dict[str, Any]:
 def verified_adapter_receipt() -> dict[str, Any]:
     receipt = verified_receipt()
     receipt["backend"] = "reminderkit_private"
+    receipt["before"]["deleted_reminder"]["attachment_digest"] = (
+        GUARD.attachment_digest
+    )
+    receipt["after"]["reminder"]["attachment_digest"] = GUARD.attachment_digest
     return receipt
 
 
@@ -698,6 +702,18 @@ class RecoveryBackendTests(unittest.TestCase):
         def wrong_after_count(payload):
             payload["after"]["reminder"]["attachment_count"] = 0
 
+        def wrong_before_digest(payload):
+            payload["before"]["deleted_reminder"]["attachment_digest"] = "0" * 64
+
+        def missing_before_digest(payload):
+            del payload["before"]["deleted_reminder"]["attachment_digest"]
+
+        def wrong_after_digest(payload):
+            payload["after"]["reminder"]["attachment_digest"] = "1" * 64
+
+        def missing_after_digest(payload):
+            del payload["after"]["reminder"]["attachment_digest"]
+
         def wrong_backend(payload):
             payload["backend"] = "native_extension"
 
@@ -721,6 +737,10 @@ class RecoveryBackendTests(unittest.TestCase):
             wrong_after_id,
             wrong_after_list,
             wrong_after_count,
+            wrong_before_digest,
+            missing_before_digest,
+            wrong_after_digest,
+            missing_after_digest,
             wrong_backend,
             verified_with_error,
             automatic_retry,

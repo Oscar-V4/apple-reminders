@@ -325,7 +325,11 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
             },
         ]
         connection = mock.Mock()
-        connection.execute.return_value.fetchall.return_value = rows
+        snapshot_result = mock.Mock()
+        snapshot_result.fetchall.return_value = rows
+        page_result = mock.Mock()
+        page_result.fetchall.return_value = [rows[1]]
+        connection.execute.side_effect = [mock.Mock(), snapshot_result, page_result]
 
         def public_snapshot(_connection, row):
             return ({"id": row["ZCKIDENTIFIER"]}, {"private": "not public"})
@@ -363,6 +367,68 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
         self.assertIsNone(payload["next_offset"])
         self.assertRegex(payload["snapshot_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertNotIn("private", repr(payload))
+        self.assertEqual(connection.execute.call_args_list[0].args[0], "begin")
+        snapshot_query = connection.execute.call_args_list[1].args[0]
+        page_query = connection.execute.call_args_list[2].args[0]
+        self.assertNotIn("select r.*", snapshot_query.casefold())
+        self.assertIn(
+            "select r.z_pk,r.zckidentifier,r.z_opt,r.zlastmodifieddate",
+            " ".join(snapshot_query.casefold().split()),
+        )
+        self.assertIn("select r.*", page_query.casefold())
+        self.assertEqual(connection.execute.call_args_list[2].args[1], [1])
+
+    def test_deleted_inventory_rejects_page_revision_drift(self) -> None:
+        snapshot_row = {
+            "Z_PK": 1,
+            "ZCKIDENTIFIER": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "Z_OPT": 7,
+            "ZLASTMODIFIEDDATE": 100.0,
+        }
+        changed_row = {**snapshot_row, "Z_OPT": 8}
+        connection = mock.Mock()
+        snapshot_result = mock.Mock()
+        snapshot_result.fetchall.return_value = [snapshot_row]
+        page_result = mock.Mock()
+        page_result.fetchall.return_value = [changed_row]
+        connection.execute.side_effect = [mock.Mock(), snapshot_result, page_result]
+        args = argparse.Namespace(db=None, account_id=None, limit=1, offset=0)
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                return_value=connection,
+            ),
+            mock.patch.object(reminders_adapter, "require_command_capability"),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.cmd_list_deleted_reminders(args)
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "pagination_snapshot_stale",
+        )
+        connection.close.assert_called_once_with()
+
+    def test_deleted_item_absence_preserves_typed_not_found(self) -> None:
+        connection = mock.Mock()
+        connection.execute.return_value.fetchone.return_value = None
+
+        with self.assertRaises(reminders_adapter.AdapterError) as raised:
+            reminders_adapter.find_deleted_reminder(connection, self.REMINDER_ID)
+
+        self.assertEqual(raised.exception.code, "not_found")
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "deleted_reminder_not_recoverable",
+        )
 
     def test_helper_crash_without_receipt_preserves_possible_write(self) -> None:
         completed = subprocess.CompletedProcess(

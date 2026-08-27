@@ -28,6 +28,7 @@ STABLE_ERROR_CODES = frozenset(
         "ambiguous_target",
         "concurrent_modification",
         "invalid_input",
+        "not_found",
         "permission_denied",
         "schema_mismatch",
         "sync_pending",
