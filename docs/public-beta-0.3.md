@@ -67,6 +67,11 @@ The tool count is a reviewable release Interface, not the product goal. A future
 - `delete_reminder` uses EventKit native delete only and verifies local absence without claiming UI selection.
 - Receipt states remain `unchanged`, `verified`, `committed_verification_pending`, `partial_success`, `failed_no_mutation`, and `failed_manual_repair_required`.
 - `verified` requires an exact read-back after the final mutation step.
+- Every recoverable pending mutation points to the matching bounded read:
+  `fetch_reminders` for Reminder creation, `list_reminder_lists` for list
+  creation, `inspect_reminder_native` for section creation, and
+  `read_reminder` for reminder-scoped changes. Its `sync_pending` error sets
+  `retryable=false`; the original mutation is never retried automatically.
 
 ### Visible URLs
 

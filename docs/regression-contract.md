@@ -68,9 +68,14 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `committed_verification_pending`, `partial_success`,
     `failed_no_mutation`, and `failed_manual_repair_required` distinctions.
     Every verification-pending public Receipt carries a structured
-    `sync_pending` error plus safe read-before-retry recovery; reminder-scoped
-    flows also provide a public fresh-read next action. It never degrades into
-    an outer contract failure or authorizes an automatic mutation retry.
+    `sync_pending` error plus safe read-before-retry recovery. The recovery
+    action must match the affected resource: `fetch_reminders` for Reminder
+    creation, `list_reminder_lists` for list creation,
+    `inspect_reminder_native` for section creation, and `read_reminder` for
+    reminder-scoped changes. Public pending-mutation errors set
+    `retryable=false`; only the separate fresh-read action is safe. The result
+    never degrades into an outer contract failure or authorizes an automatic
+    mutation retry.
     Malformed optional fields after dispatch preserve an unknown possible
     write rather than becoming `failed_no_mutation`.
 13. The explicit access result preserves pre/post authorization,

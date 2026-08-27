@@ -26,6 +26,12 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   `sync_pending` error and safe read-before-retry recovery instead of
   collapsing into a generic public-result contract failure. Unrelated journal
   warnings cannot replace the causal pending reason.
+- Route every recoverable pending mutation to the matching read surface:
+  Reminder creation to `fetch_reminders`, list creation to
+  `list_reminder_lists`, section creation to `inspect_reminder_native`, and
+  reminder-scoped changes to `read_reminder`. The public contract rejects a
+  missing or mismatched recovery action, forces `sync_pending` mutation errors
+  to `retryable=false`, and never authorizes automatic retry.
 - Distinguish non-retryable native image transport or content-type mismatches
   from retryable iCloud visibility convergence in machine-readable errors.
 - Treat malformed optional fields in a post-dispatch native Receipt as an

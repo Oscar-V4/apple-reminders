@@ -496,19 +496,33 @@ def _next_action(
     if code == "sync_pending" and operation == "request_reminders_access":
         return None
     if code in {"concurrent_modification", "sync_pending"}:
+        fresh_read_tool = {
+            "create_reminder": "fetch_reminders",
+            "ensure_reminder_list": "list_reminder_lists",
+            "create_reminder_section": "inspect_reminder_native",
+        }.get(operation, "read_reminder")
+        if operation == "create_reminder":
+            message = (
+                "Fetch the target list and resolve whether the create committed "
+                "before retrying."
+            )
+        elif operation == "ensure_reminder_list":
+            message = (
+                "List the exact Reminder account's lists and resolve whether the "
+                "list create committed before retrying."
+            )
+        elif operation == "create_reminder_section":
+            message = (
+                "Inspect the exact Reminder List's sections and resolve whether "
+                "the section create committed before retrying."
+            )
+        else:
+            message = "Read the exact Reminder again before attempting another change."
         return {
             "kind": "fresh_read",
-            "tool": (
-                "fetch_reminders"
-                if operation == "create_reminder"
-                else "read_reminder"
-            ),
+            "tool": fresh_read_tool,
             "retry_original_once": False,
-            "message": (
-                "Fetch the target list and resolve whether the create committed before retrying."
-                if operation == "create_reminder"
-                else "Read the exact Reminder again before attempting another change."
-            ),
+            "message": message,
         }
     if reason == "native_helper_build_failed":
         return {
@@ -1135,7 +1149,6 @@ class V2CoreFacade:
             reason_code=reason_code,
             message=message,
         )
-        result.pop("next_action", None)
         return result
 
     def list_reminder_lists(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -1619,8 +1632,11 @@ class V2CoreFacade:
                 "code": "sync_pending",
                 "reason_code": "final_read_failed",
                 "message": "Read the Reminder again before another change.",
-                "retryable": True,
+                "retryable": False,
             }
+        current_error = receipt.get("error")
+        if isinstance(current_error, Mapping) and current_error.get("code") == "sync_pending":
+            receipt["error"] = {**current_error, "retryable": False}
         if result.reference_error is not None or receipt["status"] in {
             "committed_verification_pending",
             "partial_success",
@@ -1667,6 +1683,8 @@ class V2CoreFacade:
             payload.get("error"), Mapping
         ):
             error = _public_error(payload.get("error"))
+            if error["code"] == "sync_pending":
+                error["retryable"] = False
             result["error"] = error
             next_action = _next_action(error, operation=operation)
             if next_action is not None:
@@ -1703,7 +1721,7 @@ class V2CoreFacade:
             "code": "sync_pending",
             "reason_code": _reason_code(reason_code, "final_read_failed"),
             "message": message[:2000],
-            "retryable": True,
+            "retryable": False,
         }
         result["error"] = error
         result["next_action"] = _next_action(
@@ -1724,18 +1742,9 @@ class V2CoreFacade:
             "code": "sync_pending",
             "reason_code": _reason_code(reason_code, "mutation_outcome_unknown"),
             "message": message[:2000],
-            "retryable": True,
+            "retryable": False,
         }
-        next_action = (
-            {
-                "kind": "fresh_read",
-                "tool": "fetch_reminders",
-                "retry_original_once": False,
-                "message": "Fetch the exact Reminder List and resolve whether the create committed before retrying.",
-            }
-            if operation == "create_reminder"
-            else _next_action(error)
-        )
+        next_action = _next_action(error, operation=operation)
         return {
             "schema_version": 2,
             "ok": True,
@@ -1781,7 +1790,7 @@ class V2CoreFacade:
             "code": code,
             "reason_code": _reason_code(reason_code, code),
             "message": (message or "The Reminder mutation was rejected.")[:2000],
-            "retryable": retryable,
+            "retryable": retryable and code != "sync_pending",
         }
         result: dict[str, Any] = {
             "schema_version": 2,

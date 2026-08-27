@@ -595,8 +595,10 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertTrue(second["replayed"])
         self.assertEqual(first["operation_id"], second["operation_id"])
         self.assertEqual(first["error"]["code"], "sync_pending")
+        self.assertFalse(first["error"]["retryable"])
         self.assertEqual(first["warnings"][0]["code"], "verification_pending")
-        self.assertNotIn("next_action", first)
+        self.assertEqual(first["next_action"]["tool"], "list_reminder_lists")
+        self.assertFalse(first["next_action"]["retry_original_once"])
         validate_public_result("ensure_reminder_list", first, "unknown")
         validate_public_result("ensure_reminder_list", second, "unknown")
 
@@ -618,6 +620,8 @@ class V2CoreFacadeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "committed_verification_pending")
         self.assertEqual(result["error"]["reason_code"], "invalid_eventkit_list_receipt")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertEqual(result["next_action"]["tool"], "list_reminder_lists")
         validate_public_result("ensure_reminder_list", result, "unknown")
 
     def test_create_translates_list_id_and_returns_one_final_reference(self) -> None:
