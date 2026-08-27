@@ -424,6 +424,59 @@ def _public_error(
     }
 
 
+_ACCESS_AUTHORIZATION_STATES = frozenset(
+    {
+        "not_determined",
+        "restricted",
+        "denied",
+        "full_access",
+        "write_only",
+        "unknown",
+    }
+)
+
+
+def _access_request_receipt(
+    value: Any,
+    *,
+    require_full_access: bool,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "authorization_before",
+        "authorization",
+        "request_attempted",
+        "prompt_expected",
+        "prompt_observed",
+        "prompted_explicitly",
+    }:
+        return None
+    authorization_before = value.get("authorization_before")
+    authorization = value.get("authorization")
+    request_attempted = value.get("request_attempted")
+    prompt_expected = value.get("prompt_expected")
+    prompt_observed = value.get("prompt_observed")
+    prompted_explicitly = value.get("prompted_explicitly")
+    if (
+        authorization_before not in _ACCESS_AUTHORIZATION_STATES
+        or authorization not in _ACCESS_AUTHORIZATION_STATES
+        or request_attempted is not True
+        or not isinstance(prompt_expected, bool)
+        or prompt_expected != (authorization_before == "not_determined")
+        or prompt_observed is not None
+        or prompted_explicitly is not True
+        or (require_full_access and authorization != "full_access")
+    ):
+        return None
+    return {
+        "authorization_before": authorization_before,
+        "authorization": authorization,
+        "request_attempted": True,
+        "prompt_expected": prompt_expected,
+        "prompt_observed": None,
+        "prompted_explicitly": True,
+    }
+
+
 def _next_action(
     error: Mapping[str, Any],
     *,
@@ -431,6 +484,8 @@ def _next_action(
 ) -> dict[str, Any] | None:
     code = error.get("code")
     reason = error.get("reason_code")
+    if code == "permission_denied" and operation == "request_reminders_access":
+        return None
     if code == "permission_denied":
         return {
             "kind": "request_access",
@@ -438,6 +493,8 @@ def _next_action(
             "retry_original_once": True,
             "message": "Request Reminders access, then retry this operation once.",
         }
+    if code == "sync_pending" and operation == "request_reminders_access":
+        return None
     if code in {"concurrent_modification", "sync_pending"}:
         return {
             "kind": "fresh_read",
@@ -471,7 +528,8 @@ def _read_failure(
     operation: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    error = _public_error(payload.get("error"))
+    raw_error = payload.get("error")
+    error = _public_error(raw_error)
     result: dict[str, Any] = {
         "schema_version": 2,
         "ok": False,
@@ -479,7 +537,13 @@ def _read_failure(
         "operation": operation,
         "error": error,
     }
-    next_action = _next_action(error)
+    if operation == "request_reminders_access" and isinstance(raw_error, Mapping):
+        access_receipt = _access_request_receipt(
+            raw_error.get("details"), require_full_access=False
+        )
+        if access_receipt is not None:
+            result["data"] = access_receipt
+    next_action = _next_action(error, operation=operation)
     if next_action is not None:
         result["next_action"] = next_action
     return result
@@ -874,22 +938,15 @@ class V2CoreFacade:
             or not isinstance(data, Mapping)
         ):
             return _read_failure("request_reminders_access", payload)
-        authorization = data.get("authorization")
-        if authorization not in {
-            "not_determined",
-            "restricted",
-            "denied",
-            "full_access",
-            "write_only",
-            "unknown",
-        }:
+        access_receipt = _access_request_receipt(data, require_full_access=True)
+        if access_receipt is None:
             return _read_failure(
                 "request_reminders_access",
                 {
                     "error": {
                         "code": "unexpected_error",
                         "reason_code": "invalid_access_response",
-                        "message": "EventKit returned an invalid authorization state.",
+                        "message": "EventKit returned an invalid access-request receipt.",
                         "retryable": False,
                     }
                 },
@@ -899,10 +956,7 @@ class V2CoreFacade:
             "ok": True,
             "status": "verified",
             "operation": "request_reminders_access",
-            "data": {
-                "authorization": authorization,
-                "prompted_explicitly": True,
-            },
+            "data": access_receipt,
         }
 
     def ensure_reminder_list(self, arguments: Mapping[str, Any]) -> dict[str, Any]:

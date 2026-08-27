@@ -34,11 +34,24 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Extend the bounded native attachment verification window from six to ten
   seconds after a live attachment became mobile-visible after roughly seven
   seconds. The mutation is still never retried automatically.
+- Report an explicit Reminders access request as an attempted request, together
+  with the authorization state observed before and after it. The result says
+  whether a first-decision prompt was expected and explicitly records prompt
+  observation as unknown. The deprecated `prompted_explicitly` flag remains
+  additive v2 compatibility for “the explicit access tool ran”; it is not
+  evidence that macOS displayed a prompt.
+- Preserve that bounded access receipt when permission is denied and do not
+  direct the access tool back to itself. Reconcile the callback, error, and
+  final authorization state before returning `verified`.
+- Let the native access helper return its structured 60-second timeout before
+  the 70-second launcher and 80-second MCP transport limits expire.
 
 ### Changed
 
 - Declare both read and write capabilities in the plugin manifest to match the
   public tool surface.
+- Give every public MCP tool a human-readable title so discovery and
+  clients that render MCP titles can present a user-facing action name.
 - Document reminder content as untrusted data at the runtime, skill, and
   security boundaries.
 - Extend the opt-in public MCP live smoke through image attach, native inspect,

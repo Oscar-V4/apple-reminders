@@ -4,6 +4,7 @@
 #import <dispatch/dispatch.h>
 
 static const NSInteger BridgeSchemaVersion = 1;
+static const NSTimeInterval AccessRequestTimeoutSeconds = 60.0;
 
 static NSArray<NSString *> *BridgeOperations(void) {
     return @[
@@ -1384,7 +1385,39 @@ static NSDictionary *FetchReminders(EKEventStore *store, NSDictionary *request, 
                           nil);
 }
 
+static NSDictionary *AccessFailureClassification(BOOL granted,
+                                                 NSError *accessError,
+                                                 EKAuthorizationStatus authorizationAfter) {
+    BOOL fullAccess = (NSInteger)authorizationAfter == 3;
+    if (granted && accessError == nil && fullAccess) {
+        return nil;
+    }
+    BOOL deniedState = (NSInteger)authorizationAfter == 1 ||
+                       (NSInteger)authorizationAfter == 2 ||
+                       (NSInteger)authorizationAfter == 4;
+    BOOL authorizationError =
+        accessError != nil &&
+        [accessError.domain isEqualToString:EKErrorDomain] &&
+        accessError.code == EKErrorEventStoreNotAuthorized;
+    BOOL permissionFailure =
+        !granted && deniedState && (accessError == nil || authorizationError);
+    NSString *message = accessError.localizedDescription ?: (
+        permissionFailure
+            ? @"Reminders access was not granted"
+            : @"The access callback did not match the final Reminders authorization state");
+    return @{
+        @"code" : permissionFailure
+            ? @"reminders_access_denied"
+            : @"access_request_inconsistent",
+        @"category" : permissionFailure ? @"permission_denied" : @"runtime",
+        @"message" : message,
+    };
+}
+
 static NSDictionary *RequestAccess(NSString *operation) {
+    EKAuthorizationStatus authorizationBefore =
+        [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder];
+    BOOL promptExpected = (NSInteger)authorizationBefore == 0;
     EKEventStore *store = [[EKEventStore alloc] init];
     __block BOOL granted = NO;
     __block NSError *accessError = nil;
@@ -1395,32 +1428,39 @@ static NSDictionary *RequestAccess(NSString *operation) {
         dispatch_semaphore_signal(semaphore);
     };
     [store requestFullAccessToRemindersWithCompletion:completion];
-    BOOL completed = WaitForSemaphoreWhilePumpingRunLoop(semaphore, 60.0);
+    BOOL completed =
+        WaitForSemaphoreWhilePumpingRunLoop(semaphore, AccessRequestTimeoutSeconds);
+    EKAuthorizationStatus authorizationAfter =
+        [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder];
+    NSDictionary *requestDetails = @{
+        @"authorization_before" : AuthorizationName(authorizationBefore),
+        @"authorization" : AuthorizationName(authorizationAfter),
+        @"request_attempted" : @YES,
+        @"prompt_expected" : @(promptExpected),
+        @"prompt_observed" : [NSNull null],
+        // v2 compatibility: this means the explicit access operation ran. It
+        // does not claim that this process observed a macOS prompt.
+        @"prompted_explicitly" : @YES,
+    };
     if (!completed) {
         return Failure(operation,
                        @"access_request_timeout",
                        @"The Reminders access request did not finish within 60 seconds",
                        @"timeout",
-                       @{});
+                       requestDetails);
     }
-    if (!granted) {
-        NSString *message = accessError.localizedDescription ?: @"Reminders access was not granted";
+    NSDictionary *classification =
+        AccessFailureClassification(granted, accessError, authorizationAfter);
+    if (classification != nil) {
         return Failure(operation,
-                       @"reminders_access_denied",
-                       message,
-                       @"permission_denied",
-                       @{
-                           @"authorization" : AuthorizationName(
-                               [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder]),
-                       });
+                       classification[@"code"],
+                       classification[@"message"],
+                       classification[@"category"],
+                       requestDetails);
     }
     return BridgeResponse(operation,
                           @"verified",
-                          @{
-                              @"authorization" : AuthorizationName(
-                                  [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder]),
-                              @"prompted_explicitly" : @YES,
-                          },
+                          requestDetails,
                           nil);
 }
 
@@ -1753,6 +1793,44 @@ static int ExitCodeForResponse(NSDictionary *response) {
     return 2;
 }
 
+#if defined(APPLE_REMINDERS_ACCESS_CLASSIFICATION_TEST)
+int main(void) {
+    @autoreleasepool {
+        NSError *authorizationError =
+            [NSError errorWithDomain:EKErrorDomain
+                                code:EKErrorEventStoreNotAuthorized
+                            userInfo:nil];
+        NSError *internalError =
+            [NSError errorWithDomain:EKErrorDomain
+                                code:EKErrorInternalFailure
+                            userInfo:nil];
+        NSString *(^classify)(BOOL, NSError *, NSInteger) =
+            ^NSString *(BOOL granted, NSError *error, NSInteger status) {
+                NSDictionary *failure = AccessFailureClassification(
+                    granted, error, (EKAuthorizationStatus)status);
+                return failure == nil ? @"verified" : failure[@"category"];
+            };
+        NSDictionary *fixtures = @{
+            @"verified" : classify(YES, nil, 3),
+            @"denied" : classify(NO, authorizationError, 2),
+            @"restricted" : classify(NO, nil, 1),
+            @"write_only" : classify(NO, nil, 4),
+            @"internal_error" : classify(NO, internalError, 2),
+            @"granted_but_denied" : classify(YES, nil, 2),
+            @"not_determined" : classify(NO, nil, 0),
+            @"unknown" : classify(NO, nil, 999),
+            @"full_access_with_error" : classify(YES, internalError, 3),
+        };
+        NSData *output = [NSJSONSerialization dataWithJSONObject:fixtures
+                                                         options:NSJSONWritingSortedKeys
+                                                           error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        [[NSFileHandle fileHandleWithStandardOutput]
+            writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        return 0;
+    }
+}
+#else
 int main(void) {
     @autoreleasepool {
         NSString *operation = nil;
@@ -1811,3 +1889,4 @@ int main(void) {
         return ExitCodeForResponse(response);
     }
 }
+#endif

@@ -71,8 +71,13 @@ reauthorization requirement through the repository issue tracker.
 
 When an operation needs Reminders permission, the plugin reports that need and
 offers the explicit `request_reminders_access` step. macOS may then display a
-permission prompt for the app running Codex. Normal first use does not require
-Doctor or private-interface setup.
+permission prompt for the app running Codex. The tool reports that the request
+was attempted, whether a first-decision prompt was expected, and
+`prompt_observed: null`; the process cannot observe the macOS prompt itself.
+The deprecated `prompted_explicitly` compatibility field means only that this
+explicit access tool ran. A denial preserves the same bounded receipt and does
+not loop back into another automatic access request. Normal first use does not
+require Doctor or private-interface setup.
 
 ## Public Interface
 

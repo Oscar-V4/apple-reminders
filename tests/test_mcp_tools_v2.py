@@ -43,6 +43,22 @@ EXPECTED_ANNOTATIONS = {
     "diagnose_reminders": (True, False, True, False),
 }
 
+EXPECTED_TITLES = {
+    "request_reminders_access": "Request Reminders access",
+    "list_reminder_lists": "List reminder lists",
+    "fetch_reminders": "Fetch reminders",
+    "read_reminder": "Read reminder",
+    "create_reminder": "Create reminder",
+    "change_reminder": "Change reminder",
+    "delete_reminder": "Delete reminder",
+    "inspect_reminder_native": "Inspect reminder details",
+    "ensure_reminder_list": "Ensure reminder list",
+    "create_reminder_section": "Create reminder section",
+    "organize_reminder": "Organize reminder",
+    "change_reminder_attachment": "Change reminder attachment",
+    "diagnose_reminders": "Diagnose Reminders",
+}
+
 EXPECTED_REQUIRED = {
     "request_reminders_access": set(),
     "list_reminder_lists": set(),
@@ -106,6 +122,12 @@ class McpToolsV2SchemaTests(unittest.TestCase):
         self.assertEqual(self.document["schemaVersion"], 2)
         self.assertEqual(set(self.by_name), set(EXPECTED_TOOLS))
         self.assertEqual(len(self.by_name), 13)
+
+    def test_every_public_tool_has_a_human_readable_title(self) -> None:
+        self.assertEqual(
+            {name: tool.get("title") for name, tool in self.by_name.items()},
+            EXPECTED_TITLES,
+        )
 
     def test_tool_discovery_contract_stays_within_context_budget(self) -> None:
         compact = json.dumps(

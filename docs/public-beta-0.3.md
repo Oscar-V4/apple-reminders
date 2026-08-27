@@ -41,7 +41,9 @@ The tool count is a reviewable release Interface, not the product goal. A future
 ### Core works first
 
 - Skills attempt the requested bounded Core read or change without Doctor or capability preflight.
-- A permission-required result returns one `next_action`; access is requested only then, followed by one retry.
+- A permission-required operation returns one `next_action`; access is
+  requested only then, followed by one retry. If that explicit access request
+  is denied, its bounded receipt is returned without a self-retry loop.
 - A helper-build environment failure points to content-free packaging diagnosis
   and the command-line-tools installer instead of a blind retry. Native
   Extension failure does not block otherwise available Core behavior.

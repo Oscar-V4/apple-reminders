@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -534,6 +535,92 @@ class EventKitRequestValidationTests(unittest.TestCase):
             '@"Reminder was not found; read current state before retrying"',
             source,
         )
+
+    def test_request_access_reports_attempt_without_claiming_prompt_observation(
+        self,
+    ) -> None:
+        source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('@"authorization_before"', source)
+        self.assertIn('@"request_attempted" : @YES', source)
+        self.assertIn('@"prompt_expected"', source)
+        self.assertIn('@"prompt_observed" : [NSNull null]', source)
+        self.assertIn("does not claim that this process observed a macOS prompt", source)
+        self.assertIn('@"prompted_explicitly" : @YES', source)
+        self.assertIn("AccessFailureClassification", source)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS EventKit")
+    def test_access_callback_and_final_state_classification_matrix(self) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "access-classification"
+            compiled = subprocess.run(
+                [
+                    "clang",
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-DAPPLE_REMINDERS_ACCESS_CLASSIFICATION_TEST",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "EventKit",
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            completed = subprocess.run(
+                [str(binary)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "verified": "verified",
+                "denied": "permission_denied",
+                "restricted": "permission_denied",
+                "write_only": "permission_denied",
+                "internal_error": "runtime",
+                "granted_but_denied": "runtime",
+                "not_determined": "runtime",
+                "unknown": "runtime",
+                "full_access_with_error": "runtime",
+            },
+        )
+
+    def test_access_request_timeout_is_inside_both_transport_timeouts(self) -> None:
+        native_source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
+        server_source = (PLUGIN_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+        native_match = re.search(
+            r"AccessRequestTimeoutSeconds\s*=\s*([0-9.]+)", native_source
+        )
+        server_match = re.search(
+            r"EVENTKIT_BRIDGE_TIMEOUT_SECONDS\s*=\s*([0-9]+)", server_source
+        )
+        self.assertIsNotNone(native_match)
+        self.assertIsNotNone(server_match)
+
+        native_wait = float(native_match.group(1))
+        server_timeout = int(server_match.group(1))
+        self.assertLess(native_wait, eventkit_bridge.NATIVE_TIMEOUT_SECONDS)
+        self.assertLess(eventkit_bridge.NATIVE_TIMEOUT_SECONDS, server_timeout)
 
     def test_update_preserves_explicit_null_clear_in_patch(self) -> None:
         normalized = eventkit_bridge.normalize_request(
