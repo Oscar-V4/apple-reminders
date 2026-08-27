@@ -2,6 +2,25 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.3.1 — 2026-08-27
+
+### Fixed
+
+- Reject failed MCP results in the deterministic daily-brief renderer instead
+  of presenting permission or backend failures as an empty day.
+- Render untrusted reminder titles, locations, sections, and identifiers as
+  inert Markdown text so reminder content cannot create active links, images,
+  headings, or HTML in generated briefs.
+- Document the exact remove-and-re-add procedure required to move a
+  tag-pinned repository marketplace to another reviewed release.
+
+### Changed
+
+- Declare both read and write capabilities in the plugin manifest to match the
+  public tool surface.
+- Document reminder content as untrusted data at the runtime, skill, and
+  security boundaries.
+
 ## 0.3.0 — 2026-08-27 (public beta)
 
 ### Changed

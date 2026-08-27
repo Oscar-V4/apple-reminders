@@ -54,6 +54,26 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("오늘 할 일 보여줘", quick_start)
         self.assertNotIn("doctor", quick_start.casefold())
         self.assertIn("## Upgrade", readme)
+        upgrade = readme.split("## Upgrade", 1)[1].split(
+            "## Temporarily disable", 1
+        )[0]
+        self.assertIn(
+            "codex plugin remove apple-reminders@oscar-v4-reminders",
+            upgrade,
+        )
+        self.assertIn(
+            "codex plugin marketplace remove oscar-v4-reminders",
+            upgrade,
+        )
+        self.assertIn(
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref vX.Y.Z",
+            upgrade,
+        )
+        self.assertIn(
+            "codex plugin add apple-reminders@oscar-v4-reminders",
+            upgrade,
+        )
+        self.assertNotIn("marketplace upgrade", upgrade)
         self.assertIn("## Uninstall", readme)
         self.assertIn("codex plugin remove apple-reminders@oscar-v4-reminders", readme)
         self.assertIn("macOS 14 or newer", readme)
@@ -74,6 +94,18 @@ class PluginValidationTests(unittest.TestCase):
         self.assertTrue((PLUGIN_ROOT / "assets" / "icon.png").is_file())
         self.assertFalse((PLUGIN_ROOT / "assets" / "logo.png").exists())
         self.assertFalse((PLUGIN_ROOT / "assets" / "logo-dark.png").exists())
+
+    def test_manifest_declares_read_and_write_capabilities(self) -> None:
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            manifest["interface"]["capabilities"],
+            ["Interactive", "Read", "Write"],
+        )
 
     def test_substantive_mcp_requires_manifest_declaration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

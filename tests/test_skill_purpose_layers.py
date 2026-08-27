@@ -214,6 +214,200 @@ class PurposeSkillLayerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Floating time [Inbox] id: floating - 2026-08-05", proc.stdout)
 
+    def test_daily_brief_renderer_rejects_failed_mcp_result(self) -> None:
+        payload = {
+            "ok": False,
+            "operation": "fetch_reminders",
+            "status": "failed_no_mutation",
+            "errors": [
+                {
+                    "code": "permission_denied",
+                    "message": "Reminders access is required.",
+                }
+            ],
+        }
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--date",
+                "2026-08-05",
+                "--timezone",
+                "Asia/Seoul",
+            ],
+            input=json.dumps(payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(
+            proc.stderr,
+            "Cannot render failed reminder result: permission_denied\n",
+        )
+        self.assertNotIn("Nothing due today", proc.stdout)
+
+    def test_daily_brief_renderer_rejects_failed_transport_wrapper(self) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "isError": True,
+                "structuredContent": {
+                    "ok": False,
+                    "status": "failed_no_mutation",
+                    "errors": [{"code": "permission_denied"}],
+                    "items": [],
+                },
+            },
+        }
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--date",
+                "2026-08-05",
+                "--timezone",
+                "Asia/Seoul",
+            ],
+            input=json.dumps(payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(
+            proc.stderr,
+            "Cannot render failed reminder result: permission_denied\n",
+        )
+
+    def test_daily_brief_renderer_rejects_jsonrpc_error_envelope(self) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": "Do not expose this transport message.",
+            },
+        }
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--date",
+                "2026-08-05",
+                "--timezone",
+                "Asia/Seoul",
+            ],
+            input=json.dumps(payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(
+            proc.stderr,
+            "Cannot render failed reminder result: jsonrpc_error_-32603\n",
+        )
+        self.assertNotIn("transport message", proc.stderr)
+
+    def test_daily_brief_renderer_treats_reminder_fields_as_inert_markdown(self) -> None:
+        payload = {
+            "ok": True,
+            "items": [
+                {
+                    "id": "id](https://attacker.example/id)",
+                    "title": (
+                        "- nested ![track](https://attacker.example/pixel.png) "
+                        "<img src=x> www.attacker.example"
+                        " ~~hidden~~\n## injected"
+                    ),
+                    "list_title": "[Work](https://attacker.example/list)",
+                    "section": "# section",
+                    "completed": False,
+                    "due": {"kind": "all_day", "date": "2026-08-05"},
+                },
+                {
+                    "id": "exact-id@example.com",
+                    "title": "`literal` attacker@example.com",
+                    "list_title": "Inbox",
+                    "completed": False,
+                    "due": {"kind": "all_day", "date": "2026-08-05"},
+                }
+            ],
+        }
+        script = (
+            PLUGIN_ROOT
+            / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--date",
+                "2026-08-05",
+                "--timezone",
+                "Asia/Seoul",
+            ],
+            input=json.dumps(payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("![track](https://attacker.example/pixel.png)", proc.stdout)
+        self.assertNotIn("<img src=x>", proc.stdout)
+        self.assertNotIn("\n## injected", proc.stdout)
+        self.assertNotIn("[Work](https://attacker.example/list)", proc.stdout)
+        self.assertNotIn("id](https://attacker.example/id)", proc.stdout)
+        self.assertNotIn("https://attacker.example", proc.stdout)
+        self.assertNotIn("www.attacker.example", proc.stdout)
+        self.assertNotIn("~~hidden~~", proc.stdout)
+        self.assertNotIn("\n- - nested", proc.stdout)
+        self.assertIn(
+            r"\!\[track\]\(https&#58;//attacker&#46;example/pixel&#46;png\)",
+            proc.stdout,
+        )
+        self.assertIn("&lt;img src=x&gt;", proc.stdout)
+        self.assertIn("www&#46;attacker&#46;example", proc.stdout)
+        self.assertIn(r"\~\~hidden\~\~", proc.stdout)
+        self.assertIn(r"\- nested", proc.stdout)
+        self.assertIn(r"\#\# injected", proc.stdout)
+        self.assertIn(
+            r"\[Work\]\(https&#58;//attacker&#46;example/list\)",
+            proc.stdout,
+        )
+        self.assertIn(
+            r"id\]\(https&#58;//attacker&#46;example/id\)",
+            proc.stdout,
+        )
+        self.assertIn("`` `literal` attacker@example.com ``", proc.stdout)
+        self.assertIn("id: ` exact-id@example.com `", proc.stdout)
+        self.assertNotIn("&#8203;", proc.stdout)
+
     def test_new_skills_have_complete_metadata_and_evals(self) -> None:
         observed_categories: set[str] = set()
         for name in SKILL_NAMES:

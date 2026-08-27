@@ -1,6 +1,6 @@
 {
   "name": "apple-reminders",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Plan, capture, organize, and safely update Apple Reminders from Codex on macOS.",
   "author": {
     "name": "Sungsoo Kim (Oscar-V4)",
@@ -29,6 +29,7 @@
     "category": "Productivity",
     "capabilities": [
       "Interactive",
+      "Read",
       "Write"
     ],
     "websiteURL": "https://github.com/Oscar-V4/apple-reminders",

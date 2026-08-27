@@ -196,13 +196,20 @@ Add `--detail-level full` only for a specific warning or blocked capability.
 
 ## Upgrade
 
+The Quick Start pins one release tag. Refreshing that marketplace keeps the
+configured tag; it does not select a newer release. To move to another release,
+replace `vX.Y.Z` below with the exact tag you reviewed:
+
 ```bash
-codex plugin marketplace upgrade oscar-v4-reminders
+codex plugin remove apple-reminders@oscar-v4-reminders
+codex plugin marketplace remove oscar-v4-reminders
+codex plugin marketplace add Oscar-V4/apple-reminders --ref vX.Y.Z
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
-Start a new Codex task after upgrading. Read [CHANGELOG.md](CHANGELOG.md) before
-crossing a minor or major version.
+This changes only the Codex plugin installation; it does not delete Apple
+Reminders data. Start a new Codex task after upgrading. Read
+[CHANGELOG.md](CHANGELOG.md) before crossing a minor or major version.
 
 ## Temporarily disable
 

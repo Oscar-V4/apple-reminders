@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -42,13 +44,52 @@ def load_payload(path: str | None) -> Any:
     return json.load(sys.stdin)
 
 
+def _failure_code(payload: dict[str, Any], *, depth: int = 4) -> str | None:
+    """Return a content-free code when this transport layer reports failure."""
+
+    status = payload.get("status")
+    error = payload.get("error")
+    failed = (
+        payload.get("ok") is False
+        or payload.get("isError") is True
+        or (isinstance(status, str) and status.startswith("failed_"))
+        or isinstance(error, dict)
+    )
+    if not failed:
+        return None
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        for error in errors:
+            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                return error["code"]
+    if isinstance(error, dict):
+        error_code = error.get("code")
+        if isinstance(error_code, str):
+            return error_code
+        if isinstance(error_code, int) and not isinstance(error_code, bool):
+            return f"jsonrpc_error_{error_code}"
+    if isinstance(status, str):
+        return status
+    if depth > 0:
+        for name in ("structuredContent", "result", "data"):
+            candidate = payload.get(name)
+            if isinstance(candidate, dict):
+                nested_code = _failure_code(candidate, depth=depth - 1)
+                if nested_code and nested_code != "unknown_failure":
+                    return nested_code
+    return "unknown_failure"
+
+
 def _unwrap_payload(payload: Any) -> Any:
-    """Unwrap a small number of known transport envelopes."""
+    """Reject failures, then unwrap a small number of transport envelopes."""
 
     current = payload
     for _ in range(4):
         if not isinstance(current, dict):
             break
+        failure_code = _failure_code(current)
+        if failure_code:
+            raise ValueError(f"Cannot render failed reminder result: {failure_code}")
         if any(name in current for name in ("reminders", "matches", "items")):
             break
         next_value = None
@@ -69,6 +110,9 @@ def payload_reminders(payload: Any) -> tuple[list[dict[str, Any]], bool, int | N
         return [item for item in payload if isinstance(item, dict)], False, None
     if not isinstance(payload, dict):
         raise ValueError("Expected a JSON object or an array of reminder objects.")
+    failure_code = _failure_code(payload)
+    if failure_code:
+        raise ValueError(f"Cannot render failed reminder result: {failure_code}")
     raw = payload.get("reminders")
     if raw is None:
         raw = payload.get("matches")
@@ -183,6 +227,36 @@ def due_label(reminder: Reminder) -> str:
     return label
 
 
+def inert_markdown_text(value: str) -> str:
+    """Render one untrusted Reminders field without activating Markdown."""
+
+    one_line = " ".join(value.splitlines())
+    if "@" in one_line:
+        longest_backtick_run = max(
+            (len(match.group(0)) for match in re.finditer(r"`+", one_line)),
+            default=0,
+        )
+        delimiter = "`" * (longest_backtick_run + 1)
+        return f"{delimiter} {one_line} {delimiter}"
+    escaped_html = html.escape(one_line, quote=False)
+    markdown_punctuation = frozenset(r"\`*_{}[]()#+!|>~$^")
+    autolink_punctuation = {
+        ".": "&#46;",
+        ":": "&#58;",
+    }
+    rendered = "".join(
+        autolink_punctuation.get(
+            character,
+            f"\\{character}" if character in markdown_punctuation else character,
+        )
+        for character in escaped_html
+    )
+    first_text = len(rendered) - len(rendered.lstrip())
+    if rendered[first_text : first_text + 1] == "-":
+        rendered = f"{rendered[:first_text]}\\-{rendered[first_text + 1:]}"
+    return rendered
+
+
 def line_for(reminder: Reminder) -> str:
     markers = []
     if reminder.flagged:
@@ -190,7 +264,10 @@ def line_for(reminder: Reminder) -> str:
     if reminder.priority:
         markers.append(f"p{reminder.priority}")
     suffix = f" ({', '.join(markers)})" if markers else ""
-    return f"- {reminder.title} [{location_text(reminder)}] id: {reminder.identifier} - {due_label(reminder)}{suffix}"
+    title = inert_markdown_text(reminder.title)
+    location = inert_markdown_text(location_text(reminder))
+    identifier = inert_markdown_text(reminder.identifier)
+    return f"- {title} [{location}] id: {identifier} - {due_label(reminder)}{suffix}"
 
 
 def render_section(title: str, reminders: list[Reminder], empty_text: str, *, limit: int | None = None) -> list[str]:
@@ -239,11 +316,16 @@ def render(payload: Any, target: date, tz: ZoneInfo, limit_unscheduled: int) -> 
 
 
 def main() -> int:
-    args = parse_args()
-    target = date.fromisoformat(args.date)
-    tz = ZoneInfo(args.timezone)
-    payload = load_payload(args.input)
-    sys.stdout.write(render(payload, target, tz, args.limit_unscheduled))
+    try:
+        args = parse_args()
+        target = date.fromisoformat(args.date)
+        tz = ZoneInfo(args.timezone)
+        payload = load_payload(args.input)
+        output = render(payload, target, tz, args.limit_unscheduled)
+    except (OSError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    sys.stdout.write(output)
     return 0
 
 
