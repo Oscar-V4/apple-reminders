@@ -25,10 +25,14 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from reminders_service import Guard, MutationOutcome, ReferenceRejected
 from receipt_contract import FAILURE_RECEIPT_STATUSES, SUCCESS_RECEIPT_STATUSES
+if __package__:
+    from .v2_transport import TransportResult
+else:  # pragma: no cover - exercised by the stdio entry point
+    from v2_transport import TransportResult
 
 
-BridgeCall = Callable[[str, dict[str, Any]], tuple[dict[str, Any], bool]]
-AdapterCall = Callable[[list[str]], tuple[dict[str, Any], bool]]
+BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
+AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
 ReceiptValidator = Callable[..., str | None]
 
@@ -72,16 +76,18 @@ class NativeBackend:
         route_arguments = {
             key: value for key, value in arguments.items() if value is not None
         }
-        payload, _ = self._adapter_call(
+        transport = self._adapter_call(
             self._build_adapter_argv(public_route, route_arguments)
         )
-        return payload
+        return transport.payload
 
     def _revalidate_guard(self, guard: Guard) -> dict[str, Any]:
-        payload, is_error = self._bridge_call(
+        transport = self._bridge_call(
             "read_reminder",
             {"reminder_id": guard.reminder_id},
         )
+        payload = transport.payload
+        is_error = transport.is_error
         data = payload.get("data")
         reminder = data.get("reminder") if isinstance(data, dict) else None
         if (
@@ -117,9 +123,11 @@ class NativeBackend:
         return reminder
 
     def _private_read_reminder(self, reminder_id: str) -> dict[str, Any]:
-        payload, is_error = self._adapter_call(
+        transport = self._adapter_call(
             ["read_reminder", "--id", reminder_id]
         )
+        payload = transport.payload
+        is_error = transport.is_error
         reminder = payload.get("reminder")
         if is_error or not isinstance(reminder, dict):
             raise RuntimeError("The private Reminder read failed")
@@ -142,9 +150,11 @@ class NativeBackend:
         arguments: dict[str, Any] = {"reminder_id": reminder_id, "limit": limit}
         if attachment_type is not None:
             arguments["attachment_type"] = attachment_type
-        payload, is_error = self._adapter_call(
+        transport = self._adapter_call(
             self._build_adapter_argv("list_reminder_attachments", arguments)
         )
+        payload = transport.payload
+        is_error = transport.is_error
         if is_error or payload.get("reminder_id") != reminder_id:
             raise RuntimeError("The private attachment read failed")
         return payload
@@ -614,9 +624,11 @@ class NativeBackend:
             arguments,
             reminder_version,
         )
-        payload, is_error = self._adapter_call(
+        transport = self._adapter_call(
             self._build_adapter_argv(tool_name, routed_arguments)
         )
+        payload = transport.payload
+        is_error = transport.is_error
         adapter_after = copy.deepcopy(payload.get("after"))
         expected_operation = self._EXPECTED_OPERATIONS[tool_name]
         status = payload.get("status")
@@ -825,9 +837,11 @@ class NativeBackend:
             "if_version": destination_version,
             "idempotency_key": idempotency_key,
         }
-        payload, is_error = self._adapter_call(
+        transport = self._adapter_call(
             self._build_adapter_argv("copy_image_attachment", routed_arguments)
         )
+        payload = transport.payload
+        is_error = transport.is_error
         status = payload.get("status")
         if (
             is_error

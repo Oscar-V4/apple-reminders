@@ -473,7 +473,8 @@ import json
 import sys
 sys.path.insert(0, 'mcp')
 import server
-server.handle_message({
+runtime = server.McpRuntime()
+runtime.handle({
     'jsonrpc': '2.0',
     'id': 1,
     'method': 'initialize',
@@ -483,7 +484,7 @@ server.handle_message({
         'clientInfo': {'name': 'lazy-import-probe', 'version': '1'},
     },
 })
-server.handle_message({
+runtime.handle({
     'jsonrpc': '2.0',
     'id': 2,
     'method': 'tools/list',
@@ -519,36 +520,30 @@ print(json.dumps(sorted(
 
 
 class McpProtocolTests(unittest.TestCase):
-    def test_adapter_dispatch_phase_is_private_and_only_marks_launcher_failures(self) -> None:
+    def test_adapter_dispatch_certainty_is_parent_owned(self) -> None:
+        missing = self.server.invoke_adapter(
+            ["read_reminder"],
+            backend_paths=self.backend_paths(
+                adapter=Path("/definitely/missing/reminders_adapter.py")
+            ),
+        )
+
+        self.assertTrue(missing.is_error)
+        self.assertTrue(missing.proves_not_started)
+        self.assertNotIn("__dispatch_phase", missing.payload)
+
         with mock.patch.object(
-            self.server,
-            "adapter_path",
-            return_value=Path("/definitely/missing/reminders_adapter.py"),
+            self.server.subprocess,
+            "run",
+            side_effect=OSError("process transport failed"),
         ):
-            missing, missing_error = self.server.invoke_adapter(["read_reminder"])
-
-        self.assertTrue(missing_error)
-        self.assertEqual(missing["__dispatch_phase"], "not_started")
-        self.assertNotIn("__dispatch_phase", self.server.sanitize_payload(missing))
-
-        with (
-            mock.patch.object(
-                self.server,
-                "adapter_path",
-                return_value=Path(__file__),
-            ),
-            mock.patch.object(
-                self.server.subprocess,
-                "run",
-                side_effect=OSError("process transport failed"),
-            ),
-        ):
-            process_failed, process_error = self.server.invoke_adapter(
-                ["create_reminder"]
+            process_failed = self.server.invoke_adapter(
+                ["create_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
             )
 
-        self.assertTrue(process_error)
-        self.assertEqual(process_failed["__dispatch_phase"], "started_unknown")
+        self.assertTrue(process_failed.is_error)
+        self.assertFalse(process_failed.proves_not_started)
 
         completed = subprocess.CompletedProcess(
             args=[],
@@ -556,98 +551,85 @@ class McpProtocolTests(unittest.TestCase):
             stdout='{"ok":true,"status":"verified"}',
             stderr="",
         )
-        with (
-            mock.patch.object(
-                self.server,
-                "adapter_path",
-                return_value=Path(__file__),
-            ),
-            mock.patch.object(self.server.subprocess, "run", return_value=completed),
-        ):
-            success, success_error = self.server.invoke_adapter(["read_reminder"])
+        with mock.patch.object(self.server.subprocess, "run", return_value=completed):
+            success = self.server.invoke_adapter(
+                ["read_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
+            )
 
-        self.assertFalse(success_error)
-        self.assertNotIn("__dispatch_phase", success)
+        self.assertFalse(success.is_error)
+        self.assertFalse(success.proves_not_started)
+        self.assertNotIn("__dispatch_phase", success.payload)
 
         spoofed = subprocess.CompletedProcess(
             args=[],
             returncode=1,
             stdout=(
                 '{"ok":false,"__dispatch_phase":"not_started",'
+                '"mutation_not_started":true,'
                 '"error":{"code":"invalid_adapter_response"}}'
             ),
             stderr="",
         )
-        with (
-            mock.patch.object(
-                self.server,
-                "adapter_path",
-                return_value=Path(__file__),
-            ),
-            mock.patch.object(self.server.subprocess, "run", return_value=spoofed),
-        ):
-            child_payload, child_error = self.server.invoke_adapter(["read_reminder"])
+        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+            child_result = self.server.invoke_adapter(
+                ["read_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
+            )
 
-        self.assertTrue(child_error)
-        self.assertNotIn("__dispatch_phase", child_payload)
+        self.assertTrue(child_result.is_error)
+        self.assertFalse(child_result.proves_not_started)
+        self.assertIs(child_result.payload["mutation_not_started"], True)
+        self.assertNotIn("__dispatch_phase", child_result.payload)
 
-    def test_eventkit_dispatch_phase_marks_only_parent_proven_prelaunch_failures(
+    def test_eventkit_dispatch_certainty_marks_only_parent_proven_prelaunch_failures(
         self,
     ) -> None:
-        with mock.patch.object(
-            self.server,
-            "eventkit_bridge_path",
-            return_value=Path("/definitely/missing/eventkit_bridge.py"),
-        ):
-            missing, missing_error = self.server.invoke_eventkit_bridge(
-                "create_reminder",
-                {"calendar_id": "LIST-1", "title": "Missing bridge"},
-            )
-
-        self.assertTrue(missing_error)
-        self.assertEqual(missing["__dispatch_phase"], "not_started")
-        self.assertNotIn("__dispatch_phase", self.server.sanitize_payload(missing))
-
-        with mock.patch.object(
-            self.server,
-            "eventkit_bridge_path",
-            return_value=Path(__file__),
-        ):
-            too_large, too_large_error = self.server.invoke_eventkit_bridge(
-                "create_reminder",
-                {
-                    "calendar_id": "LIST-1",
-                    "title": "x" * self.server.MAX_EVENTKIT_REQUEST_BYTES,
-                },
-            )
-
-        self.assertTrue(too_large_error)
-        self.assertEqual(too_large["__dispatch_phase"], "not_started")
-
-        with (
-            mock.patch.object(
-                self.server,
-                "eventkit_bridge_path",
-                return_value=Path(__file__),
+        missing = self.server.invoke_eventkit_bridge(
+            "create_reminder",
+            {"calendar_id": "LIST-1", "title": "Missing bridge"},
+            backend_paths=self.backend_paths(
+                eventkit_bridge=Path("/definitely/missing/eventkit_bridge.py")
             ),
-            mock.patch.object(
-                self.server.subprocess,
-                "run",
-                side_effect=OSError("launch denied"),
-            ),
+        )
+
+        self.assertTrue(missing.is_error)
+        self.assertTrue(missing.proves_not_started)
+        self.assertNotIn("__dispatch_phase", missing.payload)
+
+        too_large = self.server.invoke_eventkit_bridge(
+            "create_reminder",
+            {
+                "calendar_id": "LIST-1",
+                "title": "x" * self.server.MAX_EVENTKIT_REQUEST_BYTES,
+            },
+            backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+        )
+
+        self.assertTrue(too_large.is_error)
+        self.assertTrue(too_large.proves_not_started)
+
+        with mock.patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=OSError("launch denied"),
         ):
-            launch_failed, launch_error = self.server.invoke_eventkit_bridge(
+            launch_failed = self.server.invoke_eventkit_bridge(
                 "create_reminder",
                 {"calendar_id": "LIST-1", "title": "Launch failure"},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
             )
 
-        self.assertFalse(launch_error)
+        self.assertFalse(launch_failed.is_error)
+        self.assertFalse(launch_failed.proves_not_started)
         self.assertEqual(
-            launch_failed["status"],
+            launch_failed.payload["status"],
             "committed_verification_pending",
         )
-        self.assertIsNone(launch_failed["verification"]["write_performed"])
-        self.assertNotIn("__dispatch_phase", launch_failed)
+        self.assertIsNone(
+            launch_failed.payload["verification"]["write_performed"]
+        )
+        self.assertNotIn("__dispatch_phase", launch_failed.payload)
 
         spoofed = subprocess.CompletedProcess(
             args=[],
@@ -660,25 +642,22 @@ class McpProtocolTests(unittest.TestCase):
                     "ok": True,
                     "data": {},
                     "__dispatch_phase": "not_started",
+                    "mutation_not_started": True,
                 }
             ),
             stderr="",
         )
-        with (
-            mock.patch.object(
-                self.server,
-                "eventkit_bridge_path",
-                return_value=Path(__file__),
-            ),
-            mock.patch.object(self.server.subprocess, "run", return_value=spoofed),
-        ):
-            child_payload, child_error = self.server.invoke_eventkit_bridge(
+        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+            child_result = self.server.invoke_eventkit_bridge(
                 "doctor",
                 {},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
             )
 
-        self.assertFalse(child_error)
-        self.assertNotIn("__dispatch_phase", child_payload)
+        self.assertFalse(child_result.is_error)
+        self.assertFalse(child_result.proves_not_started)
+        self.assertIs(child_result.payload["mutation_not_started"], True)
+        self.assertNotIn("__dispatch_phase", child_result.payload)
 
         spoofed_create = subprocess.CompletedProcess(
             args=[],
@@ -695,57 +674,79 @@ class McpProtocolTests(unittest.TestCase):
             ),
             stderr="",
         )
-        with (
-            mock.patch.object(
-                self.server,
-                "eventkit_bridge_path",
-                return_value=Path(__file__),
-            ),
-            mock.patch.object(
-                self.server.subprocess,
-                "run",
-                return_value=spoofed_create,
-            ),
+        with mock.patch.object(
+            self.server.subprocess,
+            "run",
+            return_value=spoofed_create,
         ):
-            create_payload, create_error = self.server.invoke_eventkit_bridge(
+            create_result = self.server.invoke_eventkit_bridge(
                 "create_reminder",
                 {"calendar_id": "LIST-1", "title": "Spoofed provenance"},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
             )
 
-        self.assertFalse(create_error)
+        self.assertFalse(create_result.is_error)
+        self.assertFalse(create_result.proves_not_started)
         self.assertEqual(
-            create_payload["status"],
+            create_result.payload["status"],
             "committed_verification_pending",
         )
-        self.assertIsNone(create_payload["verification"]["write_performed"])
-        self.assertNotIn("__dispatch_phase", create_payload)
+        self.assertIsNone(
+            create_result.payload["verification"]["write_performed"]
+        )
+        self.assertNotIn("__dispatch_phase", create_result.payload)
 
     def setUp(self) -> None:
         from mcp import server
 
         self.server = server
-        self.previous_session = server.SESSION_INITIALIZED
-        self.previous_core = server._V2_CORE_FACADE
-        self.previous_native = server._V2_NATIVE_FACADE
-        self.previous_recovery = server._V2_RECOVERY_FACADE
-        self.previous_diagnostics = getattr(server, "_V2_DIAGNOSTICS_FACADE", None)
-        self.previous_paths = server._ACTIVE_BACKEND_PATHS
-        server.SESSION_INITIALIZED = False
-        server._V2_CORE_FACADE = None
-        server._V2_NATIVE_FACADE = None
-        server._V2_RECOVERY_FACADE = None
-        server._V2_DIAGNOSTICS_FACADE = None
-        server._ACTIVE_BACKEND_PATHS = server.DEFAULT_BACKEND_PATHS
-        server.RECENT_CALLS.clear()
+        self.use_runtime()
 
-    def tearDown(self) -> None:
-        self.server.SESSION_INITIALIZED = self.previous_session
-        self.server._V2_CORE_FACADE = self.previous_core
-        self.server._V2_NATIVE_FACADE = self.previous_native
-        self.server._V2_RECOVERY_FACADE = self.previous_recovery
-        self.server._V2_DIAGNOSTICS_FACADE = self.previous_diagnostics
-        self.server._ACTIVE_BACKEND_PATHS = self.previous_paths
-        self.server.RECENT_CALLS.clear()
+    def backend_paths(
+        self,
+        *,
+        adapter: Path | None = None,
+        eventkit_bridge: Path | None = None,
+        doctor: Path | None = None,
+    ) -> Any:
+        defaults = self.server.DEFAULT_BACKEND_PATHS
+        return self.server.BackendPaths(
+            adapter=adapter or defaults.adapter,
+            eventkit_bridge=eventkit_bridge or defaults.eventkit_bridge,
+            doctor=doctor or defaults.doctor,
+        )
+
+    def use_runtime(
+        self,
+        *,
+        core: Any | None = None,
+        native: Any | None = None,
+        recovery: Any | None = None,
+        diagnostics: Any | None = None,
+        clock: Any | None = None,
+        max_calls_per_minute: int | None = None,
+    ) -> Any:
+        overrides = {
+            name: facade
+            for name, facade in {
+                "core": core,
+                "native": native,
+                "recovery": recovery,
+                "diagnostics": diagnostics,
+            }.items()
+            if facade is not None
+        }
+        self.dispatch = self.server._LocalToolDispatch(
+            self.server.DEFAULT_BACKEND_PATHS,
+            facade_overrides=overrides,
+        )
+        options: dict[str, Any] = {"dispatch": self.dispatch}
+        if clock is not None:
+            options["clock"] = clock
+        if max_calls_per_minute is not None:
+            options["max_calls_per_minute"] = max_calls_per_minute
+        self.runtime = self.server.McpRuntime(**options)
+        return self.runtime
 
     def test_initialize_tool_list_and_ping_over_stdio(self) -> None:
         responses = run_server(
@@ -775,18 +776,93 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(responses[2]["result"], {})
 
     def test_tools_are_unavailable_before_initialize(self) -> None:
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         )
 
         self.assertEqual(response["error"]["code"], -32002)
 
+    def test_initialization_state_is_isolated_per_runtime(self) -> None:
+        first = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": RecordingFacade()},
+            )
+        )
+        second = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": RecordingFacade()},
+            )
+        )
+
+        initialized = first.handle(initialize())
+        second_list = second.handle(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+        self.assertIn("result", initialized)
+        self.assertEqual(second_list["error"]["code"], -32002)
+
+    def test_rate_limit_state_is_isolated_per_runtime(self) -> None:
+        def clock() -> float:
+            return 100.0
+
+        first_facade = RecordingFacade()
+        second_facade = RecordingFacade()
+        first = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": first_facade},
+            ),
+            clock=clock,
+            max_calls_per_minute=1,
+        )
+        second = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": second_facade},
+            ),
+            clock=clock,
+            max_calls_per_minute=1,
+        )
+
+        first_result = first.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+        limited = first.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+        second_result = second.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+
+        self.assertFalse(first_result["isError"])
+        self.assertEqual(
+            limited["structuredContent"]["error"]["code"], "rate_limited"
+        )
+        self.assertFalse(second_result["isError"])
+        self.assertEqual(len(first_facade.calls), 1)
+        self.assertEqual(len(second_facade.calls), 1)
+
+    def test_lazy_facade_graph_is_owned_by_each_dispatch(self) -> None:
+        first = self.server._LocalToolDispatch(self.server.DEFAULT_BACKEND_PATHS)
+        second = self.server._LocalToolDispatch(self.server.DEFAULT_BACKEND_PATHS)
+
+        runtime = self.server.McpRuntime(dispatch=first)
+        runtime.handle(initialize())
+        runtime.handle(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+        self.assertIsNone(first._core)
+        self.assertIsNone(first._native)
+        self.assertIsNone(first._recovery)
+        self.assertIsNone(first._diagnostics)
+        first_core = first.core_facade()
+        self.assertIs(first._core, first_core)
+        self.assertIsNone(second._core)
+
     def test_notification_shaped_mutation_cannot_execute(self) -> None:
         facade = RecordingFacade()
-        self.server._V2_CORE_FACADE = facade
-        self.server.handle_message(initialize())
+        self.use_runtime(core=facade)
+        self.runtime.handle(initialize())
 
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {
                 "jsonrpc": "2.0",
                 "method": "tools/call",
@@ -801,9 +877,9 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(facade.calls, [])
 
     def test_unknown_tool_is_a_protocol_error(self) -> None:
-        self.server.handle_message(initialize())
+        self.runtime.handle(initialize())
 
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -818,11 +894,10 @@ class McpProtocolTests(unittest.TestCase):
     def test_invalid_read_and_mutation_arguments_fail_before_facade_dispatch(self) -> None:
         core = RecordingFacade()
         native = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
-        self.server._V2_NATIVE_FACADE = native
+        self.use_runtime(core=core, native=native)
 
-        read_result = self.server.call_tool("read_reminder", {})
-        mutation_result = self.server.call_tool(
+        read_result = self.runtime.call_tool("read_reminder", {})
+        mutation_result = self.runtime.call_tool(
             "create_reminder", {"list_id": "LIST-1", "title": "Missing key"}
         )
 
@@ -857,10 +932,10 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_unsupported_python_fails_explicitly_before_facade_dispatch(self) -> None:
         core = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
+        self.use_runtime(core=core)
 
         with mock.patch.object(self.server.sys, "version_info", (3, 10, 14)):
-            result = self.server.call_tool(
+            result = self.runtime.call_tool(
                 "read_reminder",
                 {"reminder_id": REMINDER_ID},
             )
@@ -878,9 +953,9 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_change_patch_cannot_add_recurrence_while_clearing_due(self) -> None:
         core = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
+        self.use_runtime(core=core)
 
-        result = self.server.call_tool(
+        result = self.runtime.call_tool(
             "change_reminder",
             {
                 "reference": REFERENCE,
@@ -906,14 +981,18 @@ class McpProtocolTests(unittest.TestCase):
         native = RecordingFacade()
         recovery = RecordingFacade()
         diagnostics = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
-        self.server._V2_NATIVE_FACADE = native
-        self.server._V2_RECOVERY_FACADE = recovery
-        self.server._V2_DIAGNOSTICS_FACADE = diagnostics
+        self.use_runtime(
+            core=core,
+            native=native,
+            recovery=recovery,
+            diagnostics=diagnostics,
+        )
 
         for name in sorted(PUBLIC_TOOLS):
             with self.subTest(tool=name):
-                result = self.server.call_tool(name, copy.deepcopy(VALID_ARGUMENTS[name]))
+                result = self.runtime.call_tool(
+                    name, copy.deepcopy(VALID_ARGUMENTS[name])
+                )
                 self.assertFalse(result["isError"], result)
                 payload = result["structuredContent"]
                 self.assertEqual(payload["schema_version"], 2)
@@ -954,13 +1033,10 @@ class McpProtocolTests(unittest.TestCase):
         for name, recovery_tool in cases:
             facade = mock.Mock()
             facade.call.side_effect = RuntimeError("lost public facade result")
-            self.server._V2_CORE_FACADE = facade
-            self.server._V2_NATIVE_FACADE = facade
-            self.server._V2_RECOVERY_FACADE = facade
-            self.server.RECENT_CALLS.clear()
+            self.use_runtime(core=facade, native=facade, recovery=facade)
 
             with self.subTest(tool=name):
-                result = self.server.call_tool(
+                result = self.runtime.call_tool(
                     name, copy.deepcopy(VALID_ARGUMENTS[name])
                 )
                 payload = result["structuredContent"]
@@ -991,10 +1067,9 @@ class McpProtocolTests(unittest.TestCase):
         )
         unsafe["verification"]["attachments_preserved"] = False
         facade.call.return_value = unsafe
-        self.server._V2_RECOVERY_FACADE = facade
-        self.server.RECENT_CALLS.clear()
+        self.use_runtime(recovery=facade)
 
-        result = self.server.call_tool(
+        result = self.runtime.call_tool(
             "recover_deleted_reminder",
             copy.deepcopy(VALID_ARGUMENTS["recover_deleted_reminder"]),
         )
@@ -1044,10 +1119,9 @@ class McpProtocolTests(unittest.TestCase):
                 raise AssertionError("server discarded the independent mutation state")
 
         facade = ConflictingStateFacade()
-        self.server._V2_RECOVERY_FACADE = facade
-        self.server.RECENT_CALLS.clear()
+        self.use_runtime(recovery=facade)
 
-        result = self.server.call_tool("recover_deleted_reminder", arguments)
+        result = self.runtime.call_tool("recover_deleted_reminder", arguments)
 
         payload = result["structuredContent"]
         self.assertEqual(facade.calls, 1)
@@ -1080,9 +1154,9 @@ class McpProtocolTests(unittest.TestCase):
                 }
             },
         }
-        self.server._V2_CORE_FACADE = facade
+        self.use_runtime(core=facade)
 
-        result = self.server.call_tool(
+        result = self.runtime.call_tool(
             "read_reminder",
             {"reminder_id": REMINDER_ID},
         )
@@ -1422,16 +1496,18 @@ class McpProtocolTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, legacy, clear=False):
+            runtime = self.server.McpRuntime()
+            paths = runtime._dispatch._backend_paths
             self.assertEqual(
-                self.server.adapter_path(),
+                paths.adapter,
                 self.server.DEFAULT_ADAPTER_PATH,
             )
             self.assertEqual(
-                self.server.eventkit_bridge_path(),
+                paths.eventkit_bridge,
                 self.server.DEFAULT_EVENTKIT_BRIDGE_PATH,
             )
             self.assertEqual(
-                self.server.doctor_path(),
+                paths.doctor,
                 self.server.DEFAULT_DOCTOR_PATH,
             )
 

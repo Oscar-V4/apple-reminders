@@ -55,6 +55,11 @@ user-facing promise.
 2. **Local MCP boundary**
    - Provides JSON-RPC/stdio transport, tool input validation, dispatch, result
      sanitization, concise text summaries, and centralized result validation.
+   - Constructs one `McpRuntime` per stdio session. Initialization, rate-limit
+     history, immutable backend paths, and lazy Facade instances are not
+     process-global mutable state.
+   - Carries subprocess launch evidence in a typed `TransportResult`; child
+     JSON cannot claim that dispatch never started.
    - Production resolves only bundled backend paths.
 3. **Core Module**
    - Uses EventKit for access, lists, bounded reminder fetches, exact reads,
@@ -78,8 +83,9 @@ user-facing promise.
    - Static private-framework path absence is inconclusive when dyld can load
      from the shared cache.
 7. **Internal adapter and helpers**
-   - Retain version-sensitive implementation commands, compatibility seams,
-     cache/recovery research, and tests.
+   - Retain only implementation commands required by the public Modules. The
+     obsolete 0.2-era direct Core write, maintenance, cache, backup, and repair
+     CLI is scheduled for physical removal before the 0.4 release.
    - Are not a second public API and are not a fallback for skills.
 
 There is no equivalent hosted Codex connector for the user's local native
@@ -153,9 +159,10 @@ Doctor. Production backend paths cannot be changed through environment
 variables.
 
 Source tests construct `BackendPaths(adapter=..., eventkit_bridge=...,
-doctor=...)` and inject it into `mcp.server.main(backend_paths=...)` through the
-source-only harness. This makes subprocess behavior deterministic without
-adding a production configuration surface.
+doctor=...)` and inject it into a fresh `McpRuntime` (or through the source-only
+stdio harness). This makes subprocess behavior deterministic without mutable
+module globals or a production configuration surface. Separate runtimes do not
+share initialization, rate-limit history, or lazy Facade instances.
 
 ## Behaviors the smaller Interface must preserve
 
@@ -168,6 +175,6 @@ adding a production configuration surface.
 - Normalized Receipts with verified, unchanged, pending, partial, and failed
   states.
 
-The adapter's backup, repair, cache, log-purge, flag, and UI-handoff code can be
-maintained for internal evidence without increasing public discovery or asking
-first-time users to understand recovery internals.
+Historical adapter backup, repair, cache, log-purge, direct Core-write, and
+UI-handoff routes are not part of the 0.4 runtime contract. Their removal is a
+release-blocking cleanup rather than a reason to expose or fall back to them.

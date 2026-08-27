@@ -104,9 +104,9 @@ reconciles the visible URL attachment, so unavailable native support returns a
 partial rather than full success.
 Unused-tag cleanup, raw attachment export, attachment repair, backup/Snapshot
 operations, privacy-log purge, flag mutation, and native `show_reminder`
-handoff are withheld from the public Interface. Their lower-level
-implementations may remain for development and compatibility, but skills and
-public MCP callers must not route to them.
+handoff are withheld from the public Interface. Their obsolete lower-level CLI
+implementations are scheduled for physical removal before the 0.4 release;
+skills and public MCP callers must never route to them.
 
 The repository also contains a reduced OpenMinis export under
 `minis/apple-reminders/`. It is not part of the installable macOS plugin and
@@ -267,9 +267,8 @@ discovery remains below the release budget.
 
 `plugins/apple-reminders/scripts/reminders_adapter.py` is a lower-level implementation seam, not a
 second public API. Its old direct write, Maintenance, backup, repair, log-purge,
-flag, and UI-handoff commands are deprecated or internal. They may support
-tests, compatibility analysis, and recovery research, but public skills must
-not fall back to them.
+flag, and UI-handoff commands are not a 0.4 compatibility promise and are a
+release-blocking deletion follow-up. Public skills must not fall back to them.
 
 ## Local validation
 
@@ -340,9 +339,11 @@ The allowlisted release ZIP includes runtime files only. It excludes tests,
 contributor docs, workflows, OpenMinis files, screenshots, bytecode, databases,
 journals, caches, backups, and pre-existing archives.
 
-Production resolves only bundled backend paths. Tests inject an explicit
-`BackendPaths` value into `mcp.server.main(...)` through the source-only harness;
-environment variables do not override production backend paths.
+Production resolves only bundled backend paths. Each stdio connection owns a
+fresh `McpRuntime`; initialization, rate limits, and lazy Facades are not
+process-global. Tests inject an explicit `BackendPaths` value through that
+runtime or the source-only harness; environment variables do not override
+production backend paths.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/build_source_package.py \

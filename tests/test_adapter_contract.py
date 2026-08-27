@@ -18,6 +18,11 @@ assert SPEC and SPEC.loader
 adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(adapter)
 
+from receipt_contract import (  # noqa: E402
+    adapter_receipt_error,
+    failed_no_mutation_evidence_error,
+)
+
 
 def create_tag_store(path: Path) -> None:
     con = sqlite3.connect(path)
@@ -214,6 +219,44 @@ class ReceiptAndErrorContractTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed_manual_repair_required")
         self.assertEqual(payload["error"]["new_attachment_id"], "A-1")
 
+    def test_failed_no_mutation_requires_affirmative_no_write_evidence(self) -> None:
+        receipt = adapter.operation_receipt(
+            status="failed_no_mutation",
+            operation="attach_url",
+            backend="sqlite_private",
+            target={"reminder_id": "R-1"},
+            after={},
+            verification={
+                "state": "not_performed",
+                "write_performed": False,
+                "final_read": False,
+            },
+            recovery={"semantics": "fix_input"},
+        )
+        receipt["error"] = {
+            "code": "invalid_input",
+            "message": "The write was rejected before dispatch.",
+        }
+
+        self.assertIsNone(failed_no_mutation_evidence_error(receipt))
+        self.assertIsNone(
+            adapter_receipt_error(receipt, expected_operation="attach_url")
+        )
+
+        contradictions = (
+            lambda value: value["verification"].__setitem__("write_performed", True),
+            lambda value: value.__setitem__("after", {"attachment": {"id": "A-1"}}),
+            lambda value: value.__setitem__("mutation_attempted", True),
+        )
+        for contradict in contradictions:
+            with self.subTest(contradiction=contradict):
+                unsafe = json.loads(json.dumps(receipt))
+                contradict(unsafe)
+                self.assertIsNotNone(failed_no_mutation_evidence_error(unsafe))
+                self.assertIsNotNone(
+                    adapter_receipt_error(unsafe, expected_operation="attach_url")
+                )
+
 
 class JournalPrivacyTests(unittest.TestCase):
     def test_sensitive_action_fields_are_redacted(self) -> None:
@@ -390,7 +433,7 @@ class IdempotencyContractTests(unittest.TestCase):
             def callback() -> dict[str, object]:
                 nonlocal calls
                 calls += 1
-                raise adapter.AdapterError(
+                raise adapter.MutationNotStartedError(
                     "Reminder changed before dispatch",
                     code="concurrent_modification",
                     expected_version=1,
@@ -416,6 +459,95 @@ class IdempotencyContractTests(unittest.TestCase):
 
         self.assertEqual(calls, 2)
         self.assertEqual(stored["entries"], {})
+
+    def test_untyped_no_mutation_flag_cannot_clear_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            calls = 0
+
+            def callback() -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                raise adapter.AdapterError(
+                    "A plain error cannot manufacture dispatch proof",
+                    code="unexpected_error",
+                    mutation_not_started=True,
+                )
+
+            with (
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(
+                    adapter,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    adapter,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                with self.assertRaises(adapter.AdapterError):
+                    adapter.execute_idempotent(
+                        operation="attach_image",
+                        key="untyped-proof",
+                        input_payload={"if_version": 1},
+                        callback=callback,
+                    )
+                replay = adapter.execute_idempotent(
+                    operation="attach_image",
+                    key="untyped-proof",
+                    input_payload={"if_version": 1},
+                    callback=callback,
+                )
+
+        self.assertEqual(calls, 1)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["status"], "committed_verification_pending")
+
+    def test_unclassified_callback_failure_keeps_fence_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            calls = 0
+
+            def callback() -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                raise adapter.AdapterError(
+                    "Failure timing was not proven",
+                    code="unexpected_error",
+                )
+
+            with (
+                mock.patch.object(adapter, "APP_SUPPORT", support),
+                mock.patch.object(
+                    adapter,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    adapter,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                with self.assertRaises(adapter.AdapterError):
+                    adapter.execute_idempotent(
+                        operation="attach_image",
+                        key="unclassified-failure",
+                        input_payload={"if_version": 1},
+                        callback=callback,
+                    )
+                replay = adapter.execute_idempotent(
+                    operation="attach_image",
+                    key="unclassified-failure",
+                    input_payload={"if_version": 1},
+                    callback=callback,
+                )
+
+        self.assertEqual(calls, 1)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["status"], "committed_verification_pending")
 
     def test_possible_commit_callback_failure_remains_fenced(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -55,6 +55,7 @@ PACKAGE_ROOT_FILES = {
     Path("mcp/v2_native_backend.py"),
     Path("mcp/v2_recovery.py"),
     Path("mcp/v2_recovery_backend.py"),
+    Path("mcp/v2_transport.py"),
     Path("schemas/mcp-tools.json"),
     Path("scripts/eventkit_bridge.py"),
     Path("scripts/eventkit_bridge_info.plist"),

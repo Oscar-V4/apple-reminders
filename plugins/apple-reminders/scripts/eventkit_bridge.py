@@ -32,6 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from receipt_contract import (  # noqa: E402
     STABLE_ERROR_CODES as CONTRACT_STABLE_ERROR_CODES,
     eventkit_mutation_receipt_error,
+    failed_no_mutation_evidence_error,
 )
 
 
@@ -1083,8 +1084,13 @@ def validate_response(payload: Any, operation: str) -> dict[str, Any]:
             raise RuntimeError("Failed native bridge response must include an error object")
         if error.get("code") not in STABLE_ERROR_CODES or not isinstance(error.get("message"), str):
             raise RuntimeError("Native bridge error must include a stable code and message")
-    if operation in MUTATION_OPERATIONS and payload["status"] != "failed_no_mutation":
-        validate_mutation_receipt(payload, operation)
+    if operation in MUTATION_OPERATIONS:
+        if payload["status"] == "failed_no_mutation":
+            no_write_error = failed_no_mutation_evidence_error(payload)
+            if no_write_error:
+                raise RuntimeError(f"Invalid no-mutation response: {no_write_error}")
+        else:
+            validate_mutation_receipt(payload, operation)
     return payload
 
 
@@ -1163,6 +1169,16 @@ def invoke_native(
             },
         )
     except OSError as exc:
+        if request["operation"] in MUTATION_OPERATIONS:
+            return mutation_outcome_unknown_response(
+                request,
+                reason_code="native_launch_failed",
+                message=(
+                    "The EventKit helper process failed without a trustworthy "
+                    "mutation outcome."
+                ),
+                details={"error_type": type(exc).__name__},
+            )
         return response(
             request["operation"],
             "failed_no_mutation",

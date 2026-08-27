@@ -25,7 +25,7 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving room for the reviewed recovery
 # facade, backend, and native helper; exact bytes remain visible in benchmarks.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = 1_310_720
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.26 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -184,6 +184,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 Path("mcp/v2_native_backend.py"),
                 Path("mcp/v2_recovery.py"),
                 Path("mcp/v2_recovery_backend.py"),
+                Path("mcp/v2_transport.py"),
                 Path("scripts/reminders_image_input.py"),
                 Path("scripts/remkit_recover.m"),
                 Path("scripts/reminders_service.py"),
@@ -369,7 +370,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.25 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.26 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 
@@ -421,8 +422,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "module=importlib.util.module_from_spec(spec);"
                 "sys.modules[spec.name]=module;"
                 "spec.loader.exec_module(module);"
-                "print(json.dumps([str(module.adapter_path()),"
-                "str(module.eventkit_bridge_path()),str(module.doctor_path())]))"
+                "paths=module.DEFAULT_BACKEND_PATHS;"
+                "print(json.dumps([str(paths.adapter),str(paths.eventkit_bridge),"
+                "str(paths.doctor)]))"
             )
             completed = subprocess.run(
                 [sys.executable, "-c", probe, str(server)],

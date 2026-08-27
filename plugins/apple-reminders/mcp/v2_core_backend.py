@@ -16,12 +16,14 @@ from typing import Any, Callable, Mapping
 
 if __package__:  # Package import in tests; script-local import in the stdio server.
     from .v2_core import EventKitReply
+    from .v2_transport import TransportResult
 else:  # pragma: no cover - exercised by the script entry point
     from v2_core import EventKitReply
+    from v2_transport import TransportResult
 
 
-BridgeCall = Callable[[str, dict[str, Any]], tuple[dict[str, Any], bool]]
-AdapterCall = Callable[[list[str]], tuple[dict[str, Any], bool]]
+BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
+AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
 ModuleLoader = Callable[[], Any]
 ReceiptValidator = Callable[..., str | None]
@@ -85,7 +87,9 @@ class CoreBackend:
                 supplied,
             )
         else:
-            payload, is_error = self._bridge_call(operation, supplied)
+            transport = self._bridge_call(operation, supplied)
+            payload = transport.payload
+            is_error = transport.is_error
         return EventKitReply(payload=payload, is_error=is_error)
 
     @staticmethod
@@ -302,9 +306,11 @@ class CoreBackend:
             "attachment_type": "url",
             "limit": 200,
         }
-        list_payload, list_is_error = self._adapter_call(
+        list_transport = self._adapter_call(
             self._build_adapter_argv("list_reminder_attachments", list_arguments)
         )
+        list_payload = list_transport.payload
+        list_is_error = list_transport.is_error
         reminder_version = list_payload.get("reminder_version")
         if (
             list_is_error
@@ -487,9 +493,11 @@ class CoreBackend:
                 attach_payload = {}
                 attach_is_error = True
             else:
-                attach_payload, attach_is_error = self._adapter_call(
+                attach_transport = self._adapter_call(
                     self._build_adapter_argv(mutation_tool, attachment_arguments)
                 )
+                attach_payload = attach_transport.payload
+                attach_is_error = attach_transport.is_error
             receipt_error = (
                 self._receipt_validator(
                     attach_payload,
@@ -558,10 +566,12 @@ class CoreBackend:
                     "recovery"
                 ]
 
-        final_payload, final_is_error = self._bridge_call(
+        final_transport = self._bridge_call(
             "read_reminder",
             {"reminder_id": reminder_id},
         )
+        final_payload = final_transport.payload
+        final_is_error = final_transport.is_error
         final_data = final_payload.get("data")
         final_reminder = (
             final_data.get("reminder")
@@ -643,17 +653,23 @@ class CoreBackend:
         adapter: Any | None = None
 
         def execute_once() -> dict[str, Any]:
-            payload, is_error = self._bridge_call(operation, bridge_arguments)
+            transport = self._bridge_call(operation, bridge_arguments)
+            payload = transport.payload
+            is_error = transport.is_error
             if is_error:
                 adapter_error = (
                     getattr(adapter, "AdapterError", None)
                     if adapter is not None
                     else None
                 )
+                mutation_not_started_error = (
+                    getattr(adapter, "MutationNotStartedError", None)
+                    if adapter is not None
+                    else None
+                )
                 validate_response = getattr(bridge_contract, "validate_response", None)
                 transport_not_started = (
-                    payload.get("__dispatch_phase") == "not_started"
-                    and payload.get("ok") is False
+                    transport.proves_not_started and payload.get("ok") is False
                 )
                 contract_proved_no_write = (
                     payload.get("status") == "failed_no_mutation"
@@ -663,6 +679,7 @@ class CoreBackend:
                 proven_no_write = (
                     tool_name == "create_reminder"
                     and isinstance(adapter_error, type)
+                    and isinstance(mutation_not_started_error, type)
                     and (transport_not_started or contract_proved_no_write)
                 )
                 if proven_no_write and not transport_not_started:
@@ -687,13 +704,12 @@ class CoreBackend:
                     # remove its write-ahead fence and permit an exact retry.
                     # Preserve the bounded bridge payload after fence cleanup;
                     # launcher provenance is stripped before public MCP output.
-                    raise adapter_error(
+                    raise mutation_not_started_error(
                         str(error["message"]),
                         code=str(error["code"]),
                         reason_code=str(error.get("reason_code") or error["code"]),
                         result_status="failed_no_mutation",
-                        mutation_not_started=True,
-                        _eventkit_failure_payload=public_payload,
+                        public_payload=public_payload,
                     )
                 raise _EventKitBridgeFailure(payload)
             try:
@@ -770,7 +786,7 @@ class CoreBackend:
                 (),
             )
             if adapter_error and isinstance(exc, adapter_error):
-                eventkit_payload = exc.details.get("_eventkit_failure_payload")
+                eventkit_payload = getattr(exc, "public_payload", None)
                 if isinstance(eventkit_payload, dict):
                     return copy.deepcopy(eventkit_payload), True
                 return (

@@ -164,14 +164,19 @@ even though optional MCP `outputSchema` descriptors are omitted from
     returns outcome-unknown. The current key is protected from wall-clock
     pruning, and unresolved fences are never capacity-evicted to admit a new
     mutation; a full unresolved store fails closed before dispatch. An adapter
-    callback error that the existing receipt boundary proves happened before
-    mutation atomically clears its fence, while partial or outcome-unknown
+    typed `MutationNotStartedError` that the existing receipt boundary proves
+    happened before mutation atomically clears its fence; arbitrary error
+    detail flags cannot do so, while partial or outcome-unknown
     errors keep the fence and block redispatch. Core create translates only a
-    contract-validated EventKit `failed_no_mutation` result or parent-issued
-    `not_started` provenance into that cleanup contract. Missing paths and
+    contract-validated EventKit `failed_no_mutation` result or a parent-owned
+    `TransportResult.proves_not_started` fact into that cleanup contract. Missing paths and
     request-size rejection are parent-proven; a generic process `OSError`,
     timeout, oversized output, malformed output, or child-supplied provenance
     cannot authorize fence removal.
+28. Each stdio connection owns a fresh `McpRuntime`. Initialization, rate-limit
+    history, injected backend paths, and lazy Core/Native/Recovery/Diagnostics
+    Facades cannot leak between runtime instances. Tool discovery remains lazy,
+    and test injection does not add an environment-variable production seam.
 
 ## Deliberately withheld behavior
 
@@ -182,8 +187,9 @@ Their historical low-level behavior may remain covered by internal tests so
 future work does not accidentally corrupt data, but skills and public MCP tools
 must not expose or fall back to it.
 
-The deprecated direct adapter CLI is an internal migration/diagnostic seam. It
-does not expand the public compatibility contract.
+The deprecated direct adapter CLI is not a 0.4 compatibility promise. Its
+physical removal is required before the 0.4 release and must be reviewed as a
+separate deletion-focused change.
 
 ## Diagnosis contract
 

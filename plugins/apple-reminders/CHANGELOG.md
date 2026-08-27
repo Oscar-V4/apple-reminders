@@ -39,6 +39,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - URL metadata changes now replace one exact matching visible attachment,
   preserve unrelated or ambiguous objects, and reuse an already-correct target
   attachment instead of creating a duplicate on retry.
+- Isolated MCP initialization, rate limits, backend paths, and lazy Facade
+  ownership inside one `McpRuntime` per stdio session instead of mutable module
+  globals. Test backend injection is now constructor-owned and cannot leak into
+  another runtime.
+- Replaced private JSON dispatch-provenance flags with a closed internal
+  `TransportResult`. Only the parent launcher can prove that a subprocess never
+  started; child output, timeouts, transport errors, and malformed results
+  cannot forge that fact or clear a durable mutation fence.
 
 ### Fixed
 
@@ -105,6 +113,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Allowed multiple content-addressed backing-file candidates only when every
   candidate matches the stored SHA-512 digest. ReminderKit UTI normalization is
   accepted when the copied bytes, dimensions, and file size remain exact.
+- Rejected contradictory `failed_no_mutation` claims across the EventKit,
+  adapter, Native, Core, and public Receipt boundaries. Non-empty post-state or
+  affirmative write evidence now preserves an unknown/pending outcome, and
+  generic adapter failures no longer clear a durable fence without explicit
+  pre-dispatch proof.
 
 ### Local validation
 
@@ -114,6 +127,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Exercised `copy_image` end to end through the public MCP, observed one image
   on the destination in the native app, then deleted the disposable test
   Reminder and verified local absence.
+- Re-ran the complete source-MCP live smoke after runtime isolation and typed
+  transport changes. All create/replay/read/change/section/image/delete steps
+  and exact synthetic-list cleanup passed. A separate synthetic Reminder was
+  observed in the native Reminders list through Computer Use, then deleted via
+  a fresh public Reference; local absence and UI disappearance both matched.
 
 ## 0.3.1 — 2026-08-27
 

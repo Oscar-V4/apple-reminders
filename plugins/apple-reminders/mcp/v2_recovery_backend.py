@@ -17,6 +17,7 @@ if __package__:
         recovery_error_message,
         recovery_reason_code,
     )
+    from .v2_transport import TransportResult
 else:  # pragma: no cover - exercised by the stdio entry point
     from v2_recovery import (
         DeletedGuard,
@@ -26,10 +27,11 @@ else:  # pragma: no cover - exercised by the stdio entry point
         recovery_error_message,
         recovery_reason_code,
     )
+    from v2_transport import TransportResult
 
 
-AdapterCall = Callable[[list[str]], tuple[dict[str, Any], bool]]
-BridgeCall = Callable[[str, dict[str, Any]], tuple[dict[str, Any], bool]]
+AdapterCall = Callable[[list[str]], TransportResult]
+BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
 ReceiptValidator = Callable[..., str | None]
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 STATUSES = {
@@ -213,7 +215,9 @@ class RecoveryBackend:
         account_id = arguments.get("account_id")
         if isinstance(account_id, str) and account_id:
             argv.extend(["--account-id", account_id])
-        payload, is_error = self._adapter_call(argv)
+        transport = self._adapter_call(argv)
+        payload = transport.payload
+        is_error = transport.is_error
         items = payload.get("deleted_reminders")
         if is_error or payload.get("ok") is not True or not isinstance(items, list):
             raise _error_from_payload(payload)
@@ -228,7 +232,7 @@ class RecoveryBackend:
         }
 
     def read_deleted(self, reminder_id: str, attachment_limit: int) -> DeletedSnapshot:
-        payload, is_error = self._adapter_call(
+        transport = self._adapter_call(
             [
                 "read_deleted_reminder",
                 "--id",
@@ -237,6 +241,8 @@ class RecoveryBackend:
                 str(attachment_limit),
             ]
         )
+        payload = transport.payload
+        is_error = transport.is_error
         deleted = payload.get("deleted_reminder")
         guard = payload.get("guard")
         if (
@@ -407,12 +413,13 @@ class RecoveryBackend:
             "--idempotency-key",
             idempotency_key,
         ]
-        payload, _ = self._adapter_call(argv)
+        transport = self._adapter_call(argv)
+        payload = transport.payload
         if self._receipt_validator(
             payload,
             expected_operation="recover_deleted_reminder",
         ) is not None or payload.get("status") not in STATUSES:
-            if payload.get("__dispatch_phase") == "not_started":
+            if transport.proves_not_started:
                 return self._not_dispatched(guard, list_id, payload)
             return self._pending(
                 guard,
@@ -479,7 +486,17 @@ class RecoveryBackend:
                     "retryable": False,
                 },
             }
-            if code == "concurrent_modification":
+            if code == "permission_denied":
+                receipt["next_action"] = {
+                    "kind": "request_access",
+                    "tool": "request_reminders_access",
+                    "retry_original_once": False,
+                    "message": (
+                        "Request Reminders access, then inspect the exact deleted "
+                        "Reminder again before recovery."
+                    ),
+                }
+            elif code == "concurrent_modification":
                 receipt["next_action"] = {
                     "kind": "fresh_read",
                     "tool": "inspect_recently_deleted",
@@ -536,10 +553,12 @@ class RecoveryBackend:
                     after=after,
                     write_performed=True,
                 )
-            bridge, bridge_error = self._bridge_call(
+            bridge_transport = self._bridge_call(
                 "read_reminder",
                 {"reminder_id": guard.reminder_id},
             )
+            bridge = bridge_transport.payload
+            bridge_error = bridge_transport.is_error
             data = bridge.get("data") if isinstance(bridge, Mapping) else None
             active = data.get("reminder") if isinstance(data, Mapping) else None
             exact_match = (

@@ -17,9 +17,28 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 from mcp.v2_core import V2CoreFacade
 from mcp.v2_core_backend import CoreBackend
+from mcp.v2_transport import DispatchCertainty, TransportResult
 
 
 REMINDER_ID = "REMINDER-EXACT-1"
+
+
+def transport(
+    payload: dict[str, Any],
+    *,
+    is_error: bool | None = None,
+    proves_not_started: bool = False,
+) -> TransportResult:
+    """Build the typed result returned by the local bridge/adapter launchers."""
+    return TransportResult(
+        payload=payload,
+        is_error=payload.get("ok") is not True if is_error is None else is_error,
+        dispatch_certainty=(
+            DispatchCertainty.PROVEN_NOT_STARTED
+            if proves_not_started
+            else DispatchCertainty.MAY_HAVE_STARTED
+        ),
+    )
 
 
 def load_script_module(name: str, path: Path) -> Any:
@@ -100,7 +119,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         }
         adapter_loader = mock.Mock(side_effect=RuntimeError("adapter unavailable"))
         backend = CoreBackend(
-            bridge_call=mock.Mock(return_value=(payload, False)),
+            bridge_call=mock.Mock(return_value=transport(payload)),
             adapter_call=mock.Mock(),
             build_adapter_argv=mock.Mock(),
             adapter_module=adapter_loader,
@@ -139,7 +158,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 "details": {},
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -182,15 +201,17 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         self.assertEqual(bridge_call.call_count, 2)
         self.assertEqual(stored["entries"], {})
 
-    def test_create_unclassified_bridge_failure_remains_fenced(self) -> None:
+    def test_create_child_spoofed_no_write_flags_remain_fenced(self) -> None:
         failed = {
             "ok": False,
+            "__dispatch_phase": "not_started",
+            "mutation_not_started": True,
             "error": {
                 "code": "eventkit_bridge_unavailable",
                 "message": "The bundled EventKit bridge is unavailable.",
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -238,13 +259,17 @@ class CoreBackendInterfaceTests(unittest.TestCase):
     def test_create_parent_proven_prelaunch_failure_clears_fence(self) -> None:
         not_started = {
             "ok": False,
-            "__dispatch_phase": "not_started",
             "error": {
                 "code": "eventkit_bridge_unavailable",
                 "message": "The bundled EventKit bridge is unavailable.",
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(not_started), True))
+        bridge_call = mock.Mock(
+            return_value=transport(
+                copy.deepcopy(not_started),
+                proves_not_started=True,
+            )
+        )
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -309,7 +334,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 "message": "The EventKit outcome is unknown.",
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(pending), False))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(pending)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -354,7 +379,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "status": "verified",
             "ok": True,
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(invalid), False))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(invalid)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -402,7 +427,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 "message": "This label did not cross the bridge contract.",
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(rejected), True))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(rejected)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -439,6 +464,64 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         self.assertTrue(replay.payload["replayed"])
         self.assertEqual(bridge_call.call_count, 1)
 
+    def test_create_contradictory_no_write_evidence_remains_fenced(self) -> None:
+        contradictory = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "failed_no_mutation",
+            "ok": False,
+            "after": {"id": REMINDER_ID},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+            },
+            "error": {
+                "code": "permission_denied",
+                "reason_code": "reminders_access_denied",
+                "message": "Contradictory write evidence",
+                "retryable": False,
+            },
+        }
+        bridge_call = mock.Mock(
+            return_value=transport(copy.deepcopy(contradictory))
+        )
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_module=REAL_ADAPTER,
+            bridge_module=REAL_BRIDGE,
+        )
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Contradictory no-write",
+            "idempotency_key": "create-contradictory-no-write",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_STORE",
+                    support / "idempotency.json",
+                ),
+                mock.patch.object(
+                    REAL_ADAPTER,
+                    "IDEMPOTENCY_LOCK",
+                    support / "idempotency.lock",
+                ),
+            ):
+                first = backend.invoke("create_reminder", arguments, mutation=True)
+                replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertTrue(first.is_error)
+        self.assertEqual(first.payload, contradictory)
+        self.assertFalse(replay.is_error)
+        self.assertEqual(replay.payload["status"], "committed_verification_pending")
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
     def test_create_no_write_cleanup_failure_keeps_fence_fail_closed(self) -> None:
         failed = {
             "schema_version": 1,
@@ -454,7 +537,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 "details": {},
             },
         }
-        bridge_call = mock.Mock(return_value=(copy.deepcopy(failed), True))
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
         backend = make_backend(
             bridge_call=bridge_call,
             adapter_module=REAL_ADAPTER,
@@ -524,7 +607,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "ok": True,
         }
         bridge_call = mock.Mock(
-            side_effect=[(read_payload, False), (mutation_payload, False)]
+            side_effect=[transport(read_payload), transport(mutation_payload)]
         )
         backend = make_backend(bridge_call=bridge_call)
         read_arguments = {
@@ -606,21 +689,23 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(
-            side_effect=[(copy.deepcopy(eventkit_receipt), False), (final_read, False)]
+            side_effect=[
+                transport(copy.deepcopy(eventkit_receipt)),
+                transport(final_read),
+            ]
         )
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": False,
                         "status": "failed_no_mutation",
@@ -629,7 +714,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             "message": "The native URL attachment was not saved.",
                         },
                     },
-                    True,
                 ),
             ]
         )
@@ -729,11 +813,11 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(
-            side_effect=[(eventkit_receipt, False), (final_read, False)]
+            side_effect=[transport(eventkit_receipt), transport(final_read)]
         )
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
@@ -747,10 +831,9 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             },
                         ],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "status": "verified",
@@ -771,8 +854,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                         },
                         "verification": {"attachment_active": True},
                         "recovery": {"semantics": "replace_previous_attachment"},
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -848,10 +930,10 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(
-            side_effect=[(eventkit_receipt, False), (final_read, False)]
+            side_effect=[transport(eventkit_receipt), transport(final_read)]
         )
         adapter_call = mock.Mock(
-            return_value=(
+            return_value=transport(
                 {
                     "ok": True,
                     "reminder_id": REMINDER_ID,
@@ -861,8 +943,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                         {"id": "A-2", "type": "url", "url": old_url},
                     ],
                     "truncated": False,
-                },
-                False,
+                }
             )
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
@@ -937,18 +1018,17 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(
-            side_effect=[(eventkit_receipt, False), (final_read, False)]
+            side_effect=[transport(eventkit_receipt), transport(final_read)]
         )
         adapter_call = mock.Mock(
-            return_value=(
+            return_value=transport(
                 {
                     "ok": True,
                     "reminder_id": REMINDER_ID,
                     "reminder_version": 7,
                     "attachments": [existing],
                     "truncated": False,
-                },
-                False,
+                }
             )
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
@@ -1021,10 +1101,10 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(
-            side_effect=[(eventkit_receipt, False), (final_read, False)]
+            side_effect=[transport(eventkit_receipt), transport(final_read)]
         )
         adapter_call = mock.Mock(
-            return_value=(
+            return_value=transport(
                 {
                     "ok": True,
                     "reminder_id": REMINDER_ID,
@@ -1038,8 +1118,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                         },
                     ],
                     "truncated": False,
-                },
-                False,
+                }
             )
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
@@ -1153,17 +1232,17 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         }
         bridge_call = mock.Mock(
             side_effect=[
-                (read_receipt(old_url, "2026-08-25T01:00:00.000Z"), False),
-                (first_eventkit_write, False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
-                (retry_eventkit_no_write, False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
+                transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
+                transport(first_eventkit_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
+                transport(retry_eventkit_no_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
             ]
         )
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
@@ -1176,10 +1255,9 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             }
                         ],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": False,
                         "status": "failed_manual_repair_required",
@@ -1188,10 +1266,9 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             "code": "native_url_replace_uncertain",
                             "message": "The native replacement outcome is uncertain.",
                         },
-                    },
-                    True,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
@@ -1209,8 +1286,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             },
                         ],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -1340,12 +1416,12 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         }
         bridge_call = mock.Mock(
             side_effect=[
-                (read_receipt(old_url, "2026-08-25T01:00:00.000Z"), False),
-                (first_eventkit_write, False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
-                (retry_eventkit_no_write, False),
-                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
+                transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
+                transport(first_eventkit_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
+                transport(retry_eventkit_no_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
             ]
         )
         stale_a_inventory = {
@@ -1359,8 +1435,8 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         }
         adapter_call = mock.Mock(
             side_effect=[
-                (copy.deepcopy(stale_a_inventory), False),
-                (
+                transport(copy.deepcopy(stale_a_inventory)),
+                transport(
                     {
                         "ok": False,
                         "status": "failed_no_mutation",
@@ -1369,11 +1445,10 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             "code": "native_url_replace_failed",
                             "message": "The native replacement did not commit.",
                         },
-                    },
-                    True,
+                    }
                 ),
-                (copy.deepcopy(stale_a_inventory), False),
-                (
+                transport(copy.deepcopy(stale_a_inventory)),
+                transport(
                     {
                         "ok": True,
                         "status": "verified",
@@ -1390,8 +1465,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                             "semantics": "not_applicable",
                             "automatic_retry_safe": True,
                         },
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -1482,7 +1556,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         adapter_call = mock.Mock(
-            return_value=(
+            return_value=transport(
                 {
                     "ok": True,
                     "reminder_id": REMINDER_ID,
@@ -1492,14 +1566,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                         {"id": "ATTACHMENT-B", "type": "url", "url": new_url},
                     ],
                     "truncated": False,
-                },
-                False,
+                }
             )
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
 
         result = make_backend(
-            bridge_call=mock.Mock(return_value=(final_read, False)),
+            bridge_call=mock.Mock(return_value=transport(final_read)),
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, arguments: (
                 argv_calls.append((name, copy.deepcopy(arguments))) or [name]
@@ -1565,7 +1638,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         for inventory in malformed_inventories:
             with self.subTest(inventory=inventory):
-                adapter_call = mock.Mock(return_value=(inventory, False))
+                adapter_call = mock.Mock(return_value=transport(inventory))
                 argv_calls: list[tuple[str, dict[str, Any]]] = []
                 result = make_backend(
                     bridge_call=mock.Mock(),

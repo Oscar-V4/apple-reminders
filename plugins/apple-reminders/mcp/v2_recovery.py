@@ -216,7 +216,7 @@ def _read_failure(exc: RecoveryBackendError) -> dict[str, Any]:
         result["next_action"] = {
             "kind": "request_access",
             "tool": "request_reminders_access",
-            "retry_original_once": False,
+            "retry_original_once": True,
             "message": "Grant Reminders access, then inspect Recently Deleted again.",
         }
     elif (

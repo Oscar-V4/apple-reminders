@@ -20,6 +20,7 @@ from mcp.v2_recovery import (
     RecoveryOutcome,
 )
 from mcp.v2_recovery_backend import RecoveryBackend
+from mcp.v2_transport import DispatchCertainty, TransportResult
 
 
 REMINDER_ID = "11111111-1111-4111-8111-111111111111"
@@ -57,6 +58,15 @@ DELETED = {
     ],
     "attachments_truncated": False,
 }
+
+
+def transport(
+    payload: dict[str, Any],
+    *,
+    is_error: bool = False,
+    certainty: DispatchCertainty = DispatchCertainty.MAY_HAVE_STARTED,
+) -> TransportResult:
+    return TransportResult(payload, is_error, certainty)
 
 
 def verified_receipt() -> dict[str, Any]:
@@ -390,7 +400,7 @@ class RecoveryFacadeTests(unittest.TestCase):
 class RecoveryBackendTests(unittest.TestCase):
     def test_private_adapter_error_detail_never_reaches_public_read(self) -> None:
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (
+            adapter_call=lambda _argv: transport(
                 {
                     "ok": False,
                     "error": {
@@ -402,7 +412,7 @@ class RecoveryBackendTests(unittest.TestCase):
                         ),
                     },
                 },
-                True,
+                is_error=True,
             ),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: None,
@@ -428,18 +438,46 @@ class RecoveryBackendTests(unittest.TestCase):
         )
         validate_public_result("inspect_recently_deleted", public, "not_mutated")
 
-    def test_proven_adapter_not_started_remains_failed_no_mutation(self) -> None:
+    def test_permission_read_failure_requests_access_then_one_retry(self) -> None:
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (
+            adapter_call=lambda _argv: transport(
                 {
                     "ok": False,
-                    "__dispatch_phase": "not_started",
+                    "error": {
+                        "code": "permission_denied",
+                        "reason_code": "reminders_access_denied",
+                        "message": "Full Reminders access is required.",
+                    },
+                },
+                is_error=True,
+            ),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        public = RecoveryFacade(backend).inspect({"kind": "list", "limit": 20})
+
+        self.assertEqual(public["status"], "failed_no_mutation")
+        self.assertEqual(public["next_action"]["kind"], "request_access")
+        self.assertEqual(
+            public["next_action"]["tool"],
+            "request_reminders_access",
+        )
+        self.assertTrue(public["next_action"]["retry_original_once"])
+        validate_public_result("inspect_recently_deleted", public, None)
+
+    def test_proven_adapter_not_started_remains_failed_no_mutation(self) -> None:
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: transport(
+                {
+                    "ok": False,
                     "error": {
                         "code": "adapter_unavailable",
                         "message": "Private launch detail",
                     },
                 },
-                True,
+                is_error=True,
+                certainty=DispatchCertainty.PROVEN_NOT_STARTED,
             ),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: "invalid receipt",
@@ -460,13 +498,12 @@ class RecoveryBackendTests(unittest.TestCase):
 
     def test_started_invalid_adapter_receipt_remains_unknown(self) -> None:
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (
+            adapter_call=lambda _argv: transport(
                 {
                     "ok": False,
-                    "__dispatch_phase": "started_unknown",
                     "error": {"code": "invalid_adapter_response"},
                 },
-                True,
+                is_error=True,
             ),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: "invalid receipt",
@@ -487,7 +524,10 @@ class RecoveryBackendTests(unittest.TestCase):
                 else:
                     del adapter_payload["verification"]["write_performed"]
                 backend = RecoveryBackend(
-                    adapter_call=lambda _argv, payload=adapter_payload: (payload, True),
+                    adapter_call=lambda _argv, payload=adapter_payload: transport(
+                        payload,
+                        is_error=True,
+                    ),
                     bridge_call=mock.Mock(),
                     receipt_validator=lambda payload, **_: None,
                 )
@@ -522,7 +562,7 @@ class RecoveryBackendTests(unittest.TestCase):
             }
         }
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (adapter_payload, True),
+            adapter_call=lambda _argv: transport(adapter_payload, is_error=True),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: None,
         )
@@ -551,7 +591,7 @@ class RecoveryBackendTests(unittest.TestCase):
             "write_performed": False,
         }
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (adapter_payload, True),
+            adapter_call=lambda _argv: transport(adapter_payload, is_error=True),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: None,
         )
@@ -561,6 +601,36 @@ class RecoveryBackendTests(unittest.TestCase):
         self.assertEqual(outcome.mutation_state, "not_mutated")
         self.assertEqual(outcome.receipt["status"], "failed_no_mutation")
         self.assertFalse(outcome.receipt["verification"]["write_performed"])
+
+    def test_permission_recovery_failure_requests_access_then_fresh_inspection(self) -> None:
+        adapter_payload = failed_no_mutation_receipt()
+        adapter_payload["error"] = {
+            "code": "permission_denied",
+            "reason_code": "reminders_access_denied",
+            "message": "Full Reminders access is required.",
+            "retryable": False,
+        }
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: transport(adapter_payload, is_error=True),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        outcome = backend.recover(GUARD, LIST_ID, "backend-key-permission")
+
+        self.assertEqual(outcome.mutation_state, "not_mutated")
+        self.assertEqual(outcome.receipt["status"], "failed_no_mutation")
+        self.assertEqual(outcome.receipt["next_action"]["kind"], "request_access")
+        self.assertEqual(
+            outcome.receipt["next_action"]["tool"],
+            "request_reminders_access",
+        )
+        self.assertFalse(outcome.receipt["next_action"]["retry_original_once"])
+        validate_public_result(
+            "recover_deleted_reminder",
+            {"schema_version": 2, **outcome.receipt},
+            "not_mutated",
+        )
 
     def test_exact_deleted_read_requires_and_keeps_native_guard_private(self) -> None:
         adapter_payload = {
@@ -577,7 +647,7 @@ class RecoveryBackendTests(unittest.TestCase):
             },
         }
         backend = RecoveryBackend(
-            adapter_call=lambda _argv: (adapter_payload, False),
+            adapter_call=lambda _argv: transport(adapter_payload),
             bridge_call=mock.Mock(),
             receipt_validator=lambda payload, **_: None,
         )
@@ -614,7 +684,9 @@ class RecoveryBackendTests(unittest.TestCase):
                         del adapter_payload["verification"][field]
                     bridge_call = mock.Mock()
                     backend = RecoveryBackend(
-                        adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                        adapter_call=lambda _argv, payload=adapter_payload: transport(
+                            payload
+                        ),
                         bridge_call=bridge_call,
                         receipt_validator=lambda payload, **_: None,
                     )
@@ -651,7 +723,9 @@ class RecoveryBackendTests(unittest.TestCase):
                 adapter_payload["verification"][field] = value
                 bridge_call = mock.Mock()
                 backend = RecoveryBackend(
-                    adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                    adapter_call=lambda _argv, payload=adapter_payload: transport(
+                        payload
+                    ),
                     bridge_call=bridge_call,
                     receipt_validator=lambda payload, **_: None,
                 )
@@ -751,7 +825,9 @@ class RecoveryBackendTests(unittest.TestCase):
                 mutate(adapter_payload)
                 bridge_call = mock.Mock()
                 backend = RecoveryBackend(
-                    adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                    adapter_call=lambda _argv, payload=adapter_payload: transport(
+                        payload
+                    ),
                     bridge_call=bridge_call,
                     receipt_validator=lambda payload, **_: None,
                 )
@@ -776,9 +852,9 @@ class RecoveryBackendTests(unittest.TestCase):
     def test_recovery_passes_full_private_guard_and_requires_eventkit_readback(self) -> None:
         adapter_argv: list[list[str]] = []
 
-        def adapter_call(argv: list[str]) -> tuple[dict[str, Any], bool]:
+        def adapter_call(argv: list[str]) -> TransportResult:
             adapter_argv.append(argv)
-            return (
+            return transport(
                 {
                     "ok": True,
                     "status": "verified",
@@ -818,16 +894,15 @@ class RecoveryBackendTests(unittest.TestCase):
                         "after_attachment_count": 1,
                     },
                     "recovery": {"semantics": "native_recently_deleted_recovery"},
-                },
-                False,
+                }
             )
 
         def bridge_call(
             operation: str, arguments: dict[str, Any]
-        ) -> tuple[dict[str, Any], bool]:
+        ) -> TransportResult:
             self.assertEqual(operation, "read_reminder")
             self.assertEqual(arguments, {"reminder_id": REMINDER_ID})
-            return (
+            return transport(
                 {
                     "ok": True,
                     "status": "verified",
@@ -839,8 +914,7 @@ class RecoveryBackendTests(unittest.TestCase):
                             "last_modified": "2026-08-28T00:00:00+09:00",
                         }
                     },
-                },
-                False,
+                }
             )
 
         backend = RecoveryBackend(

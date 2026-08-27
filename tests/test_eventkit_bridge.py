@@ -845,6 +845,62 @@ class EventKitContractTests(unittest.TestCase):
         self.assertEqual(payload["error"]["reason_code"], "native_timeout")
         self.assertIs(eventkit_bridge.validate_response(payload, "delete_reminder"), payload)
 
+    def test_native_oserror_after_process_dispatch_is_verification_pending(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "calendar_id": "CALENDAR-1",
+            "title": "Outcome unknown",
+        }
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(
+                eventkit_bridge.subprocess,
+                "run",
+                side_effect=OSError("process state unavailable"),
+            ),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertTrue(payload["ok"])
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(payload["error"]["code"], "sync_pending")
+        self.assertEqual(payload["error"]["reason_code"], "native_launch_failed")
+        self.assertIs(eventkit_bridge.validate_response(payload, "create_reminder"), payload)
+
+    def test_failed_no_mutation_rejects_contradictory_commit_evidence(self) -> None:
+        error = {
+            "code": "permission_denied",
+            "reason_code": "reminders_access_denied",
+            "message": "Full Reminders access is required",
+            "retryable": False,
+            "details": {},
+        }
+        clean = eventkit_bridge.response(
+            "create_reminder",
+            "failed_no_mutation",
+            error=error,
+        )
+        self.assertIs(eventkit_bridge.validate_response(clean, "create_reminder"), clean)
+
+        contradictions = (
+            {"after": {"id": "REMINDER-1"}},
+            {
+                "verification": {
+                    "state": "read_back",
+                    "write_performed": True,
+                    "final_read": True,
+                }
+            },
+            {"mutation_attempted": True},
+        )
+        for evidence in contradictions:
+            with self.subTest(evidence=evidence):
+                payload = {**clean, **evidence}
+                with self.assertRaisesRegex(RuntimeError, "no-mutation"):
+                    eventkit_bridge.validate_response(payload, "create_reminder")
+
     def test_native_helper_build_failure_is_no_mutation_failure(self) -> None:
         request = {
             "schema_version": 1,

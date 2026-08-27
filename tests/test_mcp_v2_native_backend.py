@@ -13,7 +13,9 @@ PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from mcp.v2_native_backend import NativeBackend
+from mcp.v2_transport import DispatchCertainty, TransportResult
 from reminders_service import Guard
+from receipt_contract import adapter_receipt_error
 
 
 REMINDER_ID = "REMINDER-EXACT-1"
@@ -30,8 +32,16 @@ SOURCE_GUARD = Guard(
 )
 
 
-def verified_public_reminder() -> tuple[dict[str, Any], bool]:
-    return (
+def transport(payload: dict[str, Any], *, is_error: bool = False) -> TransportResult:
+    return TransportResult(
+        payload,
+        is_error,
+        DispatchCertainty.MAY_HAVE_STARTED,
+    )
+
+
+def verified_public_reminder() -> TransportResult:
+    return transport(
         {
             "ok": True,
             "status": "verified",
@@ -42,8 +52,7 @@ def verified_public_reminder() -> tuple[dict[str, Any], bool]:
                     "last_modified": "2026-08-25T00:00:00Z",
                 }
             },
-        },
-        False,
+        }
     )
 
 
@@ -91,17 +100,16 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         }
         adapter_replies = iter(
             [
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 12,
                         "attachments": [],
-                    },
-                    False,
+                    }
                 ),
-                (receipt, False),
-                (
+                transport(receipt),
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
@@ -113,8 +121,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                                 "url": "https://example.com/item",
                             }
                         ],
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -174,9 +181,9 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         }
         adapter_replies = iter(
             [
-                ({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 12, "attachments": []}, False),
-                (receipt, False),
-                ({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 13, "attachments": []}, False),
+                transport({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 12, "attachments": []}),
+                transport(receipt),
+                transport({"ok": True, "reminder_id": REMINDER_ID, "reminder_version": 13, "attachments": []}),
             ]
         )
         backend = self.make_backend(
@@ -347,7 +354,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 backend = self.make_backend(
                     bridge_call=mock.Mock(return_value=verified_public_reminder()),
-                    adapter_call=mock.Mock(return_value=(payload, False)),
+                    adapter_call=mock.Mock(return_value=transport(payload)),
                     argv_calls=[],
                 )
                 with self.assertRaises(RuntimeError):
@@ -365,7 +372,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 backend = self.make_backend(
                     bridge_call=mock.Mock(return_value=verified_public_reminder()),
-                    adapter_call=mock.Mock(return_value=(payload, False)),
+                    adapter_call=mock.Mock(return_value=transport(payload)),
                     argv_calls=[],
                 )
                 with self.assertRaises(RuntimeError):
@@ -393,16 +400,15 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         }
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 12,
                         "attachments": [],
-                    },
-                    False,
+                    }
                 ),
-                (receipt, True),
+                transport(receipt, is_error=True),
             ]
         )
         backend = self.make_backend(
@@ -423,7 +429,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
 
     def test_public_adapter_read_preserves_exact_account_scope(self) -> None:
         argv_calls: list[tuple[str, dict[str, Any]]] = []
-        adapter_call = mock.Mock(return_value=({"ok": True, "tags": []}, False))
+        adapter_call = mock.Mock(return_value=transport({"ok": True, "tags": []}))
         backend = self.make_backend(
             bridge_call=mock.Mock(),
             adapter_call=adapter_call,
@@ -446,6 +452,64 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             ],
         )
 
+    def test_contradictory_failed_no_mutation_receipt_stays_unknown(self) -> None:
+        contradictory = {
+            "ok": False,
+            "status": "failed_no_mutation",
+            "operation": "attach_url",
+            "operation_id": "22222222-2222-4222-8222-222222222222",
+            "backend": "sqlite_private",
+            "target": {"reminder_id": REMINDER_ID, "attachment_id": "A-1"},
+            "before": {},
+            "after": {"attachment": {"id": "A-1", "type": "url"}},
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+            },
+            "recovery": {"semantics": "not_applicable"},
+            "error": {"code": "unexpected_error", "message": "Contradictory"},
+        }
+        error = adapter_receipt_error(
+            contradictory,
+            expected_operation="attach_url",
+        )
+        adapter_call = mock.Mock(
+            side_effect=[
+                transport(
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 12,
+                        "attachments": [],
+                    }
+                ),
+                transport(contradictory, is_error=True),
+            ]
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+        backend = self.make_backend(
+            bridge_call=mock.Mock(return_value=verified_public_reminder()),
+            adapter_call=adapter_call,
+            argv_calls=argv_calls,
+            receipt_error=error,
+        )
+
+        outcome = backend.mutate(
+            GUARD,
+            "attach_url",
+            {"url": "https://example.com"},
+        )
+
+        self.assertIsNotNone(error)
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
+        self.assertIsNone(outcome.receipt["verification"]["write_performed"])
+        self.assertEqual(
+            outcome.receipt["error"]["reason_code"],
+            "invalid_native_mutation_receipt",
+        )
+
     def test_copy_image_rechecks_two_guards_and_routes_only_exact_private_ids(
         self,
     ) -> None:
@@ -456,7 +520,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             trace.append(f"bridge:{reminder_id}")
             guard = SOURCE_GUARD if reminder_id == SOURCE_REMINDER_ID else GUARD
             source_id = guard.store_identity.removeprefix("eventkit:")
-            return (
+            return transport(
                 {
                     "ok": True,
                     "status": "verified",
@@ -467,8 +531,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                             "last_modified": guard.public_concurrency_value,
                         }
                     },
-                },
-                False,
+                }
             )
 
         source_attachment = {
@@ -519,46 +582,42 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         }
         adapter_replies = iter(
             [
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": SOURCE_REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [source_attachment],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 12,
                         "attachments": [],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (receipt, False),
-                (
+                transport(receipt),
+                transport(
                     {
                         "ok": True,
                         "reminder_id": SOURCE_REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [source_attachment],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 13,
                         "attachments": [destination_attachment],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -625,7 +684,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                 if arguments["reminder_id"] == SOURCE_REMINDER_ID
                 else GUARD
             )
-            return (
+            return transport(
                 {
                     "ok": True,
                     "status": "verified",
@@ -636,31 +695,28 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                             "last_modified": guard.public_concurrency_value,
                         }
                     },
-                },
-                False,
+                }
             )
 
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": SOURCE_REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 12,
                         "attachments": [],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
             ]
         )
@@ -695,7 +751,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                 if arguments["reminder_id"] == SOURCE_REMINDER_ID
                 else GUARD
             )
-            return (
+            return transport(
                 {
                     "ok": True,
                     "status": "verified",
@@ -706,8 +762,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                             "last_modified": guard.public_concurrency_value,
                         }
                     },
-                },
-                False,
+                }
             )
 
         source_attachment = {
@@ -723,27 +778,25 @@ class NativeBackendInterfaceTests(unittest.TestCase):
         }
         adapter_call = mock.Mock(
             side_effect=[
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": SOURCE_REMINDER_ID,
                         "reminder_version": 7,
                         "attachments": [source_attachment],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": True,
                         "reminder_id": REMINDER_ID,
                         "reminder_version": 12,
                         "attachments": [],
                         "truncated": False,
-                    },
-                    False,
+                    }
                 ),
-                (
+                transport(
                     {
                         "ok": False,
                         "status": "failed_no_mutation",
@@ -769,7 +822,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
                             "retryable": False,
                         },
                     },
-                    True,
+                    is_error=True,
                 ),
             ]
         )
@@ -830,7 +883,7 @@ class NativeBackendInterfaceTests(unittest.TestCase):
             "verification": {"state": "read_back", "write_performed": True},
             "recovery": {"semantics": "delete_copied_attachment"},
         }
-        adapter_call = mock.Mock(return_value=(receipt, False))
+        adapter_call = mock.Mock(return_value=transport(receipt))
         backend = self.make_backend(
             bridge_call=mock.Mock(),
             adapter_call=adapter_call,

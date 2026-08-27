@@ -1632,6 +1632,21 @@ class NativeFacade:
         if result.get("status") != "committed_verification_pending":
             current_error = result.get("error")
             if (
+                isinstance(current_error, Mapping)
+                and current_error.get("code") == "permission_denied"
+            ):
+                result["next_action"] = {
+                    "kind": "request_access",
+                    "tool": "request_reminders_access",
+                    "retry_original_once": (
+                        result.get("status") == "failed_no_mutation"
+                    ),
+                    "message": (
+                        "Request Reminders access, then retry this operation once."
+                    ),
+                }
+                return
+            if (
                 next_tool is not None
                 and isinstance(current_error, Mapping)
                 and current_error.get("code")

@@ -120,6 +120,26 @@ class AdapterError(RuntimeError):
         self.details = details
 
 
+class MutationNotStartedError(AdapterError):
+    """A typed internal proof that the guarded callback never dispatched."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_input",
+        public_payload: dict[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            mutation_not_started=True,
+            **details,
+        )
+        self.public_payload = public_payload
+
+
 class AttachmentVerificationError(AdapterError):
     def __init__(self, message: str, row: dict[str, Any], **details: Any) -> None:
         code = details.pop("code", "sync_pending")
@@ -826,18 +846,16 @@ def load_idempotency_store() -> dict[str, Any]:
     except FileNotFoundError:
         return {"version": 1, "entries": {}}
     except (OSError, json.JSONDecodeError) as exc:
-        raise AdapterError(
+        raise MutationNotStartedError(
             "The durable idempotency store could not be read safely.",
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
-            mutation_not_started=True,
         ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
-        raise AdapterError(
+        raise MutationNotStartedError(
             "The durable idempotency store has an unsupported structure.",
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
-            mutation_not_started=True,
         )
     return payload
 
@@ -968,22 +986,6 @@ def idempotency_outcome_unknown_receipt(
     )
 
 
-def adapter_error_proves_no_mutation(error: AdapterError) -> bool:
-    """Mirror the adapter's public failure boundary for callback exceptions."""
-
-    details = error.details
-    if details.get("mutation_not_started") is True:
-        return True
-    if (
-        details.get("partial_failure") is True
-        or details.get("mutation_outcome_unknown") is True
-    ):
-        return False
-    return details.get("result_status") not in {
-        "committed_verification_pending",
-        "partial_success",
-        "failed_manual_repair_required",
-    }
 def execute_idempotent(
     *,
     operation: str,
@@ -1007,7 +1009,7 @@ def execute_idempotent(
         record = entries.get(key_hash)
         if record:
             if record.get("input_hash") != input_hash:
-                raise AdapterError(
+                raise MutationNotStartedError(
                     "Idempotency key was already used with different input",
                     code="concurrent_modification",
                     operation=operation,
@@ -1041,11 +1043,10 @@ def execute_idempotent(
                 if not idempotency_record_in_progress(entry)
             ]
             if not completed_keys:
-                raise AdapterError(
+                raise MutationNotStartedError(
                     "The durable idempotency fence capacity is occupied by unresolved operations.",
                     code="unexpected_error",
                     reason_code="idempotency_capacity_exhausted",
-                    mutation_not_started=True,
                 )
             oldest_key = min(
                 completed_keys,
@@ -1072,17 +1073,16 @@ def execute_idempotent(
                 }
             )
         except OSError as exc:
-            raise AdapterError(
+            raise MutationNotStartedError(
                 "The idempotency fence could not be persisted before dispatch.",
                 code="unexpected_error",
                 reason_code="idempotency_fence_write_failed",
-                mutation_not_started=True,
             ) from exc
 
         try:
             result = callback()
         except AdapterError as exc:
-            if not adapter_error_proves_no_mutation(exc):
+            if not isinstance(exc, MutationNotStartedError):
                 raise
             entries.pop(key_hash, None)
             try:
@@ -1093,11 +1093,10 @@ def execute_idempotent(
                 # The callback itself proved no write, but the durable fence
                 # could not be removed. Keep the on-disk fence fail-closed so
                 # a retry cannot accidentally redispatch under uncertainty.
-                raise AdapterError(
+                raise MutationNotStartedError(
                     "The no-write callback failed and its idempotency fence could not be cleared.",
                     code="unexpected_error",
                     reason_code="idempotency_fence_cleanup_failed",
-                    mutation_not_started=True,
                 ) from cleanup_exc
             raise
         entries[key_hash] = {

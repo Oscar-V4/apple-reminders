@@ -123,9 +123,9 @@ class DoctorSummaryMcpContractTests(unittest.TestCase):
 
     def test_mcp_initialize_instructions_do_not_repeat_a_long_playbook(self) -> None:
         server = load_server_module()
-        server.SESSION_INITIALIZED = False
+        runtime = server.McpRuntime()
 
-        response = server.handle_message(
+        response = runtime.handle(
             {
                 "jsonrpc": "2.0",
                 "id": 1,

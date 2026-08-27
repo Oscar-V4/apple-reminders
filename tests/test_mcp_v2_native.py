@@ -296,6 +296,36 @@ class NativeFacadeTests(unittest.TestCase):
         self.assertFalse(result["next_action"]["retry_original_once"])
         validate_public_result("create_reminder_section", result, "not_mutated")
 
+    def test_create_section_permission_receipt_requests_access_then_one_retry(self) -> None:
+        backend = Backend()
+        receipt = mutation_payload("create_section", status="failed_no_mutation")
+        receipt["verification"] = {
+            "state": "not_performed",
+            "write_performed": False,
+            "final_read": False,
+        }
+        receipt["error"] = {
+            "code": "permission_denied",
+            "reason_code": "reminders_access_denied",
+            "message": "Full Reminders access is required.",
+            "retryable": False,
+        }
+        backend.preview_payloads["create_section"] = receipt
+        facade = self.make_facade(backend)
+
+        result = facade.call(
+            "create_reminder_section", {"list_id": "LIST-1", "name": "Next"}
+        )
+
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["next_action"]["kind"], "request_access")
+        self.assertEqual(
+            result["next_action"]["tool"],
+            "request_reminders_access",
+        )
+        self.assertTrue(result["next_action"]["retry_original_once"])
+        validate_public_result("create_reminder_section", result, "not_mutated")
+
     def test_reference_inspection_resolves_guard_and_bounds_native_data(self) -> None:
         backend = Backend()
         references = References()
