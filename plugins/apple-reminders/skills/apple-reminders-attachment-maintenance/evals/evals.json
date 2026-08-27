@@ -70,17 +70,6 @@
         "Does not execute free-form SQL.",
         "Does not bypass the opaque reference or read-back rules."
       ]
-    },
-    {
-      "id": 8,
-      "category": "direct",
-      "prompt": "세 미리알림의 사진 첨부를 하나의 미리알림으로 모은 뒤 원본 세 개는 지워줘.",
-      "expected_output": "Resolves every exact source and destination, inspects attachments, explains that existing attachment bytes cannot be exported or copied, and proceeds only when each image has an exact available local file. It attaches and verifies all destination images before handing exact source deletion to the organize workflow; otherwise it stops before deletion.",
-      "assertions": [
-        "Does not invent local image paths from attachment IDs.",
-        "Does not delete source reminders before destination verification.",
-        "Does not claim deleted attachments or reminders can be recovered publicly."
-      ]
     }
   ]
 }

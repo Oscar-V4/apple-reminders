@@ -14,7 +14,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Use `$apple-reminders-daily-brief` for today, overdue, week, or no-due-date briefs.
 - Use `$apple-reminders-quick-capture` to create reminders with typed dates, alarms, recurrence, URLs, or an image follow-up.
 - Use `$apple-reminders-organize-cleanup` for bounded completion/deletion proposals, list or section moves, section creation, and tag assignment changes.
-- Use `$apple-reminders-attachment-maintenance` for image and URL inspection, attach, replace, delete, or cross-reminder consolidation planning.
+- Use `$apple-reminders-attachment-maintenance` for image and URL inspection, attach, replace, or delete work.
 
 ## Normal workflow
 
@@ -23,13 +23,11 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 3. Keep page reads semantically bounded. Incomplete reads require exact `list_ids` or a bounded due range. Completed reads require a bounded completion range. Reuse a cursor only with identical filters, sort, and limit.
 4. Before changing an existing reminder, call `read_reminder` and use its opaque `rev1` reference. Never construct, decode, or reuse a stale reference.
 5. Use `change_reminder` with one closed action: `patch`, `set_completion`, or `move_to_list`. Omitted patch fields stay unchanged; due values and alarms remain distinct.
-6. Treat `delete_reminder` as terminal within the public interface. It uses EventKit deletion, consumes a fresh exact reference, and requires verified local absence, but there is no public restore or undo tool. Do not promise that a deleted reminder can be recovered.
-7. Resolve destructive dependencies before the first delete. When a later step needs source reminder fields, attachments, or identities, read and inspect every source and destination first, complete and verify the non-destructive work, and only then delete exact sources one at a time. Stop on stale, pending, partial, failed, or manual-repair status.
-8. Resolve relative selectors such as “top four” to one explicit API snapshot: exact list or date scope, status, a supported sort (`due`, `modified`, or `title`), limit, and exact Reminder IDs. Do not equate API order with the current Reminders UI order. If the user specifically means visible UI order or selection, leave that step to a local macOS-capable worker.
-9. Existing image attachments are inspectable but the public tools do not export, download, or copy their bytes between reminders. Cross-reminder image consolidation may use only exact available local PNG/JPEG source files; otherwise stop before deleting any source reminder.
-10. If reminders were already deleted, state that public recovery is unavailable. Do not invoke hidden adapter, SQLite, AppleScript, or UI automation paths; do not claim Recently Deleted state, iCloud convergence, iPhone visibility, or local UI behavior without direct evidence.
-11. For Native Extension work, resolve the exact reminder first. Use `inspect_reminder_native` for sections, tags, attachments, or sync evidence; then pass a fresh opaque reference to `organize_reminder` or `change_reminder_attachment`.
-12. After a write, trust only the returned Receipt. `verified` requires final read-back; `committed_verification_pending` and `partial_success` require a fresh read before another write.
+6. Treat `delete_reminder` as terminal on the public surface. It requires a fresh exact reference and verified local absence, but there is no public restore, undo, or Recently Deleted inspection tool.
+7. For destructive multi-step requests, resolve dependencies before deletion. Ground “top four” and similar selectors in one bounded `fetch_reminders` snapshot with exact scope, supported sort (`due`, `modified`, or `title`), limit, and IDs; API order is not current Reminders UI order. Read/inspect every source and destination, verify non-destructive work first, then delete exact sources one by one. Stop on any stale, pending, partial, failed, or manual-repair result.
+8. Existing image attachments cannot be exported or copied by the public tools. Consolidation requires exact available local PNG/JPEG files. If a source file is unavailable or a reminder is already deleted, stop and leave UI/Recently Deleted recovery to a separately validated local macOS worker; never invoke hidden adapter, SQLite, or AppleScript paths.
+9. For Native Extension work, resolve the exact reminder first. Use `inspect_reminder_native` for sections, tags, attachments, or sync evidence; then pass a fresh opaque reference to `organize_reminder` or `change_reminder_attachment`.
+10. After a write, trust only the returned Receipt. `verified` requires final read-back; `committed_verification_pending` and `partial_success` require a fresh read before another write.
 
 ## Permission and diagnosis
 
@@ -52,7 +50,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - `organize_reminder` supports section move and tag add/remove assignments. Unused-label row cleanup is withheld from public 0.3.
 - Image input must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, 16,384 pixels per dimension, and 40,000,000 pixels total.
 - `mobile_visible_likely` is CloudKit/mobile-sync evidence, not direct iPhone observation. Say “mobile visibility evidence was found”; claim device confirmation only after actual UI observation.
-- Attachment repair, attachment export/copy, backup/Snapshot apply, restore, log purge, native flag mutation, exact UI selection, and `show_reminder` are withheld until their public verification contracts are complete.
+- Attachment export/copy, repair, backup/Snapshot apply, restore, exact UI selection, log purge, native flag mutation, and `show_reminder` are withheld until their public verification contracts are complete.
 
 ## Write safety
 
@@ -60,14 +58,13 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Preserve all omitted fields and unrelated sections, tags, URLs, and attachments.
 - Resolve duplicate names before mutation. Never mutate a title-only match.
 - For broad completion, deletion, or many moves, show the bounded candidate set unless the user has already granted standing delegation.
-- Never use a hoped-for restore path as the safety control for deletion. Preserve every dependency and verify every prerequisite before the first destructive action.
+- Never rely on a hoped-for restore path as the safety control for deletion.
 - Do not continue after ambiguity, stale reference, sync uncertainty, partial success, or manual-repair status except with a read-only resolution step.
 - Never write directly to Reminders SQLite, invoke unexposed adapter writes, or claim sync from process exit alone.
 
 ## Reporting
 
 - Name the exact list and section when location matters; include exact Reminder IDs for follow-up.
-- For relative selections, report the API scope, sort, limit, and whether the result was truncated. Never describe this as the current UI order unless directly observed.
+- For relative selection, report API scope, sort, limit, and truncation; do not call it current UI order without direct observation.
 - Report `unchanged`, `verified`, `committed_verification_pending`, or `partial_success` exactly. Failed operations are not successes.
-- State unsupported recovery, attachment-copy, or UI-selection boundaries before any dependent deletion.
 - Keep responses concise and do not expose raw database rows, private paths, or full note bodies unless targeted troubleshooting requires them.

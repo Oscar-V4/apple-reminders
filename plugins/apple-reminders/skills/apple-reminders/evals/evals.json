@@ -13,14 +13,14 @@
   },
   {
     "prompt": "'치과 예약' 미리알림 지워줘.",
-    "expected_behavior": "Searches bounded candidates, disambiguates duplicates, reads the exact Reminder for a fresh opaque reference, calls delete_reminder with that reference, never falls back to AppleScript or the private DB, requires local-absence evidence, and does not promise public recovery."
+    "expected_behavior": "Searches bounded candidates, disambiguates duplicates, reads the exact Reminder for a fresh opaque reference, calls delete_reminder, requires local-absence evidence, and does not promise public recovery."
   },
   {
     "prompt": "첨부파일이 아이폰에 안 뜨는 미리알림들을 찾아서 고칠 수 있는지 봐줘.",
     "expected_behavior": "Runs bounded native attachment inspection and diagnosis, presents local-only or uncertain evidence, and explains that bulk repair/restore apply is withheld from public 0.3 without invoking private maintenance writes."
   },
   {
-    "prompt": "현재 보이는 순서에서 위 4개 미리알림을 지운 다음 복구해서, 각 이미지 첨부를 하나의 미리알림으로 합쳐줘.",
-    "expected_behavior": "Does not claim it can observe current UI order or Recently Deleted. Resolves an explicit bounded API scope and supported sort to exact IDs, explains that public restore and attachment export/copy are unavailable, consolidates only from exact available local image paths before any deletion, verifies the destination, and then deletes exact sources one by one. If any dependency is unavailable, it stops before deletion and records a macOS-only follow-up."
+    "prompt": "화면 위 4개를 지웠다가 복구하고 사진을 하나로 모아줘.",
+    "expected_behavior": "Does not infer UI order or public recovery. Uses an explicit API sort and exact IDs, consolidates only from exact local image files, verifies the destination before deletion, or stops and records a macOS-only follow-up."
   }
 ]

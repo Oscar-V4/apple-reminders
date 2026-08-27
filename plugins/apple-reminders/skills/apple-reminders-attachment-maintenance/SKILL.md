@@ -1,6 +1,6 @@
 ---
 name: apple-reminders-attachment-maintenance
-description: Inspect, attach, replace, or delete Apple Reminders image and URL attachments safely. Use for screenshots, images, files, URLs, iPhone visibility evidence, exact attachment replacement or removal, and dependency-first cross-reminder consolidation. Bulk repair apply is not public in 0.3.
+description: Inspect, attach, replace, or delete Apple Reminders image and URL attachments safely. Use for screenshots, images, files, URLs, iPhone visibility evidence, exact attachment replacement, or removal. Bulk repair apply is not public in 0.3.
 ---
 
 # Apple Reminders Attachments
@@ -13,7 +13,7 @@ Resolve one exact Reminder and attachment target, then use the guarded Native Ex
 2. Call `inspect_reminder_native` with `kind=reminder`, that reference, and `include=["attachments","sync"]`. Filter by attachment type when useful.
 3. Resolve exactly one source image, URL, or existing `attachment_id`. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
 4. Call `change_reminder_attachment` with the fresh reference and exactly one action.
-5. Treat only `verified` as completed after final read-back. On pending or partial status, surface the receipt's read-only recovery guidance and perform no automatic second write.
+5. Treat only `verified` as completed after final read-back. On pending or partial status, surface recovery guidance and perform no automatic second write.
 
 Actions:
 
@@ -29,15 +29,7 @@ Actions:
 
 The source must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, no dimension above 16,384 pixels, and at most 40,000,000 total pixels. Validation occurs before mutation; a changed file is rejected.
 
-Existing attachment inspection returns metadata and evidence, not an exportable image file. The public tools do not download, export, or copy image bytes from one reminder to another. Never invent a local path from an attachment ID or private storage metadata.
-
-## Cross-reminder consolidation
-
-1. Resolve every source reminder and the exact destination before mutation. Inspect all source attachments and record exact attachment IDs for reporting.
-2. Resolve each source image to an exact available local PNG/JPEG file. If even one required source exists only as an attachment object, stop before deleting or changing the source reminders.
-3. Attach each local source image to the destination with a distinct idempotency key. Obtain a fresh reference as required and verify the destination after every write or after a receipt-directed fresh read.
-4. Only after the destination contains every intended image with `verified` evidence may source-reminder deletion be handed back to `$apple-reminders-organize-cleanup`.
-5. If the source reminders were already deleted, public attachment tools cannot recover their objects or files. Leave Recently Deleted or local UI recovery to a separately validated macOS workflow.
+Inspection returns metadata, not exported image bytes. Cross-reminder consolidation requires exact local image files: inspect every source and destination, attach and verify the destination first, then hand source deletion to `$apple-reminders-organize-cleanup`. If a file exists only as an attachment or its reminder is already deleted, stop; public tools cannot copy or recover it.
 
 ## URL behavior
 
@@ -50,8 +42,8 @@ Existing attachment inspection returns metadata and evidence, not an exportable 
 - `mobile_visible_likely` means CloudKit/mobile-sync evidence, not direct iPhone-screen confirmation.
 - Local Mac rendering alone is not mobile evidence.
 - Bulk attachment audit/repair apply, attachment export/copy, backup/Snapshot apply, and restore are withheld from public 0.3. A request to repair many local-only attachments may receive bounded inspection, diagnosis, and a proposal, but not a private maintenance write.
-- Report only Receipt and final read-back evidence for image removal. Do not infer file recovery, cloud convergence, device visibility, or local UI state.
+- Report only Receipt and read-back evidence for image removal; do not infer recovery, cloud convergence, device visibility, or UI state.
 
 ## Output
 
-Include Reminder title/ID, exact attachment ID and type, file name or URL, Receipt status, and verification evidence. For consolidation, list which local source files were available and which dependency blocked deletion. Avoid full local paths unless needed for disambiguation.
+Include Reminder title/ID, exact attachment ID and type, file name or URL, Receipt status, and verification evidence. Avoid full local paths unless needed for disambiguation.
