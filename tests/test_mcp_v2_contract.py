@@ -159,6 +159,26 @@ def verified_mutation(tool_name: str) -> dict[str, object]:
     after: dict[str, object] = {"id": "PUBLIC-1"}
     if returns_reference:
         after["reference"] = REFERENCE
+    verification: dict[str, object] = {
+        "state": "read_back",
+        "write_performed": True,
+        "final_read": True,
+        "matched": True,
+    }
+    if tool_name == "recover_deleted_reminder":
+        verification.update(
+            {
+                "pre_save_guard_matched": True,
+                "destination_list_matched": True,
+                "attachments_active": True,
+                "attachments_preserved": True,
+                "attachment_bytes_verified": True,
+                "attachment_counts_match": True,
+                "before_attachment_count": 1,
+                "native_attachment_count": 1,
+                "after_attachment_count": 1,
+            }
+        )
     return {
         "schema_version": 2,
         "ok": True,
@@ -169,12 +189,7 @@ def verified_mutation(tool_name: str) -> dict[str, object]:
         "target": {},
         "before": None,
         "after": after,
-        "verification": {
-            "state": "read_back",
-            "write_performed": True,
-            "final_read": True,
-            "matched": True,
-        },
+        "verification": verification,
         "recovery": {
             "semantics": "read_before_retry",
             "automatic_retry_safe": False,
@@ -315,6 +330,35 @@ class PublicV2ResultContractTests(unittest.TestCase):
                         mutation_state="not_mutated",
                     )["ok"]
                 )
+
+    def test_verified_recovery_requires_complete_native_integrity_proof(self) -> None:
+        for field in (
+            "pre_save_guard_matched",
+            "destination_list_matched",
+            "attachments_active",
+            "attachments_preserved",
+            "attachment_bytes_verified",
+            "attachment_counts_match",
+        ):
+            fixture = verified_mutation("recover_deleted_reminder")
+            fixture["verification"][field] = False  # type: ignore[index]
+            with self.subTest(field=field):
+                with self.assertRaises(PublicResultContractError) as raised:
+                    validate_public_result(
+                        "recover_deleted_reminder", fixture, "committed"
+                    )
+                self.assertEqual(raised.exception.code, "unsafe_final_read")
+                self.assertEqual(
+                    raised.exception.path,
+                    f"$.verification.{field}",
+                )
+
+        fixture = verified_mutation("recover_deleted_reminder")
+        fixture["verification"]["native_attachment_count"] = 2  # type: ignore[index]
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("recover_deleted_reminder", fixture, "committed")
+        self.assertEqual(raised.exception.code, "unsafe_final_read")
+        self.assertEqual(raised.exception.path, "$.verification.attachment_counts")
 
     def test_schema_version_and_operation_are_exact_on_every_result(self) -> None:
         cases = [
@@ -753,6 +797,29 @@ class PublicV2ResultContractTests(unittest.TestCase):
                 with self.assertRaises(PublicResultContractError) as raised:
                     validate_public_result("diagnose_reminders", fixture)
                 self.assertEqual(raised.exception.code, "forbidden_internal_field")
+
+    def test_private_paths_and_native_details_are_forbidden_in_error_messages(self) -> None:
+        for detail in (
+            "Open ~/Library/Reminders/Container_v1/Stores/Stores.sqlite",
+            "Failed at /Users/example/Library/Reminders/Stores.sqlite",
+            "remkit_recover: REMStore saveSynchronouslyWithError: failed",
+        ):
+            fixture = read_failure("inspect_recently_deleted", "unexpected_error")
+            fixture["error"]["message"] = detail  # type: ignore[index]
+            with self.subTest(detail=detail):
+                with self.assertRaises(PublicResultContractError) as raised:
+                    validate_public_result("inspect_recently_deleted", fixture)
+                self.assertEqual(raised.exception.code, "private_error_detail")
+                self.assertEqual(raised.exception.path, "$.error.message")
+
+        fixture = read_failure("inspect_recently_deleted", "unexpected_error")
+        fixture["error"]["reason_code"] = (  # type: ignore[index]
+            "users_alice_library_reminders_stores_sqlite"
+        )
+        with self.assertRaises(PublicResultContractError) as raised:
+            validate_public_result("inspect_recently_deleted", fixture)
+        self.assertEqual(raised.exception.code, "private_error_detail")
+        self.assertEqual(raised.exception.path, "$.error.reason_code")
 
     def test_only_json_values_are_returned_and_cycles_are_rejected(self) -> None:
         unsupported = read_success("diagnose_reminders")

@@ -129,36 +129,186 @@
         },
         "oneOf": [
           {
+            "type": "object",
+            "required": [
+              "list_ids"
+            ],
             "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
               "status": {
-                "const": "incomplete"
+                "const": "incomplete",
+                "default": "incomplete"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
               }
             },
-            "anyOf": [
-              {
-                "required": [
-                  "list_ids"
-                ]
-              },
-              {
-                "required": [
-                  "due_start",
-                  "due_end"
-                ]
-              }
-            ]
+            "additionalProperties": false
           },
           {
+            "type": "object",
+            "required": [
+              "due_start",
+              "due_end"
+            ],
+            "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
+              "status": {
+                "const": "incomplete",
+                "default": "incomplete"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "due_start": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "due_end": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
             "required": [
               "status",
               "completion_start",
               "completion_end"
             ],
             "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
               "status": {
                 "const": "completed"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "completion_start": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "completion_end": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
               }
-            }
+            },
+            "additionalProperties": false
           }
         ],
         "x-rangeConstraints": [
@@ -1109,30 +1259,30 @@
         },
         "oneOf": [
           {
+            "type": "object",
             "required": [
               "kind"
             ],
             "properties": {
               "kind": {
                 "const": "list"
+              },
+              "account_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 20
               }
             },
-            "not": {
-              "anyOf": [
-                {
-                  "required": [
-                    "reminder_id"
-                  ]
-                },
-                {
-                  "required": [
-                    "attachment_limit"
-                  ]
-                }
-              ]
-            }
+            "additionalProperties": false
           },
           {
+            "type": "object",
             "required": [
               "kind",
               "reminder_id"
@@ -1140,22 +1290,20 @@
             "properties": {
               "kind": {
                 "const": "item"
+              },
+              "reminder_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "attachment_limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
               }
             },
-            "not": {
-              "anyOf": [
-                {
-                  "required": [
-                    "account_id"
-                  ]
-                },
-                {
-                  "required": [
-                    "limit"
-                  ]
-                }
-              ]
-            }
+            "additionalProperties": false
           }
         ],
         "required": [

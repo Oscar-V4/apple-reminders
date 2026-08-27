@@ -150,6 +150,59 @@ class CoreBackend:
         return payload
 
     @staticmethod
+    def _url_attachment_no_write_ambiguity_receipt(
+        payload: dict[str, Any],
+        *,
+        code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        payload["ok"] = False
+        payload["status"] = "failed_no_mutation"
+        verification = payload.setdefault("verification", {})
+        verification.update(
+            {
+                "state": "not_needed",
+                "write_performed": False,
+                "final_read": False,
+                "matched": False,
+            }
+        )
+        verification["url_attachment"] = {
+            "state": "ambiguous",
+            "status": "failed_no_mutation",
+            "error_code": code,
+        }
+        recovery = payload.setdefault("recovery", {})
+        recovery.update(
+            {
+                "semantics": "inspect_url_attachments_before_exact_cleanup",
+                "automatic_retry_safe": False,
+                "manual_action": (
+                    "Read the exact Reminder to obtain a fresh Reference, use "
+                    "inspect_reminder_native with that Reference, then use "
+                    "change_reminder_attachment only for an exact attachment ID "
+                    "that the user intends to clean up."
+                ),
+            }
+        )
+        payload["error"] = {
+            "code": "ambiguous_scope",
+            "reason_code": code,
+            "message": message,
+            "retryable": False,
+        }
+        payload["next_action"] = {
+            "kind": "fresh_read",
+            "tool": "read_reminder",
+            "retry_original_once": False,
+            "message": (
+                "Read the exact Reminder to obtain a fresh Reference before native "
+                "attachment inspection; do not retry the URL patch."
+            ),
+        }
+        return payload
+
+    @staticmethod
     def _is_rfc3339_timestamp(value: Any) -> bool:
         if not isinstance(value, str) or not re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})",
@@ -276,6 +329,13 @@ class CoreBackend:
                 and item.get("type") == "url"
                 and item.get("url") == url
             ]
+            other_url_attachments = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") != url
+            ]
             mutation_tool = "attach_url_to_reminder"
             expected_operation = "attach_url"
             attachment_arguments: dict[str, Any] = {
@@ -289,6 +349,7 @@ class CoreBackend:
                 and previous_url != url
             )
             ambiguity_code: str | None = None
+            no_write_ambiguity = False
             reuse_existing = False
             if list_payload.get("truncated") is True:
                 ambiguity_code = "native_url_attachment_inventory_truncated"
@@ -300,6 +361,16 @@ class CoreBackend:
                 # uncertain. Replacing A now would create a second B. Preserve
                 # both exact objects and ask for an explicit attachment cleanup.
                 ambiguity_code = "target_url_attachment_already_exists"
+            elif (
+                len(matching_target) == 1
+                and initial_eventkit_status == "unchanged"
+                and other_url_attachments
+            ):
+                # A fresh same-URL request no longer carries the A -> B lineage
+                # from an earlier partial composed write. One B plus another URL
+                # could be either intentional multi-attachment state or a stale A.
+                # Never infer which object to delete from this state alone.
+                no_write_ambiguity = True
             elif len(matching_target) == 1:
                 reuse_existing = True
             elif replacing_previous and len(matching_previous) > 1:
@@ -339,6 +410,22 @@ class CoreBackend:
                 }
                 attach_payload: dict[str, Any] = {}
                 attach_is_error = False
+            elif no_write_ambiguity:
+                attachment = copy.deepcopy(dict(matching_target[0]))
+                self._url_attachment_no_write_ambiguity_receipt(
+                    payload,
+                    code="ambiguous_visible_url_attachment",
+                    message=(
+                        "The EventKit URL was already unchanged and one matching "
+                        "visible URL attachment exists, but other URL attachments are "
+                        "also present. No attachment was changed because the plugin "
+                        "cannot infer whether another object is an intentional link or "
+                        "a stale replacement source. Inspect the exact native "
+                        "attachments before cleaning up one exact attachment ID."
+                    ),
+                )
+                attach_payload = {}
+                attach_is_error = True
             elif ambiguity_code is not None:
                 self._url_attachment_partial_receipt(
                     payload,
@@ -361,7 +448,9 @@ class CoreBackend:
                     attach_payload,
                     expected_operation=expected_operation,
                 )
-                if not attach_is_error and ambiguity_code is None
+                if not attach_is_error
+                and ambiguity_code is None
+                and not no_write_ambiguity
                 else None
             )
             candidate_attachment = (
@@ -382,7 +471,7 @@ class CoreBackend:
                 isinstance(candidate_attachment, dict)
                 and candidate_attachment.get("url") == url
             )
-            if reuse_existing or ambiguity_code is not None:
+            if reuse_existing or ambiguity_code is not None or no_write_ambiguity:
                 pass
             elif (
                 attach_is_error
@@ -479,6 +568,13 @@ class CoreBackend:
             verification["state"] = "partial"
             verification["final_read"] = True
             verification["matched"] = True
+            return payload
+        if payload.get("status") == "failed_no_mutation":
+            verification = payload.setdefault("verification", {})
+            verification["state"] = "read_back"
+            verification["write_performed"] = False
+            verification["final_read"] = True
+            verification["matched"] = False
             return payload
         payload["status"] = (
             "unchanged"

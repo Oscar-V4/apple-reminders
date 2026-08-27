@@ -23,6 +23,52 @@ DELETED_REFERENCE_PATTERN = re.compile(r"^del1\.[A-Za-z0-9_-]{32,4091}$")
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,256}$")
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MutationState = Literal["not_mutated", "committed", "unknown"]
+RECOVERY_PUBLIC_REASON_CODES = frozenset(
+    {
+        "active_readback_pending",
+        "adapter_launch_failed",
+        "adapter_output_too_large",
+        "adapter_read_failed",
+        "adapter_timeout",
+        "adapter_unavailable",
+        "concurrent_modification",
+        "cross_account_restore_not_supported",
+        "database_resolution_failed",
+        "deleted_image_bytes_mismatch",
+        "deleted_image_bytes_unavailable",
+        "deleted_image_digest_unavailable",
+        "deleted_reminder_not_recoverable",
+        "eventkit_recovery_readback_pending",
+        "expired_or_consumed_deleted_reference",
+        "idempotency_key_conflict",
+        "invalid_adapter_response",
+        "invalid_deleted_guard",
+        "invalid_deleted_reference",
+        "invalid_deleted_snapshot",
+        "invalid_deleted_read_kind",
+        "invalid_native_recovery_guard",
+        "invalid_private_version",
+        "invalid_recovery_input",
+        "invalid_recovery_receipt",
+        "native_recovery_guard_timeout",
+        "native_recovery_outcome_unknown",
+        "recovery_dispatch_failed",
+        "recovery_not_dispatched",
+        "recovery_post_write_verification_failed",
+        "recovery_readback_mismatch",
+    }
+)
+RECOVERY_DEFAULT_REASON_BY_CODE = {
+    "not_found": "deleted_reminder_not_recoverable",
+    "concurrent_modification": "concurrent_modification",
+    "permission_denied": "reminders_access_unavailable",
+    "unsupported_capability": "recently_deleted_unsupported",
+    "invalid_input": "invalid_recovery_input",
+    "rate_limited": "recently_deleted_rate_limited",
+    "sync_pending": "native_recovery_outcome_unknown",
+    "schema_mismatch": "recently_deleted_schema_mismatch",
+    "unexpected_error": "recently_deleted_operation_failed",
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +78,7 @@ class DeletedGuard:
     private_version: int
     deleted_at: str
     attachment_digest: str
+    native_guard_digest: str
     account_id: str
 
 
@@ -57,6 +104,7 @@ class _DeletedGrant:
 class _IdempotentResult:
     fingerprint: str
     payload: Mapping[str, Any]
+    mutation_state: MutationState
 
 
 class RecoveryBackendPort(Protocol):
@@ -96,11 +144,44 @@ class DeletedReferenceRejected(ValueError):
         self.reason_code = reason_code
 
 
+def recovery_reason_code(code: str, value: Any) -> str:
+    candidate = re.sub(r"[^a-z0-9_]+", "_", str(value or "").lower()).strip("_")
+    if candidate in RECOVERY_PUBLIC_REASON_CODES:
+        return candidate
+    return RECOVERY_DEFAULT_REASON_BY_CODE.get(
+        code,
+        "recently_deleted_operation_failed",
+    )
+
+
+def recovery_error_message(code: str, reason_code: str) -> str:
+    """Return a fixed public message without adapter paths or helper details."""
+
+    if code == "not_found":
+        return "The deleted Reminder is not available in Recently Deleted."
+    if code == "concurrent_modification":
+        return "The deleted Reminder changed; inspect the exact item again before recovery."
+    if code == "permission_denied":
+        return "Reminders access is unavailable for this local operation."
+    if code == "unsupported_capability":
+        return "Recently Deleted recovery is unsupported in this local environment."
+    if code == "invalid_input":
+        return "The Recently Deleted request is invalid."
+    if code == "rate_limited":
+        return "Recently Deleted is temporarily rate-limited."
+    if code == "sync_pending":
+        return "Recovery needs a fresh exact read before another mutation."
+    if code == "schema_mismatch":
+        return "The local Recently Deleted schema is incompatible with this plugin build."
+    return "The local Recently Deleted operation failed without a safe public detail."
+
+
 def _public_error(exc: RecoveryBackendError) -> dict[str, Any]:
+    reason_code = recovery_reason_code(exc.code, exc.reason_code)
     return {
         "code": exc.code,
-        "reason_code": exc.reason_code,
-        "message": str(exc)[:2000],
+        "reason_code": reason_code,
+        "message": recovery_error_message(exc.code, reason_code),
         "retryable": exc.retryable,
     }
 
@@ -205,10 +286,20 @@ class RecoveryFacade:
         self._lock = threading.RLock()
 
     def call(self, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        payload, _ = self.call_with_state(tool_name, arguments)
+        return payload
+
+    def call_with_state(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], MutationState | None]:
+        """Return public JSON plus an internal mutation fact for the server boundary."""
+
         if tool_name == "inspect_recently_deleted":
-            return self.inspect(arguments)
+            return self.inspect(arguments), None
         if tool_name == "recover_deleted_reminder":
-            return self.recover(arguments)
+            return self._recover_with_state(arguments)
         raise ValueError(f"unsupported recovery tool: {tool_name}")
 
     def _purge_references(self) -> None:
@@ -271,6 +362,7 @@ class RecoveryFacade:
             or not isinstance(guard.deleted_at, str)
             or not guard.deleted_at
             or not HEX_64_PATTERN.fullmatch(guard.attachment_digest)
+            or not HEX_64_PATTERN.fullmatch(guard.native_guard_digest)
             or not isinstance(guard.account_id, str)
             or not guard.account_id
         ):
@@ -400,6 +492,13 @@ class RecoveryFacade:
         return result
 
     def recover(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        payload, _ = self._recover_with_state(arguments)
+        return payload
+
+    def _recover_with_state(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], MutationState]:
         reference = arguments.get("reference")
         list_id = arguments.get("list_id")
         key = arguments.get("idempotency_key")
@@ -410,12 +509,15 @@ class RecoveryFacade:
             or not isinstance(key, str)
             or not IDEMPOTENCY_PATTERN.fullmatch(key)
         ):
-            return self._mutation_failure(
-                list_id=list_id if isinstance(list_id, str) else None,
-                reminder_id=None,
-                code="invalid_input",
-                reason_code="invalid_recovery_input",
-                message="reference, list_id, and a valid idempotency_key are required.",
+            return (
+                self._mutation_failure(
+                    list_id=list_id if isinstance(list_id, str) else None,
+                    reminder_id=None,
+                    code="invalid_input",
+                    reason_code="invalid_recovery_input",
+                    message="reference, list_id, and a valid idempotency_key are required.",
+                ),
+                "not_mutated",
             )
 
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
@@ -430,28 +532,34 @@ class RecoveryFacade:
             previous = self._idempotency.get(key_hash)
             if previous is not None:
                 if previous.fingerprint != fingerprint:
-                    return self._mutation_failure(
-                        list_id=list_id,
-                        reminder_id=None,
-                        code="invalid_input",
-                        reason_code="idempotency_key_conflict",
-                        message="The idempotency key was already used for different recovery input.",
+                    return (
+                        self._mutation_failure(
+                            list_id=list_id,
+                            reminder_id=None,
+                            code="invalid_input",
+                            reason_code="idempotency_key_conflict",
+                            message="The idempotency key was already used for different recovery input.",
+                        ),
+                        "not_mutated",
                     )
                 replay = copy.deepcopy(dict(previous.payload))
                 replay["replayed"] = True
                 replay["idempotency_key_hash"] = key_hash
-                return replay
+                return replay, previous.mutation_state
 
         try:
             guard = self._consume_reference(reference)
         except DeletedReferenceRejected as exc:
-            return self._mutation_failure(
-                list_id=list_id,
-                reminder_id=None,
-                code="concurrent_modification",
-                reason_code=exc.reason_code,
-                message=str(exc),
-                next_tool="inspect_recently_deleted",
+            return (
+                self._mutation_failure(
+                    list_id=list_id,
+                    reminder_id=None,
+                    code="concurrent_modification",
+                    reason_code=exc.reason_code,
+                    message=str(exc),
+                    next_tool="inspect_recently_deleted",
+                ),
+                "not_mutated",
             )
 
         try:
@@ -511,8 +619,9 @@ class RecoveryFacade:
             self._idempotency[key_hash] = _IdempotentResult(
                 fingerprint=fingerprint,
                 payload=copy.deepcopy(result),
+                mutation_state=outcome.mutation_state,
             )
-        return result
+        return result, outcome.mutation_state
 
 
 __all__ = [
@@ -521,4 +630,6 @@ __all__ = [
     "RecoveryBackendError",
     "RecoveryFacade",
     "RecoveryOutcome",
+    "recovery_error_message",
+    "recovery_reason_code",
 ]

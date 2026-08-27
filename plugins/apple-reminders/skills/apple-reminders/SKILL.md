@@ -40,6 +40,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Do not invent an alarm from a due date. Absolute alarms and coordinate-backed enter/leave location alarms are supported; relative and messaging alarms are not.
 - Only one validated recurrence rule is supported and it requires a due date.
 - A non-null URL on Core create/change is one hybrid operation: EventKit metadata, one visible native URL attachment, and final exact read. Do not add the same URL again after `verified`.
+- If a fresh same-URL patch returns `ambiguous_visible_url_attachment`, do not retry or guess which extra URL is stale. Follow `read_reminder` to obtain a fresh Reference, inspect native attachments, and clean up only an exact user-intended attachment ID.
 - Clearing Core `patch.url` does not delete existing URL attachment objects; attachment deletion is explicit.
 
 ## Lists, sections, tags, and attachments
@@ -51,6 +52,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Cross-reminder image copy uses `change_reminder_attachment` action `copy_image` with fresh destination and source `rev1` references plus one exact active source image attachment ID. It never exports a private file path or mutates the source.
 - `mobile_visible_likely` is CloudKit/mobile-sync evidence, not direct iPhone observation. Say “mobile visibility evidence was found”; claim device confirmation only after actual UI observation.
 - Recently Deleted inspection/recovery is a local macOS, private-framework capability within the 30-day retention window. Treat success on one tested Mac as local evidence, not a generic macOS/account guarantee.
+- Exact deleted-item inspection authorizes recovery only after both the private-store and native ReminderKit snapshot guards are captured and any local image backing bytes match their stored SHA-512. Missing bytes or proof means no `del1`, not permission to weaken verification.
 - Attachment export, attachment repair apply, backup/Snapshot apply, log purge, native flag mutation, and `show_reminder` are withheld until their public verification contracts are complete.
 
 ## Write safety

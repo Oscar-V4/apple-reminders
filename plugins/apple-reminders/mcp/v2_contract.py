@@ -126,6 +126,25 @@ REFERENCE_PATTERN = re.compile(r"^rev1\.[A-Za-z0-9_-]{32,4091}$")
 DELETED_REFERENCE_PATTERN = re.compile(r"^del1\.[A-Za-z0-9_-]{32,4091}$")
 CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PRIVATE_ERROR_TEXT_PATTERN = re.compile(
+    r"(?:"
+    r"~/(?:Library|Documents|Desktop|Downloads|Applications|private|var|tmp)\b"
+    r"|/(?:Users|private|var|tmp|Volumes)/"
+    r"|(?:^|\W)Library/Reminders/"
+    r"|\bContainer_v\d+\b"
+    r"|\bStores(?:-wal|-shm)?\.sqlite\b"
+    r"|\bremkit_[a-z0-9_]+\b"
+    r"|\bReminderKitInternal\b"
+    r"|\bREM(?:Store|Reminder|SaveRequest)\b"
+    r"|saveSynchronouslyWithError:"
+    r")",
+    re.IGNORECASE,
+)
+PRIVATE_ERROR_REASON_PATTERN = re.compile(
+    r"(?:^|_)(?:users|private_var|library_reminders|container_v\d+|"
+    r"stores_sqlite|remkit|reminderkitinternal|remstore)(?:_|$)",
+    re.IGNORECASE,
+)
 
 READ_BASE_FIELDS = frozenset({"schema_version", "ok", "status", "operation"})
 READ_SUCCESS_FIELDS = READ_BASE_FIELDS | {"data", "warnings"}
@@ -503,7 +522,15 @@ def _validate_error(
             tool_name=tool_name,
             mutation_state=mutation_state,
         )
-    _bounded_text(
+    if PRIVATE_ERROR_REASON_PATTERN.search(reason):
+        _fail(
+            "private_error_detail",
+            "$.error.reason_code",
+            "reason_code contains private path or native implementation detail",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    message = _bounded_text(
         value.get("message"),
         path="$.error.message",
         maximum=MAX_MESSAGE_LENGTH,
@@ -511,6 +538,14 @@ def _validate_error(
         mutation_state=mutation_state,
         code="invalid_error",
     )
+    if PRIVATE_ERROR_TEXT_PATTERN.search(message):
+        _fail(
+            "private_error_detail",
+            "$.error.message",
+            "error message contains a private path or native implementation detail",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
     if not isinstance(value.get("retryable"), bool):
         _fail(
             "invalid_error",
@@ -1391,6 +1426,46 @@ def _validate_mutation_result(
                 tool_name=tool_name,
                 mutation_state=mutation_state,
             )
+        if status == "verified" and tool_name == "recover_deleted_reminder":
+            for field in (
+                "pre_save_guard_matched",
+                "destination_list_matched",
+                "attachments_active",
+                "attachments_preserved",
+                "attachment_bytes_verified",
+                "attachment_counts_match",
+            ):
+                if verification.get(field) is not True:
+                    _fail(
+                        "unsafe_final_read",
+                        f"$.verification.{field}",
+                        "verified recovery requires affirmative native integrity evidence",
+                        tool_name=tool_name,
+                        mutation_state=mutation_state,
+                    )
+            count_fields = (
+                "before_attachment_count",
+                "native_attachment_count",
+                "after_attachment_count",
+            )
+            counts = tuple(verification.get(field) for field in count_fields)
+            if (
+                not all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                    for value in counts
+                )
+                or counts[0] != counts[1]
+                or counts[1] != counts[2]
+            ):
+                _fail(
+                    "unsafe_final_read",
+                    "$.verification.attachment_counts",
+                    "verified recovery requires equal non-negative pre/native/post attachment counts",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                )
     elif status == "failed_no_mutation":
         if verification.get("write_performed") is not False:
             _fail(

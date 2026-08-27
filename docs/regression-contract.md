@@ -88,8 +88,11 @@ even though optional MCP `outputSchema` descriptors are omitted from
     databases, backups, caches, screenshots, and other local artifacts.
 15. Recently Deleted list mode issues no write authority. Exact item mode alone
     issues one short-lived `del1`; recovery consumes it once, rejects changed
-    private guards or cross-account destinations, preserves attachments, and
-    requires exact EventKit read-back before `verified`.
+    private and native pre-save guards or cross-account destinations, verifies
+    actual image backing bytes plus pre/native/post attachment counts, and
+    requires exact EventKit read-back before `verified`. Any post-save read
+    failure preserves a committed/pending outcome. Backend mutation state is
+    carried independently from the public status into contract validation.
 16. `copy_image` independently revalidates fresh source and destination `rev1`
     References, consumes both after dispatch, keeps backing paths private,
     preserves the source, and requires byte-identical SHA-512, size, and
@@ -102,6 +105,19 @@ even though optional MCP `outputSchema` descriptors are omitted from
     in time, operates in authorized 25–40 item chunks, verifies every item, and
     halts the whole run at the first ambiguous, stale, pending, partial, or
     failed result.
+19. A URL A-to-B retry that observes native A+B after EventKit already reads B
+    never reports `unchanged` and never guesses which extra URL is disposable.
+    It returns a no-write ambiguity, issues no fresh writable Reference, and
+    directs an exact native inspection before attachment-ID cleanup.
+20. Every top-level discriminated MCP input repeats its callable fields inside
+    each object branch. Host schema conversion must expose bounded fetch
+    filters and exact Recently Deleted selectors instead of reducing a branch
+    to only its `status` or `kind` discriminator.
+21. Recovery errors expose fixed public messages only. Home-relative or
+    absolute paths, Reminders store filenames, and native helper/class details
+    are contract failures. Adapter-missing and launch-failed phases preserve a
+    proven no-write result; timeout or malformed post-launch output remains an
+    unknown possible write.
 
 ## Deliberately withheld behavior
 

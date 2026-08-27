@@ -35,6 +35,22 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
+- Made top-level discriminated MCP schemas branch-complete so Codex discovery
+  exposes all bounded `fetch_reminders` and exact Recently Deleted arguments,
+  instead of reducing branches to only a status or kind discriminator.
+- Kept URL A-to-B retry state honest: if EventKit already reads B while native
+  attachments contain B plus another URL, the plugin performs no write,
+  returns an ambiguity, and requires exact attachment inspection rather than
+  reporting `unchanged` or guessing which link to delete.
+- Added a native ReminderKit snapshot guard immediately before deleted-item
+  recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
+  count agreement, and independent mutation-state transport into public
+  contract validation. Missing proof or any post-save read failure now fails
+  closed without inventing a verified or no-write outcome.
+- Mapped recovery failures to fixed public messages so private store paths and
+  native helper details cannot enter structured output. Adapter-missing and
+  launch-failed cases now retain proven pre-dispatch `failed_no_mutation`, while
+  timeouts and malformed post-launch output remain unknown.
 - Removed an unsafe nil-completion ReminderKit sync trigger that could crash
   after a successful recovery save. A helper crash or malformed post-dispatch
   result is now conservatively verification-pending rather than a false

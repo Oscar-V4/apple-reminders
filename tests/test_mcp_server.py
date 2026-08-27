@@ -317,6 +317,26 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
     after: dict[str, Any] = {}
     if name in REFERENCE_MUTATIONS:
         after = {"reminder_id": REMINDER_ID, "reference": REFERENCE}
+    verification = {
+        "state": "read_back",
+        "write_performed": True,
+        "final_read": True,
+        "matched": True,
+    }
+    if name == "recover_deleted_reminder":
+        verification.update(
+            {
+                "pre_save_guard_matched": True,
+                "destination_list_matched": True,
+                "attachments_active": True,
+                "attachments_preserved": True,
+                "attachment_bytes_verified": True,
+                "attachment_counts_match": True,
+                "before_attachment_count": 1,
+                "native_attachment_count": 1,
+                "after_attachment_count": 1,
+            }
+        )
     return {
         "schema_version": 2,
         "ok": True,
@@ -327,12 +347,7 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
         "target": {},
         "before": {},
         "after": after,
-        "verification": {
-            "state": "read_back",
-            "write_performed": True,
-            "final_read": True,
-            "matched": True,
-        },
+        "verification": verification,
         "recovery": {
             "semantics": "verified_final_read",
             "automatic_retry_safe": False,
@@ -500,6 +515,59 @@ print(json.dumps(sorted(
 
 
 class McpProtocolTests(unittest.TestCase):
+    def test_adapter_dispatch_phase_is_private_and_only_marks_launcher_failures(self) -> None:
+        with mock.patch.object(
+            self.server,
+            "adapter_path",
+            return_value=Path("/definitely/missing/reminders_adapter.py"),
+        ):
+            missing, missing_error = self.server.invoke_adapter(["read_reminder"])
+
+        self.assertTrue(missing_error)
+        self.assertEqual(missing["__dispatch_phase"], "not_started")
+        self.assertNotIn("__dispatch_phase", self.server.sanitize_payload(missing))
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"ok":true,"status":"verified"}',
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                self.server,
+                "adapter_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(self.server.subprocess, "run", return_value=completed),
+        ):
+            success, success_error = self.server.invoke_adapter(["read_reminder"])
+
+        self.assertFalse(success_error)
+        self.assertNotIn("__dispatch_phase", success)
+
+        spoofed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=(
+                '{"ok":false,"__dispatch_phase":"not_started",'
+                '"error":{"code":"invalid_adapter_response"}}'
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                self.server,
+                "adapter_path",
+                return_value=Path(__file__),
+            ),
+            mock.patch.object(self.server.subprocess, "run", return_value=spoofed),
+        ):
+            child_payload, child_error = self.server.invoke_adapter(["read_reminder"])
+
+        self.assertTrue(child_error)
+        self.assertNotIn("__dispatch_phase", child_payload)
+
     def setUp(self) -> None:
         from mcp import server
 
@@ -762,6 +830,86 @@ class McpProtocolTests(unittest.TestCase):
                 self.assertEqual(
                     summary["next_read_only_action"]["tool"], recovery_tool
                 )
+
+    def test_recovery_without_attachment_proof_uses_safe_contract_fallback(self) -> None:
+        facade = mock.Mock()
+        unsafe = valid_public_result(
+            "recover_deleted_reminder",
+            VALID_ARGUMENTS["recover_deleted_reminder"],
+        )
+        unsafe["verification"]["attachments_preserved"] = False
+        facade.call.return_value = unsafe
+        self.server._V2_RECOVERY_FACADE = facade
+        self.server.RECENT_CALLS.clear()
+
+        result = self.server.call_tool(
+            "recover_deleted_reminder",
+            copy.deepcopy(VALID_ARGUMENTS["recover_deleted_reminder"]),
+        )
+
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(
+            payload["error"]["reason_code"], "public_result_contract_failed"
+        )
+        self.assertEqual(payload["next_action"]["tool"], "read_reminder")
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertTrue(summary["needs_attention"])
+        self.assertEqual(
+            summary["next_read_only_action"]["tool"], "read_reminder"
+        )
+
+    def test_recovery_preserves_independent_mutation_state_across_facade_boundary(
+        self,
+    ) -> None:
+        arguments = copy.deepcopy(VALID_ARGUMENTS["recover_deleted_reminder"])
+        false_no_write, _ = self.server._v2_pre_dispatch_failure(
+            "recover_deleted_reminder",
+            arguments,
+            code="unexpected_error",
+            reason_code="fault_injected_no_mutation_claim",
+            message="Fault-injected receipt conflicts with the mutation fact.",
+            retryable=False,
+        )
+
+        class ConflictingStateFacade:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                self.calls += 1
+                self.name = name
+                self.supplied = copy.deepcopy(dict(supplied))
+                return copy.deepcopy(false_no_write), "committed"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("server discarded the independent mutation state")
+
+        facade = ConflictingStateFacade()
+        self.server._V2_RECOVERY_FACADE = facade
+        self.server.RECENT_CALLS.clear()
+
+        result = self.server.call_tool("recover_deleted_reminder", arguments)
+
+        payload = result["structuredContent"]
+        self.assertEqual(facade.calls, 1)
+        self.assertEqual(facade.name, "recover_deleted_reminder")
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(
+            payload["error"]["reason_code"], "public_result_contract_failed"
+        )
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(payload["next_action"]["tool"], "read_reminder")
+        self.assertNotIn("mutation_state", payload)
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertEqual(summary["write_state"], "unknown")
 
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
         notes = "n" * 70_000

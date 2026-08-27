@@ -37,6 +37,7 @@ For consolidation, inspect all dependencies, copy and verify every destination i
 ## URL behavior
 
 - A URL supplied to Core `create_reminder` or `change_reminder` is already a combined EventKit + visible-attachment operation. Do not add it again after `verified`.
+- If a later same-URL Core patch finds the matching URL plus another URL attachment, it intentionally performs no write and returns an ambiguity. Call `read_reminder`, inspect the exact native attachment IDs, and delete only a user-intended stale object; never infer that every non-matching link is the old URL.
 - Use `attach_url` here for an additional URL attachment or explicit recovery after resolving a partial Core write.
 - Clearing Core `patch.url` does not delete attachment objects. Use an exact attachment ID for deletion.
 

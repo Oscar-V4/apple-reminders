@@ -14,6 +14,8 @@ if __package__:
         DeletedSnapshot,
         RecoveryBackendError,
         RecoveryOutcome,
+        recovery_error_message,
+        recovery_reason_code,
     )
 else:  # pragma: no cover - exercised by the stdio entry point
     from v2_recovery import (
@@ -21,6 +23,8 @@ else:  # pragma: no cover - exercised by the stdio entry point
         DeletedSnapshot,
         RecoveryBackendError,
         RecoveryOutcome,
+        recovery_error_message,
+        recovery_reason_code,
     )
 
 
@@ -51,12 +55,6 @@ PUBLIC_CODES = {
 }
 
 
-def _reason(value: Any, fallback: str) -> str:
-    candidate = value if isinstance(value, str) else fallback
-    normalized = re.sub(r"[^a-z0-9_]+", "_", candidate.lower()).strip("_")
-    return (normalized or fallback)[:128]
-
-
 def _public_code(value: Any) -> str:
     if value in PUBLIC_CODES:
         return str(value)
@@ -79,12 +77,14 @@ def _public_code(value: Any) -> str:
 def _error_from_payload(payload: Mapping[str, Any]) -> RecoveryBackendError:
     raw = payload.get("error") if isinstance(payload.get("error"), Mapping) else {}
     code = _public_code(raw.get("code") or payload.get("code"))
-    reason = _reason(raw.get("reason_code") or raw.get("code"), "adapter_read_failed")
-    message = raw.get("message") or payload.get("message") or "The local Recently Deleted read failed."
+    reason = recovery_reason_code(
+        code,
+        raw.get("reason_code") or raw.get("code") or "adapter_read_failed",
+    )
     return RecoveryBackendError(
         code,
         reason,
-        str(message),
+        recovery_error_message(code, reason),
         retryable=bool(raw.get("retryable")) and code not in {"sync_pending", "concurrent_modification"},
     )
 
@@ -176,12 +176,14 @@ class RecoveryBackend:
             "store_identity": guard.get("store_identity"),
             "deleted_at": guard.get("deleted_at"),
             "attachment_digest": guard.get("attachment_digest"),
+            "native_guard_digest": guard.get("native_guard_digest"),
             "account_id": guard.get("account_id"),
         }
         if (
             values["reminder_id"] != reminder_id
             or not all(isinstance(value, str) and value for value in values.values())
             or not HEX_64_PATTERN.fullmatch(str(values["attachment_digest"]))
+            or not HEX_64_PATTERN.fullmatch(str(values["native_guard_digest"]))
         ):
             raise RecoveryBackendError(
                 "unexpected_error",
@@ -246,6 +248,58 @@ class RecoveryBackend:
             mutation_state="unknown",
         )
 
+    @staticmethod
+    def _not_dispatched(
+        guard: DeletedGuard,
+        list_id: str,
+        payload: Mapping[str, Any],
+    ) -> RecoveryOutcome:
+        raw_error = payload.get("error") if isinstance(payload.get("error"), Mapping) else {}
+        code = _public_code(raw_error.get("code"))
+        reason_code = recovery_reason_code(
+            code,
+            raw_error.get("reason_code")
+            or raw_error.get("code")
+            or "recovery_not_dispatched",
+        )
+        return RecoveryOutcome(
+            receipt={
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "recover_deleted_reminder",
+                "operation_id": str(uuid.uuid4()),
+                "backend": "native_extension",
+                "target": {"reminder_id": guard.reminder_id, "list_id": list_id},
+                "before": {},
+                "after": {},
+                "verification": {
+                    "state": "not_needed",
+                    "write_performed": False,
+                    "final_read": False,
+                },
+                "recovery": {
+                    "semantics": "fix_local_environment_then_inspect_again",
+                    "automatic_retry_safe": False,
+                },
+                "error": {
+                    "code": code,
+                    "reason_code": reason_code,
+                    "message": recovery_error_message(code, reason_code),
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "diagnose",
+                    "tool": "diagnose_reminders",
+                    "retry_original_once": False,
+                    "message": (
+                        "Diagnose the local Native Extension, then inspect the exact "
+                        "deleted Reminder again before a new recovery attempt."
+                    ),
+                },
+            },
+            mutation_state="not_mutated",
+        )
+
     def recover(
         self,
         guard: DeletedGuard,
@@ -266,6 +320,8 @@ class RecoveryBackend:
             guard.deleted_at,
             "--if-attachment-digest",
             guard.attachment_digest,
+            "--if-native-guard-digest",
+            guard.native_guard_digest,
             "--idempotency-key",
             idempotency_key,
         ]
@@ -274,6 +330,8 @@ class RecoveryBackend:
             payload,
             expected_operation="recover_deleted_reminder",
         ) is not None or payload.get("status") not in STATUSES:
+            if payload.get("__dispatch_phase") == "not_started":
+                return self._not_dispatched(guard, list_id, payload)
             return self._pending(
                 guard,
                 list_id,
@@ -286,10 +344,33 @@ class RecoveryBackend:
         after = _public_recovered_after(payload)
         raw_error = payload.get("error") if isinstance(payload.get("error"), Mapping) else {}
         code = _public_code(raw_error.get("code"))
-        reason_code = _reason(raw_error.get("reason_code") or raw_error.get("code"), "recovery_failed")
-        message = str(raw_error.get("message") or "The deleted Reminder recovery failed.")[:2000]
+        reason_code = recovery_reason_code(
+            code,
+            raw_error.get("reason_code") or raw_error.get("code") or "recovery_failed",
+        )
+        message = recovery_error_message(code, reason_code)
 
         if status == "failed_no_mutation":
+            raw_verification = payload.get("verification")
+            if (
+                not isinstance(raw_verification, Mapping)
+                or raw_verification.get("state")
+                not in {"not_performed", "not_needed", "read_back"}
+                or raw_verification.get("write_performed") is not False
+                or raw_verification.get("final_read") not in {None, False}
+            ):
+                return self._pending(
+                    guard,
+                    list_id,
+                    reason_code="invalid_recovery_receipt",
+                    message=(
+                        "Recovery returned a contradictory no-write Receipt; read the "
+                        "exact Reminder before another mutation."
+                    ),
+                    before=before,
+                    after=after,
+                    write_performed=None,
+                )
             receipt: dict[str, Any] = {
                 "ok": False,
                 "status": status,
@@ -325,6 +406,47 @@ class RecoveryBackend:
             return RecoveryOutcome(receipt=receipt, mutation_state="not_mutated")
 
         if status == "verified":
+            raw_verification = payload.get("verification")
+            counts = (
+                raw_verification.get("before_attachment_count"),
+                raw_verification.get("native_attachment_count"),
+                raw_verification.get("after_attachment_count"),
+            ) if isinstance(raw_verification, Mapping) else (None, None, None)
+            counts_proven = (
+                all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                    for value in counts
+                )
+                and counts[0] == counts[1] == counts[2]
+            )
+            if (
+                not isinstance(raw_verification, Mapping)
+                or raw_verification.get("state") != "read_back"
+                or raw_verification.get("write_performed") is not True
+                or raw_verification.get("final_read") is not True
+                or raw_verification.get("matched") is not True
+                or raw_verification.get("pre_save_guard_matched") is not True
+                or raw_verification.get("destination_list_matched") is not True
+                or raw_verification.get("attachments_active") is not True
+                or raw_verification.get("attachments_preserved") is not True
+                or raw_verification.get("attachment_bytes_verified") is not True
+                or raw_verification.get("attachment_counts_match") is not True
+                or not counts_proven
+            ):
+                return self._pending(
+                    guard,
+                    list_id,
+                    reason_code="invalid_recovery_receipt",
+                    message=(
+                        "Native recovery did not prove exact attachment preservation; "
+                        "read the recovered Reminder before another mutation."
+                    ),
+                    before=before,
+                    after=after,
+                    write_performed=True,
+                )
             bridge, bridge_error = self._bridge_call(
                 "read_reminder",
                 {"reminder_id": guard.reminder_id},
@@ -372,10 +494,15 @@ class RecoveryBackend:
                         "write_performed": True,
                         "final_read": True,
                         "matched": True,
-                        "attachments_preserved": payload.get("verification", {}).get(
-                            "attachments_preserved"
-                        )
-                        is True,
+                        "pre_save_guard_matched": True,
+                        "destination_list_matched": True,
+                        "attachments_active": True,
+                        "attachments_preserved": True,
+                        "attachment_bytes_verified": True,
+                        "attachment_counts_match": True,
+                        "before_attachment_count": counts[0],
+                        "native_attachment_count": counts[1],
+                        "after_attachment_count": counts[2],
                         "evidence_scope": ["local_native", "local_eventkit"],
                     },
                     "recovery": {

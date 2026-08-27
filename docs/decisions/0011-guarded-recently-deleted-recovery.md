@@ -11,19 +11,35 @@ operation rather than an implied property of `delete_reminder`.
   never authorizes a write.
 - Only an exact deleted-item read issues a short-lived, one-use opaque `del1`
   Reference. The server keeps the private store identity, Reminder revision,
-  deletion timestamp, account identity, and attachment-set digest behind that
-  Reference.
+  deletion timestamp, account identity, byte-verified attachment-set digest,
+  and an opaque native ReminderKit snapshot digest behind that Reference. Raw
+  native storage archives and backing paths are never returned.
 - Recovery requires the `del1` Reference, an exact destination `list_id`, and
   an idempotency key. The destination must belong to the same account.
 - The adapter re-reads the deleted row and rejects any guard mismatch before
-  dispatch. The native helper calls ReminderKit's list-scoped undelete save,
-  requests CloudKit sync on the save request, and performs exact local
-  read-back.
+  dispatch. Immediately before its save, the native helper re-fetches the
+  deleted object and compares its archived ReminderKit snapshot to the opaque
+  digest captured by the exact deleted-item read. A mismatch is a known
+  no-write concurrency failure. The helper then calls ReminderKit's
+  list-scoped undelete save, requests CloudKit sync on the save request, and
+  performs exact local read-back.
 - `verified` requires the original Reminder identity, exact destination list,
-  an active attachment set, an unchanged attachment digest, and a final
-  EventKit read. A helper crash, timeout, malformed post-dispatch result, or
-  delayed EventKit visibility is `committed_verification_pending`; it is never
-  reported as a clean no-write failure.
+  a matched pre-save native guard, equal pre/native/post attachment counts,
+  active image backing files whose actual SHA-512 bytes match their stored
+  digests, an unchanged attachment-set digest, and a final EventKit read. The
+  backend and public Receipt contract independently reject `verified` when
+  attachment-preservation proof is false or missing. A helper crash, timeout,
+  malformed post-dispatch result, post-save read error, or delayed EventKit
+  visibility is `committed_verification_pending`; it is never reported as a
+  clean no-write failure.
+- The internal `RecoveryOutcome.mutation_state` travels separately from the
+  public JSON status into central validation. A contradictory no-write Receipt
+  cannot erase backend evidence that a write committed or may have committed.
+- Raw adapter messages never cross the public recovery boundary; stable
+  code/reason pairs map to fixed path-free messages. The launcher separately
+  records whether the adapter never started, started with an unknown outcome,
+  or returned a complete Receipt, preserving known no-write failures without
+  weakening post-dispatch uncertainty.
 - A consumed `del1` Reference is not replayable. An identical idempotency key
   replays its cached normalized Receipt instead of dispatching a second save.
 

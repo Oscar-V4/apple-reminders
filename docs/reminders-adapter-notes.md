@@ -120,9 +120,13 @@ and automatic repair restoration are withheld from the public Interface.
 
 The public Recovery Module lists a bounded 30-day inventory without writable
 references. An exact item read keeps store identity, private revision, deletion
-timestamp, account identity, and attachment digest server-side and returns one
-short-lived `del1`. Recovery rechecks that entire guard and uses ReminderKit's
-list-scoped undelete save only for an exact same-account destination.
+timestamp, account identity, byte-verified attachment digest, and an opaque
+native ReminderKit snapshot digest server-side and returns one short-lived
+`del1`. Recovery rechecks the store guard and the native snapshot immediately
+before the save, then uses ReminderKit's list-scoped undelete only for an exact
+same-account destination. `verified` additionally requires matched
+pre/native/post attachment counts, real backing-byte SHA-512 evidence, and the
+final EventKit read.
 
 On macOS 26.5.2 (25F84), Reminders 7.0 (3976), schema fingerprint
 `adaa7c550726b35e592085a531fba649466a6099ec8cbb863bf726143fcf5634`,
@@ -131,7 +135,8 @@ preserved image attachments. A null-completion CloudKit trigger crashed after
 one successful save, so the helper removed that optional call and retains
 `setSyncToCloudKit:YES` on the save request. Missing or malformed post-dispatch
 output is consequently an unknown possible write, never a clean no-write
-failure.
+failure. The same pending classification applies to every read-back error after
+the helper confirms a save.
 
 ## URL attachment evidence
 

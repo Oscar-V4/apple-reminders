@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ GUARD = DeletedGuard(
     private_version=6,
     deleted_at="2026-08-27T23:00:00+09:00",
     attachment_digest="b" * 64,
+    native_guard_digest="c" * 64,
     account_id="ACCOUNT-1",
 )
 DELETED = {
@@ -84,7 +86,15 @@ def verified_receipt() -> dict[str, Any]:
             "write_performed": True,
             "final_read": True,
             "matched": True,
+            "pre_save_guard_matched": True,
+            "destination_list_matched": True,
+            "attachments_active": True,
             "attachments_preserved": True,
+            "attachment_bytes_verified": True,
+            "attachment_counts_match": True,
+            "before_attachment_count": 1,
+            "native_attachment_count": 1,
+            "after_attachment_count": 1,
             "evidence_scope": ["local_native", "local_eventkit"],
         },
         "recovery": {
@@ -92,6 +102,33 @@ def verified_receipt() -> dict[str, Any]:
             "automatic_retry_safe": False,
         },
     }
+
+
+def failed_no_mutation_receipt() -> dict[str, Any]:
+    receipt = verified_receipt()
+    receipt.update(
+        {
+            "ok": False,
+            "status": "failed_no_mutation",
+            "after": {},
+            "verification": {
+                "state": "not_needed",
+                "write_performed": False,
+                "final_read": False,
+            },
+            "recovery": {
+                "semantics": "inspect_exact_deleted_item_before_retry",
+                "automatic_retry_safe": False,
+            },
+            "error": {
+                "code": "unexpected_error",
+                "reason_code": "fault_injected_no_mutation_claim",
+                "message": "Fault-injected receipt conflicts with the backend mutation fact.",
+                "retryable": False,
+            },
+        }
+    )
+    return receipt
 
 
 class FakeBackend:
@@ -150,6 +187,7 @@ class RecoveryFacadeTests(unittest.TestCase):
         encoded = repr(result)
         self.assertNotIn(GUARD.store_identity, encoded)
         self.assertNotIn(GUARD.attachment_digest, encoded)
+        self.assertNotIn(GUARD.native_guard_digest, encoded)
         self.assertNotIn("private_version", encoded)
 
     def test_recovery_consumes_reference_but_idempotent_replay_is_safe(self) -> None:
@@ -205,8 +243,304 @@ class RecoveryFacadeTests(unittest.TestCase):
             "expired_or_consumed_deleted_reference",
         )
 
+    def test_call_with_state_preserves_conflicting_backend_fact_and_replay(self) -> None:
+        class ConflictingStateBackend(FakeBackend):
+            def recover(
+                self,
+                guard: DeletedGuard,
+                list_id: str,
+                idempotency_key: str,
+            ) -> RecoveryOutcome:
+                self.recoveries.append((guard, list_id, idempotency_key))
+                return RecoveryOutcome(failed_no_mutation_receipt(), "committed")
+
+        backend = ConflictingStateBackend()
+        facade = RecoveryFacade(backend, token_source=lambda: "C" * 32)
+        read = facade.call(
+            "inspect_recently_deleted",
+            {"kind": "item", "reminder_id": REMINDER_ID},
+        )
+        arguments = {
+            "reference": read["data"]["deleted_reminder"]["reference"],
+            "list_id": LIST_ID,
+            "idempotency_key": "conflicting-state-key",
+        }
+
+        first, first_state = facade.call_with_state(
+            "recover_deleted_reminder", arguments
+        )
+        replay, replay_state = facade.call_with_state(
+            "recover_deleted_reminder", arguments
+        )
+
+        self.assertEqual(first["status"], "failed_no_mutation")
+        self.assertEqual(first_state, "committed")
+        self.assertEqual(replay_state, "committed")
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertNotIn("mutation_state", first)
+        self.assertNotIn("mutation_state", replay)
+        self.assertEqual(len(backend.recoveries), 1)
+
 
 class RecoveryBackendTests(unittest.TestCase):
+    def test_private_adapter_error_detail_never_reaches_public_read(self) -> None:
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "unexpected_error",
+                        "reason_code": "/Users/example/Library/Reminders/Stores.sqlite",
+                        "message": (
+                            "Open /Users/example/Library/Reminders/"
+                            "Container_v1/Stores/Stores.sqlite"
+                        ),
+                    },
+                },
+                True,
+            ),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        public = RecoveryFacade(backend).inspect(
+            {"kind": "item", "reminder_id": REMINDER_ID}
+        )
+
+        encoded = repr(public)
+        self.assertEqual(public["status"], "failed_no_mutation")
+        self.assertNotIn("/Users/", encoded)
+        self.assertNotIn("Stores.sqlite", encoded)
+        self.assertNotIn("Container_v1", encoded)
+        self.assertNotIn("users_example", encoded)
+        self.assertEqual(
+            public["error"]["reason_code"],
+            "recently_deleted_operation_failed",
+        )
+        self.assertEqual(
+            public["error"]["message"],
+            "The local Recently Deleted operation failed without a safe public detail.",
+        )
+        validate_public_result("inspect_recently_deleted", public, "not_mutated")
+
+    def test_proven_adapter_not_started_remains_failed_no_mutation(self) -> None:
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (
+                {
+                    "ok": False,
+                    "__dispatch_phase": "not_started",
+                    "error": {
+                        "code": "adapter_unavailable",
+                        "message": "Private launch detail",
+                    },
+                },
+                True,
+            ),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: "invalid receipt",
+        )
+
+        outcome = backend.recover(GUARD, LIST_ID, "backend-key-not-started")
+
+        self.assertEqual(outcome.mutation_state, "not_mutated")
+        self.assertEqual(outcome.receipt["status"], "failed_no_mutation")
+        self.assertFalse(outcome.receipt["verification"]["write_performed"])
+        self.assertEqual(outcome.receipt["next_action"]["tool"], "diagnose_reminders")
+        self.assertNotIn("Private launch detail", repr(outcome.receipt))
+        validate_public_result(
+            "recover_deleted_reminder",
+            {"schema_version": 2, **outcome.receipt},
+            "not_mutated",
+        )
+
+    def test_started_invalid_adapter_receipt_remains_unknown(self) -> None:
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (
+                {
+                    "ok": False,
+                    "__dispatch_phase": "started_unknown",
+                    "error": {"code": "invalid_adapter_response"},
+                },
+                True,
+            ),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: "invalid receipt",
+        )
+
+        outcome = backend.recover(GUARD, LIST_ID, "backend-key-started")
+
+        self.assertEqual(outcome.mutation_state, "unknown")
+        self.assertEqual(outcome.receipt["status"], "committed_verification_pending")
+        self.assertIsNone(outcome.receipt["verification"]["write_performed"])
+
+    def test_contradictory_failed_no_mutation_receipt_remains_unknown(self) -> None:
+        for field_present, value in ((True, True), (True, None), (False, None)):
+            with self.subTest(field_present=field_present, value=value):
+                adapter_payload = failed_no_mutation_receipt()
+                if field_present:
+                    adapter_payload["verification"]["write_performed"] = value
+                else:
+                    del adapter_payload["verification"]["write_performed"]
+                backend = RecoveryBackend(
+                    adapter_call=lambda _argv, payload=adapter_payload: (payload, True),
+                    bridge_call=mock.Mock(),
+                    receipt_validator=lambda payload, **_: None,
+                )
+
+                outcome = backend.recover(
+                    GUARD,
+                    LIST_ID,
+                    "backend-key-contradictory-no-write",
+                )
+
+                self.assertEqual(outcome.mutation_state, "unknown")
+                self.assertEqual(
+                    outcome.receipt["status"], "committed_verification_pending"
+                )
+                self.assertIsNone(outcome.receipt["verification"]["write_performed"])
+                self.assertEqual(
+                    outcome.receipt["error"]["reason_code"],
+                    "invalid_recovery_receipt",
+                )
+                self.assertEqual(
+                    outcome.receipt["next_action"]["tool"],
+                    "read_reminder",
+                )
+
+    def test_actual_adapter_pre_dispatch_no_write_shape_stays_not_mutated(self) -> None:
+        adapter_payload = failed_no_mutation_receipt()
+        adapter_payload["verification"] = {
+            "state": "not_performed",
+            "write_performed": False,
+        }
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (adapter_payload, True),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        outcome = backend.recover(GUARD, LIST_ID, "backend-key-known-no-write")
+
+        self.assertEqual(outcome.mutation_state, "not_mutated")
+        self.assertEqual(outcome.receipt["status"], "failed_no_mutation")
+        self.assertFalse(outcome.receipt["verification"]["write_performed"])
+
+    def test_exact_deleted_read_requires_and_keeps_native_guard_private(self) -> None:
+        adapter_payload = {
+            "ok": True,
+            "deleted_reminder": copy.deepcopy(DELETED),
+            "guard": {
+                "reminder_id": GUARD.reminder_id,
+                "store_identity": GUARD.store_identity,
+                "private_version": GUARD.private_version,
+                "deleted_at": GUARD.deleted_at,
+                "attachment_digest": GUARD.attachment_digest,
+                "native_guard_digest": GUARD.native_guard_digest,
+                "account_id": GUARD.account_id,
+            },
+        }
+        backend = RecoveryBackend(
+            adapter_call=lambda _argv: (adapter_payload, False),
+            bridge_call=mock.Mock(),
+            receipt_validator=lambda payload, **_: None,
+        )
+
+        snapshot = backend.read_deleted(REMINDER_ID, 100)
+
+        self.assertEqual(snapshot.guard, GUARD)
+        public = RecoveryFacade(
+            backend,
+            token_source=lambda: "D" * 32,
+        ).inspect({"kind": "item", "reminder_id": REMINDER_ID})
+        self.assertNotIn(GUARD.native_guard_digest, repr(public))
+
+    def test_verified_recovery_without_complete_native_proof_fails_closed(self) -> None:
+        proof_fields = (
+            "pre_save_guard_matched",
+            "destination_list_matched",
+            "attachments_active",
+            "attachments_preserved",
+            "attachment_bytes_verified",
+            "attachment_counts_match",
+        )
+        for field in proof_fields:
+            for field_present, value in ((True, False), (False, None)):
+                with self.subTest(
+                    field=field,
+                    field_present=field_present,
+                    value=value,
+                ):
+                    adapter_payload = verified_receipt()
+                    if field_present:
+                        adapter_payload["verification"][field] = value
+                    else:
+                        del adapter_payload["verification"][field]
+                    bridge_call = mock.Mock()
+                    backend = RecoveryBackend(
+                        adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                        bridge_call=bridge_call,
+                        receipt_validator=lambda payload, **_: None,
+                    )
+
+                    outcome = backend.recover(GUARD, LIST_ID, "backend-key-unsafe")
+
+                    self.assertEqual(outcome.mutation_state, "unknown")
+                    self.assertEqual(
+                        outcome.receipt["status"], "committed_verification_pending"
+                    )
+                    self.assertEqual(
+                        outcome.receipt["error"]["reason_code"],
+                        "invalid_recovery_receipt",
+                    )
+                    self.assertEqual(
+                        outcome.receipt["next_action"]["tool"], "read_reminder"
+                    )
+                    self.assertTrue(outcome.receipt["verification"]["write_performed"])
+                    validate_public_result(
+                        "recover_deleted_reminder",
+                        {"schema_version": 2, **outcome.receipt},
+                        "unknown",
+                    )
+                    bridge_call.assert_not_called()
+
+        for field, value in (
+            ("before_attachment_count", None),
+            ("native_attachment_count", True),
+            ("after_attachment_count", -1),
+            ("after_attachment_count", 2),
+        ):
+            with self.subTest(field=field, value=value):
+                adapter_payload = verified_receipt()
+                adapter_payload["verification"][field] = value
+                bridge_call = mock.Mock()
+                backend = RecoveryBackend(
+                    adapter_call=lambda _argv, payload=adapter_payload: (payload, False),
+                    bridge_call=bridge_call,
+                    receipt_validator=lambda payload, **_: None,
+                )
+
+                outcome = backend.recover(GUARD, LIST_ID, "backend-key-unsafe")
+
+                self.assertEqual(outcome.mutation_state, "unknown")
+                self.assertEqual(
+                    outcome.receipt["status"], "committed_verification_pending"
+                )
+                self.assertEqual(
+                    outcome.receipt["error"]["reason_code"],
+                    "invalid_recovery_receipt",
+                )
+                self.assertEqual(
+                    outcome.receipt["next_action"]["tool"], "read_reminder"
+                )
+                self.assertTrue(outcome.receipt["verification"]["write_performed"])
+                validate_public_result(
+                    "recover_deleted_reminder",
+                    {"schema_version": 2, **outcome.receipt},
+                    "unknown",
+                )
+                bridge_call.assert_not_called()
+
     def test_recovery_passes_full_private_guard_and_requires_eventkit_readback(self) -> None:
         adapter_argv: list[list[str]] = []
 
@@ -241,7 +575,15 @@ class RecoveryBackendTests(unittest.TestCase):
                         "write_performed": True,
                         "final_read": True,
                         "matched": True,
+                        "pre_save_guard_matched": True,
+                        "destination_list_matched": True,
+                        "attachments_active": True,
                         "attachments_preserved": True,
+                        "attachment_bytes_verified": True,
+                        "attachment_counts_match": True,
+                        "before_attachment_count": 1,
+                        "native_attachment_count": 1,
+                        "after_attachment_count": 1,
                     },
                     "recovery": {"semantics": "native_recently_deleted_recovery"},
                 },
@@ -287,9 +629,11 @@ class RecoveryBackendTests(unittest.TestCase):
         self.assertIn(GUARD.store_identity, argv)
         self.assertIn(str(GUARD.private_version), argv)
         self.assertIn(GUARD.attachment_digest, argv)
+        self.assertIn(GUARD.native_guard_digest, argv)
         encoded = repr(outcome.receipt)
         self.assertNotIn(GUARD.store_identity, encoded)
         self.assertNotIn(GUARD.attachment_digest, encoded)
+        self.assertNotIn(GUARD.native_guard_digest, encoded)
 
 
 if __name__ == "__main__":

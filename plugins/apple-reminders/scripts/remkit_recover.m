@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <objc/message.h>
 #import <dlfcn.h>
 
@@ -16,6 +17,27 @@ static NSString *ObjectUUID(id object) {
     if (![objectID respondsToSelector:@selector(uuid)]) return nil;
     NSUUID *uuid = Send0(objectID, @selector(uuid));
     return uuid.UUIDString;
+}
+
+static NSString *SHA256Hex(NSData *data) {
+    if (!data) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
+static NSString *NativeGuardDigest(id reminder, NSError **error) {
+    if (![reminder respondsToSelector:@selector(storage)]) return nil;
+    id storage = Send0(reminder, @selector(storage));
+    if (!storage) return nil;
+    NSData *archive = [NSKeyedArchiver archivedDataWithRootObject:storage
+                                           requiringSecureCoding:NO
+                                                           error:error];
+    return SHA256Hex(archive);
 }
 
 static void WriteJSON(NSDictionary *payload) {
@@ -44,13 +66,26 @@ static int Fail(NSString *code, NSError *error, BOOL mutationAttempted) {
 
 int main(int argc, const char **argv) {
     @autoreleasepool {
-        if (argc != 3) return Fail(@"usage", nil, NO);
+        BOOL guardMode = argc == 3 &&
+            [@"guard" isEqualToString:[NSString stringWithUTF8String:argv[1]]];
+        BOOL recoverMode = argc == 5 &&
+            [@"recover" isEqualToString:[NSString stringWithUTF8String:argv[1]]];
+        if (!guardMode && !recoverMode) return Fail(@"usage", nil, NO);
 
-        NSString *reminderUUIDString = [NSString stringWithUTF8String:argv[1]];
-        NSString *listUUIDString = [NSString stringWithUTF8String:argv[2]];
+        NSString *reminderUUIDString = [NSString stringWithUTF8String:argv[2]];
+        NSString *listUUIDString = recoverMode
+            ? [NSString stringWithUTF8String:argv[3]]
+            : nil;
+        NSString *expectedGuardDigest = recoverMode
+            ? [NSString stringWithUTF8String:argv[4]]
+            : nil;
         NSUUID *reminderUUID = [[NSUUID alloc] initWithUUIDString:reminderUUIDString];
-        NSUUID *listUUID = [[NSUUID alloc] initWithUUIDString:listUUIDString];
-        if (!reminderUUID || !listUUID) return Fail(@"invalid_arguments", nil, NO);
+        NSUUID *listUUID = recoverMode
+            ? [[NSUUID alloc] initWithUUIDString:listUUIDString]
+            : nil;
+        if (!reminderUUID || (recoverMode && (!listUUID || expectedGuardDigest.length != 64))) {
+            return Fail(@"invalid_arguments", nil, NO);
+        }
 
         void *reminderKit = dlopen(
             "/System/Library/PrivateFrameworks/ReminderKit.framework/ReminderKit",
@@ -70,6 +105,7 @@ int main(int argc, const char **argv) {
             return Fail(@"required_reminderkit_classes_missing", nil, NO);
         }
         if (![REMReminder respondsToSelector:@selector(objectIDWithUUID:)] ||
+            ![REMReminder instancesRespondToSelector:@selector(storage)] ||
             ![REMList respondsToSelector:@selector(objectIDWithUUID:)] ||
             ![REMStore instancesRespondToSelector:@selector(fetchReminderIncludingMarkedForDeleteWithObjectID:error:)] ||
             ![REMStore instancesRespondToSelector:@selector(fetchReminderWithObjectID:error:)] ||
@@ -84,7 +120,9 @@ int main(int argc, const char **argv) {
         id store = [[REMStore alloc] init];
         if (!store) return Fail(@"store_initialization_failed", nil, NO);
         id reminderObjectID = Send1(REMReminder, @selector(objectIDWithUUID:), reminderUUID);
-        id listObjectID = Send1(REMList, @selector(objectIDWithUUID:), listUUID);
+        id listObjectID = recoverMode
+            ? Send1(REMList, @selector(objectIDWithUUID:), listUUID)
+            : nil;
         NSError *error = nil;
         id deletedReminder = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(
             store,
@@ -93,6 +131,23 @@ int main(int argc, const char **argv) {
             &error
         );
         if (!deletedReminder) return Fail(@"deleted_reminder_not_found", error, NO);
+
+        NSError *guardError = nil;
+        NSString *nativeGuardDigest = NativeGuardDigest(deletedReminder, &guardError);
+        if (!nativeGuardDigest) return Fail(@"native_guard_unavailable", guardError, NO);
+        if (guardMode) {
+            WriteJSON(@{
+                @"ok": @YES,
+                @"operation": @"read_recovery_guard",
+                @"mutation_attempted": @NO,
+                @"reminder_id": reminderUUIDString,
+                @"native_guard_digest": nativeGuardDigest
+            });
+            return 0;
+        }
+        if (![nativeGuardDigest isEqualToString:expectedGuardDigest]) {
+            return Fail(@"concurrent_modification", nil, NO);
+        }
 
         error = nil;
         id destinationList = ((id (*)(id, SEL, id, NSError **))objc_msgSend)(
@@ -172,6 +227,7 @@ int main(int argc, const char **argv) {
             @"operation": @"recover_deleted_reminder",
             @"mutation_attempted": @YES,
             @"saved": @YES,
+            @"pre_save_guard_matched": @YES,
             @"reminder_id": reminderUUIDString,
             @"destination_list_id": listUUIDString,
             @"attachment_count": @(attachmentCount)

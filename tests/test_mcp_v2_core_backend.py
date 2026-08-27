@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+from mcp.v2_core import V2CoreFacade
 from mcp.v2_core_backend import CoreBackend
 
 
@@ -524,6 +525,299 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             [name for name, _ in argv_calls], ["list_reminder_attachments"]
         )
         self.assertEqual(adapter_call.call_count, 1)
+
+    def test_unchanged_url_with_another_url_attachment_fails_closed_without_write(
+        self,
+    ) -> None:
+        url = "https://example.com/already-visible"
+        eventkit_receipt = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": {"id": REMINDER_ID, "url": url},
+            "after": {"id": REMINDER_ID, "url": url},
+            "verification": {
+                "state": "read_back",
+                "write_performed": False,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": True,
+            },
+        }
+        final_read = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "read_reminder",
+            "data": {
+                "reminder": {
+                    "id": REMINDER_ID,
+                    "url": url,
+                    "calendar_id": "LIST-1",
+                    "last_modified": "2026-08-25T01:00:01.000Z",
+                }
+            },
+        }
+        bridge_call = mock.Mock(
+            side_effect=[(eventkit_receipt, False), (final_read, False)]
+        )
+        adapter_call = mock.Mock(
+            return_value=(
+                {
+                    "ok": True,
+                    "reminder_id": REMINDER_ID,
+                    "reminder_version": 7,
+                    "attachments": [
+                        {"id": "ATTACHMENT-B", "type": "url", "url": url},
+                        {
+                            "id": "ATTACHMENT-C",
+                            "type": "url",
+                            "url": "https://example.com/unrelated",
+                        },
+                    ],
+                    "truncated": False,
+                },
+                False,
+            )
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+
+        reply = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=lambda name, arguments: (
+                argv_calls.append((name, copy.deepcopy(arguments))) or [name]
+            ),
+        ).invoke(
+            "update_reminder",
+            {
+                "reminder_id": REMINDER_ID,
+                "expected_last_modified": "2026-08-25T01:00:00.000Z",
+                "patch": {"url": url},
+            },
+            mutation=True,
+        )
+
+        self.assertTrue(reply.is_error)
+        self.assertEqual(reply.payload["status"], "failed_no_mutation")
+        self.assertEqual(reply.payload["error"]["code"], "ambiguous_scope")
+        self.assertEqual(
+            reply.payload["error"]["reason_code"],
+            "ambiguous_visible_url_attachment",
+        )
+        self.assertFalse(reply.payload["verification"]["write_performed"])
+        self.assertTrue(reply.payload["verification"]["final_read"])
+        self.assertFalse(reply.payload["recovery"]["automatic_retry_safe"])
+        self.assertEqual(reply.payload["next_action"]["tool"], "read_reminder")
+        self.assertFalse(reply.payload["next_action"]["retry_original_once"])
+        self.assertIn(
+            "inspect_reminder_native",
+            reply.payload["recovery"]["manual_action"],
+        )
+        self.assertIn(
+            "change_reminder_attachment",
+            reply.payload["recovery"]["manual_action"],
+        )
+        self.assertEqual(
+            [name for name, _ in argv_calls], ["list_reminder_attachments"]
+        )
+        self.assertEqual(adapter_call.call_count, 1)
+
+    def test_fresh_retry_after_partial_url_replace_does_not_hide_a_and_b(
+        self,
+    ) -> None:
+        old_url = "https://example.com/old"
+        new_url = "https://example.com/new"
+
+        def reminder(url: str, last_modified: str) -> dict[str, Any]:
+            return {
+                "id": REMINDER_ID,
+                "title": "URL retry regression",
+                "url": url,
+                "calendar_id": "LIST-1",
+                "last_modified": last_modified,
+            }
+
+        def read_receipt(url: str, last_modified: str) -> dict[str, Any]:
+            return {
+                "schema_version": 1,
+                "ok": True,
+                "status": "verified",
+                "operation": "read_reminder",
+                "data": {"reminder": reminder(url, last_modified)},
+            }
+
+        first_eventkit_write = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "update_reminder",
+            "operation_id": "88888888-8888-4888-8888-888888888888",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": reminder(old_url, "2026-08-25T01:00:00.000Z"),
+            "after": reminder(new_url, "2026-08-25T01:00:01.000Z"),
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "eventkit_native_api",
+                "automatic_retry_safe": False,
+            },
+        }
+        retry_eventkit_no_write = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "unchanged",
+            "operation": "update_reminder",
+            "operation_id": "99999999-9999-4999-8999-999999999999",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
+            "before": reminder(new_url, "2026-08-25T01:00:01.000Z"),
+            "after": reminder(new_url, "2026-08-25T01:00:01.000Z"),
+            "verification": {
+                "state": "read_back",
+                "write_performed": False,
+                "final_read": True,
+                "matched": True,
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": True,
+            },
+        }
+        bridge_call = mock.Mock(
+            side_effect=[
+                (read_receipt(old_url, "2026-08-25T01:00:00.000Z"), False),
+                (first_eventkit_write, False),
+                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
+                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
+                (retry_eventkit_no_write, False),
+                (read_receipt(new_url, "2026-08-25T01:00:01.000Z"), False),
+            ]
+        )
+        adapter_call = mock.Mock(
+            side_effect=[
+                (
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 7,
+                        "attachments": [
+                            {
+                                "id": "ATTACHMENT-A",
+                                "type": "url",
+                                "url": old_url,
+                            }
+                        ],
+                        "truncated": False,
+                    },
+                    False,
+                ),
+                (
+                    {
+                        "ok": False,
+                        "status": "failed_manual_repair_required",
+                        "operation": "replace_attachment",
+                        "error": {
+                            "code": "native_url_replace_uncertain",
+                            "message": "The native replacement outcome is uncertain.",
+                        },
+                    },
+                    True,
+                ),
+                (
+                    {
+                        "ok": True,
+                        "reminder_id": REMINDER_ID,
+                        "reminder_version": 8,
+                        "attachments": [
+                            {
+                                "id": "ATTACHMENT-A",
+                                "type": "url",
+                                "url": old_url,
+                            },
+                            {
+                                "id": "ATTACHMENT-B",
+                                "type": "url",
+                                "url": new_url,
+                            },
+                        ],
+                        "truncated": False,
+                    },
+                    False,
+                ),
+            ]
+        )
+        argv_calls: list[tuple[str, dict[str, Any]]] = []
+        backend = make_backend(
+            bridge_call=bridge_call,
+            adapter_call=adapter_call,
+            build_adapter_argv=lambda name, arguments: (
+                argv_calls.append((name, copy.deepcopy(arguments))) or [name]
+            ),
+        )
+        tokens = iter(["A" * 32, "B" * 32])
+        facade = V2CoreFacade(backend, token_source=lambda: next(tokens))
+
+        first_reference = facade.read_reminder({"reminder_id": REMINDER_ID})[
+            "data"
+        ]["reminder"]["reference"]
+        first = facade.change_reminder(
+            {
+                "reference": first_reference,
+                "action": {"kind": "patch", "patch": {"url": new_url}},
+            }
+        )
+        fresh_reference = facade.read_reminder({"reminder_id": REMINDER_ID})[
+            "data"
+        ]["reminder"]["reference"]
+        retry = facade.change_reminder(
+            {
+                "reference": fresh_reference,
+                "action": {"kind": "patch", "patch": {"url": new_url}},
+            }
+        )
+
+        self.assertEqual(first["status"], "partial_success")
+        self.assertEqual(retry["status"], "failed_no_mutation")
+        self.assertFalse(retry["ok"])
+        self.assertEqual(retry["error"]["code"], "ambiguous_scope")
+        self.assertEqual(
+            retry["error"]["reason_code"],
+            "ambiguous_visible_url_attachment",
+        )
+        self.assertFalse(retry["verification"]["write_performed"])
+        self.assertTrue(retry["verification"]["final_read"])
+        self.assertIsNone(retry["before"])
+        self.assertIsNone(retry["after"])
+        self.assertNotIn("reference", repr(retry))
+        self.assertIn(
+            "inspect_reminder_native",
+            retry["recovery"]["manual_action"],
+        )
+        self.assertIn(
+            "change_reminder_attachment",
+            retry["recovery"]["manual_action"],
+        )
+        self.assertEqual(
+            [name for name, _ in argv_calls],
+            [
+                "list_reminder_attachments",
+                "replace_reminder_attachment",
+                "list_reminder_attachments",
+            ],
+        )
 
     def test_url_retry_preserves_existing_a_and_b_instead_of_duplicating_b(self) -> None:
         old_url = "https://example.com/old"

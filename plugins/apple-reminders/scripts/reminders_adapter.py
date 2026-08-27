@@ -1099,9 +1099,60 @@ def deleted_attachment_rows(
     return [dict(row) for row in rows]
 
 
-def deleted_attachment_digest(rows: list[dict[str, Any]]) -> str:
-    stable = [
-        {
+def deleted_image_byte_sha512(row: dict[str, Any]) -> str:
+    """Verify one deleted image's backing bytes without exposing its path."""
+
+    expected = row.get("ZSHA512SUM")
+    if not isinstance(expected, str) or not re.fullmatch(r"[A-Fa-f0-9]{128}", expected):
+        raise AdapterError(
+            "The deleted image attachment has no trustworthy content digest",
+            code="schema_mismatch",
+            reason_code="deleted_image_digest_unavailable",
+        )
+    attachment = {
+        "type": "image",
+        "filename": row.get("ZFILENAME"),
+        "sha512": expected,
+        "uti": row.get("ZUTI"),
+        # Deleted Reminder rows can retain an attachment-level deletion marker.
+        # Byte verification is intentionally independent from that marker.
+        "marked_for_deletion": False,
+    }
+    try:
+        path = exact_source_image_path(attachment)
+        digest = hashlib.sha512()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except (AdapterError, OSError) as exc:
+        reason = (
+            exc.details.get("reason_code")
+            if isinstance(exc, AdapterError)
+            else "deleted_image_bytes_unreadable"
+        )
+        raise AdapterError(
+            "The deleted image attachment's backing bytes are unavailable",
+            code="sync_pending",
+            reason_code=str(reason or "deleted_image_bytes_unavailable"),
+        ) from exc
+    actual = digest.hexdigest()
+    if actual.casefold() != expected.casefold():
+        raise AdapterError(
+            "The deleted image attachment's backing bytes do not match its stored digest",
+            code="sync_pending",
+            reason_code="deleted_image_bytes_mismatch",
+        )
+    return actual
+
+
+def deleted_attachment_digest(
+    rows: list[dict[str, Any]],
+    *,
+    verify_image_bytes: bool = False,
+) -> str:
+    stable = []
+    for row in rows:
+        item = {
             "id": row.get("ZCKIDENTIFIER"),
             "type": row.get("Z_ENT"),
             "order": row.get("Z_FOK_REMINDER1"),
@@ -1114,8 +1165,9 @@ def deleted_attachment_digest(rows: list[dict[str, Any]]) -> str:
             "url": row.get("ZURL"),
             "host_url": row.get("ZHOSTURL"),
         }
-        for row in rows
-    ]
+        if verify_image_bytes and row.get("Z_ENT") == IMAGE_ATTACHMENT_ENT:
+            item["actual_sha512"] = deleted_image_byte_sha512(row)
+        stable.append(item)
     return stable_hash(stable)
 
 
@@ -1179,6 +1231,7 @@ def deleted_reminder_snapshot(
     row: dict[str, Any],
     *,
     attachment_limit: int = 0,
+    verify_attachment_bytes: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     attachments = deleted_attachment_rows(con, int(row["Z_PK"]))
     image_count = sum(item.get("Z_ENT") == IMAGE_ATTACHMENT_ENT for item in attachments)
@@ -1209,7 +1262,10 @@ def deleted_reminder_snapshot(
         "reminder_id": row.get("ZCKIDENTIFIER"),
         "private_version": row.get("Z_OPT"),
         "deleted_at": deleted_at,
-        "attachment_digest": deleted_attachment_digest(attachments),
+        "attachment_digest": deleted_attachment_digest(
+            attachments,
+            verify_image_bytes=verify_attachment_bytes,
+        ),
         "account_id": public["account_id"],
     }
     return public, guard
@@ -2146,11 +2202,85 @@ def reminderkit_recover_helper() -> Path:
     return helper
 
 
-def invoke_reminderkit_recovery(reminder_id: str, destination_list_id: str) -> dict[str, Any]:
+def invoke_reminderkit_recovery_guard(reminder_id: str) -> str:
     helper = reminderkit_recover_helper()
     try:
         proc = subprocess.run(
-            [str(helper), normalize_uuid(reminder_id), normalize_uuid(destination_list_id)],
+            [str(helper), "guard", normalize_uuid(reminder_id)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard read timed out",
+            code="sync_pending",
+            reason_code="native_recovery_guard_timeout",
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard returned invalid JSON",
+            code="unexpected_error",
+            reason_code="invalid_native_recovery_guard",
+        ) from exc
+    digest = payload.get("native_guard_digest")
+    if (
+        proc.returncode != 0
+        or payload.get("ok") is not True
+        or payload.get("operation") != "read_recovery_guard"
+        or payload.get("reminder_id") != normalize_uuid(reminder_id)
+        or payload.get("mutation_attempted") is not False
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    ):
+        reason = str(payload.get("error") or "invalid_native_recovery_guard")
+        detail = payload.get("detail") or proc.stderr.strip()
+        stable_code = (
+            "not_found"
+            if reason == "deleted_reminder_not_found"
+            else "unsupported_capability"
+            if reason
+            in {
+                "native_guard_unavailable",
+                "required_reminderkit_classes_missing",
+                "required_reminderkit_selectors_missing",
+            }
+            else "unexpected_error"
+        )
+        raise AdapterError(
+            f"{reason}: {detail}" if detail else reason,
+            code=stable_code,
+            reason_code=reason,
+        )
+    return digest
+
+
+def invoke_reminderkit_recovery(
+    reminder_id: str,
+    destination_list_id: str,
+    native_guard_digest: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", native_guard_digest):
+        raise AdapterError(
+            "A valid native recovery guard is required",
+            code="invalid_input",
+            reason_code="invalid_native_recovery_guard",
+        )
+    helper = reminderkit_recover_helper()
+    try:
+        proc = subprocess.run(
+            [
+                str(helper),
+                "recover",
+                normalize_uuid(reminder_id),
+                normalize_uuid(destination_list_id),
+                native_guard_digest,
+            ],
             check=False,
             text=True,
             stdout=subprocess.PIPE,
@@ -2183,18 +2313,25 @@ def invoke_reminderkit_recovery(reminder_id: str, destination_list_id: str) -> d
         reason = str(payload.get("error") or "reminderkit_recovery_failed")
         detail = payload.get("detail") or proc.stderr.strip()
         message = f"{reason}: {detail}" if detail else reason
-        stable_code = (
-            "unsupported_capability"
-            if reason
-            in {
-                "required_reminderkit_classes_missing",
-                "required_reminderkit_selectors_missing",
-                "undelete_selector_missing",
-                "recently_deleted_not_supported",
-                "cross_account_restore_not_supported",
-            }
-            else "sync_pending" if mutation_attempted else "not_found"
-        )
+        if reason == "concurrent_modification":
+            stable_code = "concurrent_modification"
+        elif reason in {
+            "native_guard_unavailable",
+            "required_reminderkit_classes_missing",
+            "required_reminderkit_selectors_missing",
+            "undelete_selector_missing",
+            "recently_deleted_not_supported",
+            "cross_account_restore_not_supported",
+        }:
+            stable_code = "unsupported_capability"
+        elif reason == "deleted_reminder_not_found":
+            stable_code = "not_found"
+        elif reason in {"invalid_arguments", "usage"}:
+            stable_code = "invalid_input"
+        elif mutation_attempted:
+            stable_code = "sync_pending"
+        else:
+            stable_code = "unexpected_error"
         raise AdapterError(
             message,
             code=stable_code,
@@ -2207,6 +2344,7 @@ def invoke_reminderkit_recovery(reminder_id: str, destination_list_id: str) -> d
         or payload.get("destination_list_id") != normalize_uuid(destination_list_id)
         or payload.get("mutation_attempted") is not True
         or payload.get("saved") is not True
+        or payload.get("pre_save_guard_matched") is not True
     ):
         raise AdapterError(
             "ReminderKit recovery returned mismatched read-back identity",
@@ -3537,12 +3675,55 @@ def cmd_read_deleted_reminder(args: argparse.Namespace) -> int:
             con,
             row,
             attachment_limit=args.attachment_limit,
+            verify_attachment_bytes=True,
         )
         guard["store_identity"] = deleted_store_identity(db, con)
+        guard["native_guard_digest"] = invoke_reminderkit_recovery_guard(args.id)
         json_out({"ok": True, "deleted_reminder": public, "guard": guard})
         return 0
     finally:
         con.close()
+
+
+def recovery_post_write_pending(
+    args: argparse.Namespace,
+    before: dict[str, Any],
+    *,
+    reason_code: str,
+    message: str,
+) -> dict[str, Any]:
+    """Preserve a confirmed recovery save when later verification cannot finish."""
+
+    return operation_receipt(
+        status="committed_verification_pending",
+        operation="recover_deleted_reminder",
+        backend="reminderkit_private",
+        target={
+            "reminder_id": normalize_uuid(args.id),
+            "list_id": normalize_uuid(args.list_id),
+        },
+        before=before,
+        after={},
+        verification={
+            "state": "pending",
+            "write_performed": True,
+            "final_read": False,
+            "reason_code": reason_code,
+        },
+        recovery={"semantics": "read_before_retry", "automatic_retry_safe": False},
+        warnings=[
+            {
+                "code": "verification_pending",
+                "message": message,
+            }
+        ],
+        error={
+            "code": "sync_pending",
+            "reason_code": reason_code,
+            "message": message,
+            "retryable": False,
+        },
+    )
 
 
 def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
@@ -3551,7 +3732,11 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
     try:
         row = find_deleted_reminder(con, args.id)
         destination = find_list(con, list_id=args.list_id)
-        public_before, guard = deleted_reminder_snapshot(con, row)
+        public_before, guard = deleted_reminder_snapshot(
+            con,
+            row,
+            verify_attachment_bytes=True,
+        )
         guard["store_identity"] = deleted_store_identity(db, con)
         expected = {
             "store_identity": args.if_store_identity,
@@ -3584,7 +3769,11 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
         con.close()
 
     try:
-        native = invoke_reminderkit_recovery(args.id, args.list_id)
+        native = invoke_reminderkit_recovery(
+            args.id,
+            args.list_id,
+            args.if_native_guard_digest,
+        )
     except AdapterError as exc:
         if not exc.details.get("partial_failure"):
             raise
@@ -3623,69 +3812,85 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
                 "retryable": False,
             },
         )
-    deadline = time.time() + 10
-    active: dict[str, Any] | None = None
-    final_attachments: list[dict[str, Any]] = []
-    while True:
-        fresh = connect_read_only(db)
-        try:
-            active_row = fresh.execute(
-                """
-                select * from ZREMCDREMINDER
-                where ZCKIDENTIFIER=? and coalesce(ZMARKEDFORDELETION,0)=0
-                """,
-                (normalize_uuid(args.id),),
-            ).fetchone()
-            if active_row:
-                active = dict(active_row)
-                final_attachments = deleted_attachment_rows(fresh, int(active["Z_PK"]))
-        finally:
-            fresh.close()
-        if active is not None or time.time() >= deadline:
-            break
-        time.sleep(0.25)
+    try:
+        deadline = time.time() + 10
+        active: dict[str, Any] | None = None
+        final_attachments: list[dict[str, Any]] = []
+        while True:
+            fresh = connect_read_only(db)
+            try:
+                active_row = fresh.execute(
+                    """
+                    select * from ZREMCDREMINDER
+                    where ZCKIDENTIFIER=? and coalesce(ZMARKEDFORDELETION,0)=0
+                    """,
+                    (normalize_uuid(args.id),),
+                ).fetchone()
+                if active_row:
+                    active = dict(active_row)
+                    final_attachments = deleted_attachment_rows(
+                        fresh,
+                        int(active["Z_PK"]),
+                    )
+            finally:
+                fresh.close()
+            if active is not None or time.time() >= deadline:
+                break
+            time.sleep(0.25)
 
-    if active is None:
-        return operation_receipt(
-            status="committed_verification_pending",
-            operation="recover_deleted_reminder",
-            backend="reminderkit_private",
-            target={"reminder_id": normalize_uuid(args.id), "list_id": normalize_uuid(args.list_id)},
-            before=before,
-            after={},
-            verification={
-                "state": "pending",
-                "write_performed": True,
-                "final_read": False,
-                "reason_code": "active_readback_pending",
-            },
-            recovery={"semantics": "read_before_retry", "automatic_retry_safe": False},
-            warnings=[
-                {
-                    "code": "verification_pending",
-                    "message": "Recovery saved, but the active Reminder is not readable yet.",
-                }
-            ],
-            error={
-                "code": "sync_pending",
-                "reason_code": "active_readback_pending",
-                "message": "Read the destination list before retrying recovery.",
-                "retryable": False,
-            },
+        if active is None:
+            return recovery_post_write_pending(
+                args,
+                before,
+                reason_code="active_readback_pending",
+                message="Recovery saved, but the active Reminder is not readable yet.",
+            )
+
+        list_row = connect_read_only(db)
+        try:
+            destination = find_list(list_row, list_id=args.list_id)
+            list_matches = active.get("ZLIST") == destination.get("Z_PK")
+        finally:
+            list_row.close()
+        attachment_digest = deleted_attachment_digest(
+            final_attachments,
+            verify_image_bytes=True,
+        )
+    except Exception:
+        return recovery_post_write_pending(
+            args,
+            before,
+            reason_code="recovery_post_write_verification_failed",
+            message=(
+                "Recovery saved, but its exact destination or attachment integrity "
+                "could not be read back. Read the exact Reminder before retrying."
+            ),
         )
 
-    list_row = connect_read_only(db)
-    try:
-        destination = find_list(list_row, list_id=args.list_id)
-        list_matches = active.get("ZLIST") == destination.get("Z_PK")
-    finally:
-        list_row.close()
-    attachment_digest = deleted_attachment_digest(final_attachments)
     attachments_active = all(
         not bool(item.get("ZMARKEDFORDELETION")) for item in final_attachments
     )
     attachments_preserved = attachment_digest == args.if_attachment_digest
-    verified = list_matches and attachments_active and attachments_preserved
+    pre_save_guard_matched = native.get("pre_save_guard_matched") is True
+    before_attachment_count = before["deleted_reminder"].get("attachment_count")
+    native_attachment_count = native.get("attachment_count")
+    after_attachment_count = len(final_attachments)
+    attachment_counts_match = (
+        isinstance(before_attachment_count, int)
+        and not isinstance(before_attachment_count, bool)
+        and isinstance(native_attachment_count, int)
+        and not isinstance(native_attachment_count, bool)
+        and before_attachment_count
+        == native_attachment_count
+        == after_attachment_count
+    )
+    verified = (
+        list_matches
+        and pre_save_guard_matched
+        and attachments_active
+        and attachments_preserved
+        and attachment_counts_match
+    )
     status = "verified" if verified else "partial_success"
     result = operation_receipt(
         status=status,
@@ -3697,7 +3902,7 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
             "reminder": {
                 "id": active.get("ZCKIDENTIFIER"),
                 "list_id": normalize_uuid(args.list_id) if list_matches else None,
-                "attachment_count": len(final_attachments),
+                "attachment_count": after_attachment_count,
                 "attachment_digest": attachment_digest,
             }
         },
@@ -3706,10 +3911,15 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
             "write_performed": True,
             "final_read": True,
             "matched": verified,
+            "pre_save_guard_matched": pre_save_guard_matched,
             "destination_list_matched": list_matches,
             "attachments_active": attachments_active,
             "attachments_preserved": attachments_preserved,
-            "native_attachment_count": native.get("attachment_count"),
+            "attachment_bytes_verified": True,
+            "attachment_counts_match": attachment_counts_match,
+            "before_attachment_count": before_attachment_count,
+            "native_attachment_count": native_attachment_count,
+            "after_attachment_count": after_attachment_count,
         },
         recovery={
             "semantics": "native_recently_deleted_recovery",
@@ -3743,6 +3953,7 @@ def cmd_recover_deleted_reminder(args: argparse.Namespace) -> int:
             "if_version": args.if_version,
             "if_deleted_at": args.if_deleted_at,
             "if_attachment_digest": args.if_attachment_digest,
+            "if_native_guard_digest": args.if_native_guard_digest,
         },
         callback=lambda: recover_deleted_reminder_once(args),
     )
@@ -8251,6 +8462,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--if-version", type=int, required=True)
     p.add_argument("--if-deleted-at", required=True)
     p.add_argument("--if-attachment-digest", required=True)
+    p.add_argument("--if-native-guard-digest", required=True)
     p.add_argument("--idempotency-key", required=True)
     p.set_defaults(func=cmd_recover_deleted_reminder)
 

@@ -32,8 +32,8 @@ Omitted patch fields remain unchanged. `null` clears only fields whose input sch
 ## Recently Deleted recovery
 
 - `inspect_recently_deleted {kind:"list", account_id?, limit?}`: return a bounded local inventory. List mode issues no recovery reference and no full attachment list.
-- `inspect_recently_deleted {kind:"item", reminder_id, attachment_limit?}`: re-read one exact deleted Reminder, return bounded attachment metadata, and issue one opaque `del1` recovery reference.
-- `recover_deleted_reminder {reference, list_id, idempotency_key}`: consume a fresh `del1` and recover that exact Reminder into an exact compatible same-account list. `verified` requires native attachment preservation evidence plus an exact active EventKit read-back.
+- `inspect_recently_deleted {kind:"item", reminder_id, attachment_limit?}`: re-read one exact deleted Reminder, verify available image backing bytes, capture private-store and native ReminderKit snapshot guards, return bounded attachment metadata, and issue one opaque `del1` recovery reference. Missing integrity evidence fails closed and issues no Reference.
+- `recover_deleted_reminder {reference, list_id, idempotency_key}`: consume a fresh `del1` and recover that exact Reminder into an exact compatible same-account list. `verified` requires a matched native pre-save guard, equal pre/native/post attachment counts, actual image-byte SHA-512 preservation, and an exact active EventKit read-back.
 
 `del1` is distinct from `rev1`: it is short-lived, one-use, opaque, and valid only for the deleted snapshot that issued it. Inspect the exact item again after an expired, consumed, or stale-token result. Do not automatically retry an unknown recovery outcome.
 
@@ -84,6 +84,8 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 - `failed_manual_repair_required`: a mutation or unknown outcome needs explicit repair.
 
 Only `unchanged` and `verified` may include a writable `rev1` reference. Never decode a reference or infer a Reminder ID from a rejected token.
+
+For Core URL A-to-B workflows, a later same-B retry that sees native B plus another URL returns `failed_no_mutation/ambiguous_visible_url_attachment` rather than hiding unresolved A+B state. It issues no fresh writable Reference: call `read_reminder`, inspect native attachments with the new Reference, and clean up only one exact user-intended attachment ID.
 
 Broad cleanup uses 25–40 candidates per authorized chunk, with the final remainder allowed to be smaller. References are just-in-time: read one exact item, perform its approved action, verify it, discard its reference, and stop the whole run on the first uncertainty before moving to another item or chunk.
 

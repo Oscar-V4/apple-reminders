@@ -561,6 +561,7 @@ def build_adapter_argv(tool_name: str, arguments: dict[str, Any]) -> list[str]:
 
 
 PRIVATE_RESULT_KEYS = {
+    "__dispatch_phase",
     "db",
     "database",
     "database_path",
@@ -646,6 +647,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "not_started",
                 "error": {
                     "code": "adapter_unavailable",
                     "message": "The bundled Reminders adapter is unavailable.",
@@ -667,6 +669,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "started_unknown",
                 "error": {
                     "code": "adapter_timeout",
                     "message": "The Reminders adapter timed out before returning a result.",
@@ -678,6 +681,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "not_started",
                 "error": {
                     "code": "adapter_launch_failed",
                     "message": f"The Reminders adapter could not start ({type(exc).__name__}).",
@@ -691,6 +695,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "started_unknown",
                 "error": {
                     "code": "adapter_output_too_large",
                     "message": "The Reminders adapter result exceeded the MCP output bound.",
@@ -704,6 +709,7 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
         return (
             {
                 "ok": False,
+                "__dispatch_phase": "started_unknown",
                 "error": {
                     "code": "invalid_adapter_response",
                     "message": "The Reminders adapter returned an invalid JSON response.",
@@ -713,7 +719,15 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
             True,
         )
     if not isinstance(payload, dict):
-        payload = {"ok": completed.returncode == 0, "result": payload}
+        payload = {
+            "ok": completed.returncode == 0,
+            "__dispatch_phase": "started_unknown",
+            "result": payload,
+        }
+    else:
+        payload = dict(payload)
+        # Dispatch provenance belongs to this launcher, never to child JSON.
+        payload.pop("__dispatch_phase", None)
     is_error = payload.get("ok") is not True
     return payload, is_error
 
@@ -1472,12 +1486,18 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
                     facade = _v2_diagnostics_facade()
                 else:
                     raise RuntimeError(f"Public tool has no facade owner: {name}")
-                payload = facade.call(name, arguments)
-                mutation_state = (
-                    _v2_mutation_state(payload)
-                    if name in V2_MUTATION_TOOLS
-                    else None
-                )
+                # Inspect the concrete type so permissive mocks cannot invent this
+                # internal transport and bypass the compatibility path below.
+                call_with_state = getattr(type(facade), "call_with_state", None)
+                if name in _V2_RECOVERY_TOOLS and callable(call_with_state):
+                    payload, mutation_state = call_with_state(facade, name, arguments)
+                else:
+                    payload = facade.call(name, arguments)
+                    mutation_state = (
+                        _v2_mutation_state(payload)
+                        if name in V2_MUTATION_TOOLS
+                        else None
+                    )
             except Exception as exc:
                 payload, mutation_state = _v2_contract_failure(
                     name,

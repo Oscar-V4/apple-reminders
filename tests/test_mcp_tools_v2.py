@@ -202,26 +202,41 @@ class McpToolsV2SchemaTests(unittest.TestCase):
             schema["properties"]["status"]["enum"],
             ["incomplete", "completed"],
         )
+        list_incomplete, due_incomplete, completed = schema["oneOf"]
         self.assertEqual(
-            schema["oneOf"],
-            [
-                {
-                    "properties": {"status": {"const": "incomplete"}},
-                    "anyOf": [
-                        {"required": ["list_ids"]},
-                        {"required": ["due_start", "due_end"]},
-                    ],
-                },
-                {
-                    "required": [
-                        "status",
-                        "completion_start",
-                        "completion_end",
-                    ],
-                    "properties": {"status": {"const": "completed"}},
-                },
-            ],
+            list_incomplete["properties"]["status"]["const"], "incomplete"
         )
+        self.assertEqual(
+            set(list_incomplete["required"]),
+            {"list_ids"},
+        )
+        self.assertTrue(
+            {"list_ids", "query", "limit", "sort", "cursor"}
+            <= set(list_incomplete["properties"])
+        )
+        self.assertNotIn("due_start", list_incomplete["properties"])
+        self.assertEqual(
+            due_incomplete["properties"]["status"]["const"], "incomplete"
+        )
+        self.assertEqual(
+            set(due_incomplete["required"]),
+            {"due_start", "due_end"},
+        )
+        self.assertTrue(
+            {"list_ids", "due_start", "due_end", "query", "limit", "sort", "cursor"}
+            <= set(due_incomplete["properties"])
+        )
+        self.assertNotIn("completion_start", due_incomplete["properties"])
+        self.assertEqual(completed["properties"]["status"]["const"], "completed")
+        self.assertEqual(
+            set(completed["required"]),
+            {"status", "completion_start", "completion_end"},
+        )
+        self.assertTrue(
+            {"list_ids", "completion_start", "completion_end", "query", "limit", "sort", "cursor"}
+            <= set(completed["properties"])
+        )
+        self.assertNotIn("due_start", completed["properties"])
         self.assertEqual(
             schema["x-rangeConstraints"],
             [
@@ -237,6 +252,54 @@ class McpToolsV2SchemaTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_top_level_union_branches_repeat_all_callable_fields(self) -> None:
+        """Codex tool conversion reads branch properties, not shared parent fields."""
+
+        for tool in self.tools:
+            schema = tool["inputSchema"]
+            branches = schema.get("oneOf")
+            if not isinstance(branches, list):
+                continue
+            covered: set[str] = set()
+            for branch in branches:
+                properties = set(branch.get("properties", {}))
+                self.assertEqual(branch.get("type"), "object", tool["name"])
+                self.assertIs(branch.get("additionalProperties"), False, tool["name"])
+                self.assertTrue(
+                    set(branch.get("required", [])) <= properties,
+                    tool["name"],
+                )
+                self.assertNotIn("oneOf", branch, tool["name"])
+                self.assertNotIn("anyOf", branch, tool["name"])
+                covered.update(properties)
+            self.assertEqual(
+                covered,
+                set(schema.get("properties", {})),
+                tool["name"],
+            )
+
+        fetch = self.by_name["fetch_reminders"]["inputSchema"]
+        for branch in fetch["oneOf"]:
+            self.assertEqual(branch.get("type"), "object")
+            self.assertIs(branch.get("additionalProperties"), False)
+            self.assertIn("status", branch.get("properties", {}))
+            self.assertIn("limit", branch.get("properties", {}))
+            self.assertIn("cursor", branch.get("properties", {}))
+
+        deleted = self.by_name["inspect_recently_deleted"]["inputSchema"]
+        list_branch, item_branch = deleted["oneOf"]
+        self.assertEqual(
+            set(list_branch["properties"]),
+            {"kind", "account_id", "limit"},
+        )
+        self.assertEqual(
+            set(item_branch["properties"]),
+            {"kind", "reminder_id", "attachment_limit"},
+        )
+        for branch in deleted["oneOf"]:
+            self.assertEqual(branch.get("type"), "object")
+            self.assertIs(branch.get("additionalProperties"), False)
 
     def test_doctor_does_not_advertise_withheld_maintenance_workflows(self) -> None:
         scope = self.by_name["diagnose_reminders"]["inputSchema"]["properties"][
