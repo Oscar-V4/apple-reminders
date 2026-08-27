@@ -1508,10 +1508,31 @@ class AttachmentSyncTests(unittest.TestCase):
     def test_helper_attach_rejects_unrenderable_evidence(self) -> None:
         """Cloud evidence cannot bless the wrong transport or a mismatched UTI."""
         cases = (
-            ("url_transport", "url", "public.png", "attachment_transport", "url"),
-            ("uti_mismatch", "data", "public.jpeg", "stored_image_uti", "public.png"),
+            (
+                "url_transport",
+                "url",
+                "public.png",
+                "attachment_transport",
+                "url",
+                "native_image_transport_mismatch",
+            ),
+            (
+                "uti_mismatch",
+                "data",
+                "public.jpeg",
+                "stored_image_uti",
+                "public.png",
+                "native_image_content_type_mismatch",
+            ),
         )
-        for name, transport, helper_uti, detail_key, detail_value in cases:
+        for (
+            name,
+            transport,
+            helper_uti,
+            detail_key,
+            detail_value,
+            reason_code,
+        ) in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 db = Path(tmp) / "reminders.sqlite"
                 image = Path(tmp) / "browser-capture.png"
@@ -1601,6 +1622,8 @@ class AttachmentSyncTests(unittest.TestCase):
                     con.close()
 
                 self.assertEqual(raised.exception.code, "sync_pending")
+                self.assertEqual(raised.exception.reason_code, reason_code)
+                self.assertFalse(raised.exception.retryable)
                 self.assertTrue(raised.exception.details["partial_failure"])
                 self.assertEqual(raised.exception.details[detail_key], detail_value)
                 self.assertIn(
@@ -1780,7 +1803,9 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertEqual(receipt["error"]["reason_code"], "sync_pending")
         self.assertTrue(receipt["error"]["retryable"])
 
-    def test_attach_image_mobile_visibility_pending_has_structured_error(self) -> None:
+    def test_attach_image_verification_errors_preserve_reason_and_retryability(
+        self,
+    ) -> None:
         reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
         args = argparse.Namespace(
             db="/tmp/reminders.sqlite",
@@ -1801,49 +1826,58 @@ class AttachmentSyncTests(unittest.TestCase):
             "ZFLAGGED": 0,
             "ZMARKEDFORDELETION": 0,
         }
-        pending = reminders_adapter.AttachmentVerificationError(
-            "Image attachment was created but mobile visibility could not be verified",
-            row={"Z_PK": 2},
-            attachment={"id": "ATTACHMENT-1"},
-            partial_failure=True,
+        cases = (
+            ("native_image_transport_mismatch", False),
+            ("native_image_content_type_mismatch", False),
+            ("mobile_visibility_pending", True),
         )
+        for reason_code, retryable in cases:
+            with self.subTest(reason_code=reason_code):
+                pending = reminders_adapter.AttachmentVerificationError(
+                    "Image attachment verification did not complete",
+                    row={"Z_PK": 2},
+                    attachment={"id": "ATTACHMENT-1"},
+                    reason_code=reason_code,
+                    retryable=retryable,
+                    partial_failure=True,
+                )
 
-        with (
-            mock.patch.object(
-                reminders_adapter,
-                "resolve_database",
-                return_value=Path("/tmp/reminders.sqlite"),
-            ),
-            mock.patch.object(reminders_adapter, "connect", return_value=con),
-            mock.patch.object(
-                reminders_adapter,
-                "require_command_capability",
-                return_value={"supported": True},
-            ),
-            mock.patch.object(
-                reminders_adapter, "find_reminder", return_value=reminder
-            ),
-            mock.patch.object(
-                reminders_adapter,
-                "attach_image_reminderkit_record",
-                side_effect=pending,
-            ),
-            mock.patch.object(
-                reminders_adapter, "reread_reminder", return_value=reminder
-            ),
-            mock.patch.object(reminders_adapter, "log_action", return_value=None),
-        ):
-            receipt = reminders_adapter.attach_image_once(args)
+                with (
+                    mock.patch.object(
+                        reminders_adapter,
+                        "resolve_database",
+                        return_value=Path("/tmp/reminders.sqlite"),
+                    ),
+                    mock.patch.object(reminders_adapter, "connect", return_value=con),
+                    mock.patch.object(
+                        reminders_adapter,
+                        "require_command_capability",
+                        return_value={"supported": True},
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "find_reminder", return_value=reminder
+                    ),
+                    mock.patch.object(
+                        reminders_adapter,
+                        "attach_image_reminderkit_record",
+                        side_effect=pending,
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "reread_reminder", return_value=reminder
+                    ),
+                    mock.patch.object(
+                        reminders_adapter, "log_action", return_value=None
+                    ),
+                ):
+                    receipt = reminders_adapter.attach_image_once(args)
 
-        self.assertEqual(receipt["status"], "committed_verification_pending")
-        self.assertEqual(receipt["error"]["code"], "sync_pending")
-        self.assertEqual(
-            receipt["error"]["reason_code"], "mobile_visibility_pending"
-        )
-        self.assertTrue(receipt["error"]["retryable"])
-        self.assertEqual(
-            receipt["warnings"][0]["code"], "mobile_visibility_pending"
-        )
+                self.assertEqual(
+                    receipt["status"], "committed_verification_pending"
+                )
+                self.assertEqual(receipt["error"]["code"], "sync_pending")
+                self.assertEqual(receipt["error"]["reason_code"], reason_code)
+                self.assertIs(receipt["error"]["retryable"], retryable)
+                self.assertEqual(receipt["warnings"][0]["code"], reason_code)
 
     def test_image_size_wraps_sips_timeout_as_adapter_error(self) -> None:
         image = Path("/tmp/example.png")

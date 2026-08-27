@@ -73,6 +73,9 @@ These names are version-sensitive observations, not stable Apple API.
   converge, the public Receipt remains verification-pending with a structured
   `sync_pending` error and requires a fresh read; it does not retry the
   attachment mutation.
+- A native transport mismatch and an image content-type mismatch are distinct,
+  non-retryable verification reasons. They are not mislabeled as temporary
+  iCloud convergence; cleanup remains manual because the attachment may exist.
 - Image replacement creates the new attachment through ReminderKit, then
   removes the exact old attachment through the change item's native
   `removeAttachment:` selector. If removal fails, native compensation is

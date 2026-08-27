@@ -117,6 +117,8 @@ class AdapterError(RuntimeError):
 class AttachmentVerificationError(AdapterError):
     def __init__(self, message: str, row: dict[str, Any], **details: Any) -> None:
         code = details.pop("code", "sync_pending")
+        self.reason_code = str(details.pop("reason_code", code))
+        self.retryable = bool(details.pop("retryable", True))
         super().__init__(message, code=code, **details)
         self.row = row
 
@@ -1981,6 +1983,8 @@ def attach_image_reminderkit_record(
         raise AttachmentVerificationError(
             "Image attachment helper did not use the native image-data transport",
             row=selected,
+            reason_code="native_image_transport_mismatch",
+            retryable=False,
             partial_failure=True,
             attachment=attachment,
             attachment_transport=(
@@ -2001,6 +2005,8 @@ def attach_image_reminderkit_record(
         raise AttachmentVerificationError(
             "Image attachment content type did not survive native read-back",
             row=selected,
+            reason_code="native_image_content_type_mismatch",
+            retryable=False,
             partial_failure=True,
             attachment=attachment,
             helper_image_uti=(
@@ -2019,6 +2025,8 @@ def attach_image_reminderkit_record(
         raise AttachmentVerificationError(
             "Image attachment was created but mobile visibility could not be verified",
             row=selected,
+            reason_code="mobile_visibility_pending",
+            retryable=True,
             partial_failure=True,
             attachment=attachment,
             cleanup_command=(
@@ -5888,14 +5896,14 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
                     "command": exc.details.get("cleanup_command"),
                 }
                 pending_warning = {
-                    "code": "mobile_visibility_pending",
+                    "code": exc.reason_code,
                     "message": str(exc),
                 }
                 pending_error = {
                     "code": "sync_pending",
-                    "reason_code": "mobile_visibility_pending",
+                    "reason_code": exc.reason_code,
                     "message": str(exc),
-                    "retryable": True,
+                    "retryable": exc.retryable,
                 }
             except AdapterError as exc:
                 if not exc.details.get("partial_failure"):

@@ -602,6 +602,13 @@ class NativeFacade:
             "recovery": recovery,
         }
         self._copy_receipt_extras(raw, result)
+        self._finalize_pending_receipt(
+            result,
+            next_tool=None,
+            next_message=(
+                "Inspect this exact list before attempting to create the section again."
+            ),
+        )
         return result
 
     def _inspect(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -893,46 +900,13 @@ class NativeFacade:
             "recovery": recovery,
         }
         self._copy_receipt_extras(receipt, result)
-        if result["status"] == "committed_verification_pending":
-            result.setdefault("warnings", []).append(
-                {
-                    "code": "verification_pending",
-                    "message": "The native call may have committed; read before retrying.",
-                }
-            )
-            result["warnings"] = result["warnings"][:20]
-            if "error" not in result:
-                warning = next(
-                    (
-                        item
-                        for item in result["warnings"]
-                        if isinstance(item, Mapping)
-                    ),
-                    None,
-                )
-                result["error"] = _error(
-                    "sync_pending",
-                    str(
-                        warning.get("code")
-                        if isinstance(warning, Mapping)
-                        else "native_verification_pending"
-                    ),
-                    str(
-                        warning.get("message")
-                        if isinstance(warning, Mapping)
-                        else (
-                            "The native call may have committed; read before "
-                            "retrying."
-                        )
-                    ),
-                    retryable=True,
-                )
-            result["next_action"] = {
-                "kind": "fresh_read",
-                "tool": "read_reminder",
-                "retry_original_once": False,
-                "message": "Read the exact Reminder again before attempting another change.",
-            }
+        self._finalize_pending_receipt(
+            result,
+            next_tool="read_reminder",
+            next_message=(
+                "Read the exact Reminder again before attempting another change."
+            ),
+        )
         action_key = action.get("idempotency_key")
         if isinstance(action_key, str):
             result["idempotency_key_hash"] = hashlib.sha256(
@@ -1240,6 +1214,59 @@ class NativeFacade:
             result["warnings"] = warnings[:20]
         if result["status"] in FAILURE_STATUSES or "error" in raw:
             result["error"] = _normalized_error(raw.get("error"))
+
+    @staticmethod
+    def _finalize_pending_receipt(
+        result: dict[str, Any],
+        *,
+        next_tool: str | None,
+        next_message: str,
+    ) -> None:
+        if result.get("status") != "committed_verification_pending":
+            return
+        warnings = result.setdefault("warnings", [])
+        if not any(
+            isinstance(item, Mapping) and item.get("code") == "verification_pending"
+            for item in warnings
+        ):
+            warnings.append(
+                {
+                    "code": "verification_pending",
+                    "message": "The native call may have committed; read before retrying.",
+                }
+            )
+        result["warnings"] = warnings[:20]
+        if "error" not in result:
+            causal_warning = next(
+                (
+                    item
+                    for item in result["warnings"]
+                    if isinstance(item, Mapping)
+                    and str(item.get("code") or "").endswith("_pending")
+                ),
+                {
+                    "code": "native_verification_pending",
+                    "message": (
+                        "The native call may have committed; read before retrying."
+                    ),
+                },
+            )
+            result["error"] = _error(
+                "sync_pending",
+                str(causal_warning.get("code") or "native_verification_pending"),
+                str(
+                    causal_warning.get("message")
+                    or "The native call may have committed; read before retrying."
+                ),
+                retryable=True,
+            )
+        if next_tool is not None:
+            result["next_action"] = {
+                "kind": "fresh_read",
+                "tool": next_tool,
+                "retry_original_once": False,
+                "message": next_message,
+            }
 
 
 __all__ = ["NativeFacade", "ReferencePort"]
