@@ -438,6 +438,8 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             ("missing", missing),
             ("empty_object", {}),
             ("malformed_object", {"id": "R-OLD"}),
+            ("array_status", {"ok": True, "status": []}),
+            ("object_status", {"ok": True, "status": {}}),
         )
         for name, stored_result in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:

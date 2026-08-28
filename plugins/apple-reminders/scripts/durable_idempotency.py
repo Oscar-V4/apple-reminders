@@ -187,7 +187,7 @@ def _result_replayable(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     status = value.get("status")
-    if status not in _RESULT_RECEIPT_STATUSES:
+    if not isinstance(status, str) or status not in _RESULT_RECEIPT_STATUSES:
         return False
     return value.get("ok") is (status in _SUCCESS_RECEIPT_STATUSES)
 
