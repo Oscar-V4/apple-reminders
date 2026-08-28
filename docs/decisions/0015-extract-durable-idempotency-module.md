@@ -67,7 +67,9 @@ legacy complete results without changing the store version:
 - a malformed complete `result` is removed during the locked privacy scrub
   while its fence metadata remains intact and replay stays outcome-unknown;
 - capacity maintenance treats complete records without a replayable Receipt
-  and every unknown explicit state as unresolved, non-evictable fences.
+  and every unknown explicit state as unresolved, non-evictable fences. A
+  replayable legacy or modern Receipt must have a recognized status and the
+  matching boolean `ok`; an arbitrary non-empty object is not completion proof.
 
 ## Non-goals
 

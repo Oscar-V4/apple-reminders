@@ -29,6 +29,8 @@ if str(_SCRIPT_DIR) not in _sys.path:
 from receipt_contract import (  # noqa: E402
     AdapterError as _AdapterError,
     MutationNotStartedError as _MutationNotStartedError,
+    RESULT_RECEIPT_STATUSES as _RESULT_RECEIPT_STATUSES,
+    SUCCESS_RECEIPT_STATUSES as _SUCCESS_RECEIPT_STATUSES,
     build_operation_receipt as _build_operation_receipt,
 )
 
@@ -181,12 +183,21 @@ def _load_store(store_path: Path) -> dict[str, Any]:
     return payload
 
 
+def _result_replayable(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    status = value.get("status")
+    if status not in _RESULT_RECEIPT_STATUSES:
+        return False
+    return value.get("ok") is (status in _SUCCESS_RECEIPT_STATUSES)
+
+
 def _record_unresolved(value: Any) -> bool:
     if not isinstance(value, dict):
         return True
     state = value.get("state")
     stored_result = value.get("result")
-    has_replayable_result = isinstance(stored_result, dict) and bool(stored_result)
+    has_replayable_result = _result_replayable(stored_result)
     if state == "in_progress":
         return True
     if state == "complete":
@@ -213,9 +224,9 @@ def _sanitize_completed_results(
             continue
         record = dict(value)
         stored_result = record.get("result")
-        if isinstance(stored_result, dict):
+        if _result_replayable(stored_result):
             safe_result = _result_snapshot(stored_result)
-            if not safe_result:
+            if not _result_replayable(safe_result):
                 record.pop("result", None)
                 changed = True
             elif safe_result != stored_result:
@@ -256,7 +267,14 @@ def _entry_created_at_epoch(value: Any) -> float:
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
         )
-    created_at_epoch = float(raw_created_at_epoch)
+    try:
+        created_at_epoch = float(raw_created_at_epoch)
+    except OverflowError as exc:
+        raise _MutationNotStartedError(
+            "The durable idempotency store has an invalid entry timestamp.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        ) from exc
     if not _math.isfinite(created_at_epoch):
         raise _MutationNotStartedError(
             "The durable idempotency store has an invalid entry timestamp.",
@@ -440,8 +458,7 @@ def execute_idempotent(
             stored_result = record.get("result")
             if (
                 (record.get("state") == "complete" or "state" not in record)
-                and isinstance(stored_result, dict)
-                and bool(stored_result)
+                and _result_replayable(stored_result)
             ):
                 replay = dict(stored_result)
             else:

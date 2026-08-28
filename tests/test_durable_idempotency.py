@@ -437,6 +437,7 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             ("null", None),
             ("missing", missing),
             ("empty_object", {}),
+            ("malformed_object", {"id": "R-OLD"}),
         )
         for name, stored_result in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
@@ -487,11 +488,7 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     "idempotency_outcome_unknown",
                 )
                 expected_record = dict(record)
-                if "result" in expected_record and not expected_record["result"]:
-                    expected_record.pop("result")
-                elif "result" in expected_record and not isinstance(
-                    expected_record["result"], dict
-                ):
+                if stored_result is not missing:
                     expected_record.pop("result")
                 self.assertEqual(stored, expected_record)
 
@@ -1141,6 +1138,17 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     "result": verified_receipt(),
                 },
             ),
+            (
+                "complete_with_malformed_object",
+                {
+                    "operation": old_operation,
+                    "input_hash": stable_hash(old_input),
+                    "created_at_epoch": now,
+                    "state": "complete",
+                    "operation_id": "17171717-1717-4717-8717-171717171717",
+                    "result": {"id": "R-OLD"},
+                },
+            ),
         )
         for name, uncertain_record in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
@@ -1311,6 +1319,7 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             ("non_numeric_timestamp", {**base_record, "created_at_epoch": "bad"}),
             ("numeric_string_timestamp", {**base_record, "created_at_epoch": "100"}),
             ("boolean_timestamp", {**base_record, "created_at_epoch": True}),
+            ("overflowing_timestamp", {**base_record, "created_at_epoch": 10**400}),
             ("non_finite_timestamp", {**base_record, "created_at_epoch": float("nan")}),
         )
         for name, bad_record in cases:
