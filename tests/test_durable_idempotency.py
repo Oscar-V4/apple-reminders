@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -30,6 +33,56 @@ LOCK_NAME = "idempotency.lock"
 MAX_ENTRIES = 500
 RETENTION_DAYS = 30
 FIXED_RECEIPT_OPERATION_ID = "11111111-1111-4111-8111-111111111111"
+
+PROCESS_LOCK_WORKER = r"""
+import json
+import sys
+import time
+from pathlib import Path
+
+scripts_root = Path(sys.argv[1])
+storage_dir = Path(sys.argv[2])
+role = sys.argv[3]
+started_path = Path(sys.argv[4])
+ready_path = Path(sys.argv[5])
+release_path = Path(sys.argv[6])
+sys.path.insert(0, str(scripts_root))
+
+from durable_idempotency import execute_idempotent
+
+if role == "follower":
+    ready_path.write_text("ready", encoding="utf-8")
+
+def callback():
+    if role != "leader":
+        raise RuntimeError("the follower callback was dispatched")
+    started_path.write_text("started", encoding="utf-8")
+    deadline = time.monotonic() + 10
+    while not release_path.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("leader release timed out")
+        time.sleep(0.01)
+    return {
+        "ok": True,
+        "status": "verified",
+        "operation": "create_reminder",
+        "operation_id": "33333333-3333-4333-8333-333333333333",
+        "backend": "process_lock_test",
+        "target": {"id": "R-1"},
+    }
+
+result = execute_idempotent(
+    operation="eventkit_create_reminder",
+    key="process-lock-key",
+    input_payload={"title": "Synthetic process lock"},
+    callback=callback,
+    storage_dir=storage_dir,
+)
+print(json.dumps({
+    "replayed": result.get("replayed", False),
+    "status": result.get("status"),
+}, sort_keys=True))
+"""
 
 
 def stable_hash(value: Any) -> str:
@@ -109,6 +162,14 @@ def unresolved_record(
         "state": "in_progress",
         "operation_id": operation_id,
     }
+
+
+def wait_for_path(path: Path, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Timed out waiting for {path.name}")
+        time.sleep(0.01)
 
 
 class DurableIdempotencyContractTests(unittest.TestCase):
@@ -751,6 +812,72 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
                 self.assertEqual(result["id"], "R-1")
                 self.assertNotIn("idempotency_key_hash", result)
                 self.assertFalse(storage_dir.exists())
+
+    def test_process_lock_remains_held_until_callback_and_receipt_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            storage_dir = base / "support"
+            started_path = base / "leader-started"
+            ready_path = base / "follower-ready"
+            release_path = base / "release-leader"
+            command = [
+                sys.executable,
+                "-c",
+                PROCESS_LOCK_WORKER,
+                str(SCRIPTS_ROOT),
+                str(storage_dir),
+            ]
+            environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            leader = subprocess.Popen(
+                [
+                    *command,
+                    "leader",
+                    str(started_path),
+                    str(ready_path),
+                    str(release_path),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            follower: subprocess.Popen[str] | None = None
+            try:
+                wait_for_path(started_path)
+                follower = subprocess.Popen(
+                    [
+                        *command,
+                        "follower",
+                        str(started_path),
+                        str(ready_path),
+                        str(release_path),
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                )
+                wait_for_path(ready_path)
+                time.sleep(0.2)
+                self.assertIsNone(
+                    follower.poll(),
+                    "the follower escaped the process lock while the callback ran",
+                )
+            finally:
+                release_path.write_text("release", encoding="utf-8")
+
+            leader_stdout, leader_stderr = leader.communicate(timeout=10)
+            assert follower is not None
+            follower_stdout, follower_stderr = follower.communicate(timeout=10)
+            self.assertEqual(leader.returncode, 0, leader_stderr)
+            self.assertEqual(follower.returncode, 0, follower_stderr)
+            self.assertEqual(
+                [json.loads(leader_stdout), json.loads(follower_stdout)],
+                [
+                    {"replayed": False, "status": "verified"},
+                    {"replayed": True, "status": "verified"},
+                ],
+            )
 
     def test_snapshot_keeps_receipt_proof_but_drops_private_paths(self) -> None:
         destination_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"

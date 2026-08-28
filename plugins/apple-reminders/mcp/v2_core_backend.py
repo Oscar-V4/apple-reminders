@@ -14,7 +14,7 @@ import hashlib
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -38,9 +38,19 @@ else:  # pragma: no cover - exercised by the script entry point
 BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
 AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
-IdempotencyCall = Callable[..., dict[str, Any]]
 ModuleLoader = Callable[[], Any]
 ReceiptValidator = Callable[..., str | None]
+
+
+class IdempotencyCall(Protocol):
+    def __call__(
+        self,
+        *,
+        operation: str,
+        key: str | None,
+        input_payload: dict[str, Any],
+        callback: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]: ...
 
 
 class _EventKitBridgeFailure(RuntimeError):
