@@ -59,6 +59,10 @@ legacy complete results without changing the store version:
   requires the combined scrub-and-fence write to succeed before dispatch;
 - a non-object entry or invalid/non-finite timestamp is a typed unreadable-store
   proof before dispatch rather than a pruned record or raw conversion error.
+- only an explicit top-level integer `version: 1` is readable; a missing,
+  malformed, or unknown version fails before dispatch without rewriting bytes;
+- a malformed complete `result` is removed during the locked privacy scrub
+  while its fence metadata remains intact and replay stays outcome-unknown.
 
 ## Non-goals
 

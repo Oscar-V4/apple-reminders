@@ -171,6 +171,13 @@ def _load_store(store_path: Path) -> dict[str, Any]:
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
         )
+    version = payload.get("version")
+    if type(version) is not int or version != 1:
+        raise _MutationNotStartedError(
+            "The durable idempotency store has an unsupported version.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        )
     return payload
 
 
@@ -203,9 +210,15 @@ def _sanitize_completed_results(
         stored_result = record.get("result")
         if isinstance(stored_result, dict):
             safe_result = _result_snapshot(stored_result)
-            if safe_result != stored_result:
+            if not safe_result:
+                record.pop("result", None)
+                changed = True
+            elif safe_result != stored_result:
                 record["result"] = safe_result
                 changed = True
+        elif "result" in record:
+            record.pop("result")
+            changed = True
         sanitized[entry_key] = record
     return sanitized, changed
 

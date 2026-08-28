@@ -57,6 +57,9 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   function and shared typed errors instead of loading the full private adapter
   in-process; persisted v1 hashes, JSON bytes, locking, privacy projection, and
   failure ordering remain unchanged.
+- Durable replay now rejects missing, malformed, or unknown store versions
+  before dispatch and removes malformed completed-result payloads without
+  removing their write-ahead fences.
 
 ### Removed
 

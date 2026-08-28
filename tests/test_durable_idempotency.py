@@ -486,7 +486,52 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     replay["error"]["reason_code"],
                     "idempotency_outcome_unknown",
                 )
-                self.assertEqual(stored, record)
+                expected_record = dict(record)
+                if "result" in expected_record and not expected_record["result"]:
+                    expected_record.pop("result")
+                elif "result" in expected_record and not isinstance(
+                    expected_record["result"], dict
+                ):
+                    expected_record.pop("result")
+                self.assertEqual(stored, expected_record)
+
+    def test_corrupt_non_current_result_is_scrubbed_before_new_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            old_key_hash = stable_hash(
+                {
+                    "operation": "eventkit_create_reminder",
+                    "key": "old-complete",
+                }
+            )
+            old_record = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash({"title": "Old"}),
+                "created_at_epoch": time.time(),
+                "state": "complete",
+                "operation_id": "14141414-1414-4414-8414-141414141414",
+                "result": ["PRIVATE-LEGACY-ARRAY"],
+            }
+            seed_store(
+                storage_dir,
+                {"version": 1, "entries": {old_key_hash: old_record}},
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+
+            result = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="new-request",
+                input_payload={"title": "New"},
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            payload = read_store(storage_dir)
+
+        callback.assert_called_once_with()
+        self.assertEqual(result["status"], "verified")
+        self.assertNotIn("result", payload["entries"][old_key_hash])
+        self.assertNotIn("PRIVATE-LEGACY-ARRAY", json.dumps(payload))
+        self.assertEqual(len(payload["entries"]), 2)
 
     def test_complete_non_empty_result_replays_stored_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1088,6 +1133,54 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             "idempotency_store_unreadable",
         )
         self.assertTrue(raised.exception.details["mutation_not_started"])
+
+    def test_unknown_or_missing_store_version_fails_closed_without_rewrite(
+        self,
+    ) -> None:
+        missing = object()
+        cases: tuple[tuple[str, Any], ...] = (
+            ("missing", missing),
+            ("future", 2),
+            ("zero", 0),
+            ("float", 1.0),
+            ("string", "1"),
+            ("boolean", True),
+            ("null", None),
+        )
+        for name, version in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                storage_dir.mkdir()
+                payload: dict[str, Any] = {"entries": {}}
+                if version is not missing:
+                    payload["version"] = version
+                store_path = storage_dir / STORE_NAME
+                original_bytes = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                store_path.write_bytes(original_bytes)
+                callback = mock.Mock(return_value=verified_receipt())
+
+                with self.assertRaises(MutationNotStartedError) as raised:
+                    durable_idempotency.execute_idempotent(
+                        operation="eventkit_create_reminder",
+                        key="request-1",
+                        input_payload={"title": "Bounded"},
+                        callback=callback,
+                        storage_dir=storage_dir,
+                    )
+
+                callback.assert_not_called()
+                self.assertEqual(store_path.read_bytes(), original_bytes)
+                self.assertEqual(raised.exception.code, "unexpected_error")
+                self.assertEqual(
+                    raised.exception.details["reason_code"],
+                    "idempotency_store_unreadable",
+                )
+                self.assertTrue(raised.exception.details["mutation_not_started"])
 
     def test_corrupt_entry_shapes_fail_typed_before_dispatch(self) -> None:
         key_hash = stable_hash(
