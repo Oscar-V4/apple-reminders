@@ -261,6 +261,37 @@ class EventKitProtocolTests(unittest.TestCase):
                     "move_reminder",
                 )
 
+    def test_projected_mutation_receipt_has_strict_status_and_ok_contract(
+        self,
+    ) -> None:
+        projected = self.mutation_fixture("update_reminder", "verified")
+        projected.pop("schema_version")
+        self.assertIs(
+            eventkit_protocol.validate_mutation_receipt(
+                projected,
+                "update_reminder",
+            ),
+            projected,
+        )
+
+        cases = (
+            ("invented_status", {"status": "invented", "ok": True}),
+            ("array_status", {"status": [], "ok": True}),
+            ("non_boolean_ok", {"status": "verified", "ok": "yes"}),
+            ("verified_false", {"status": "verified", "ok": False}),
+            (
+                "failed_no_mutation_true",
+                {"status": "failed_no_mutation", "ok": True},
+            ),
+        )
+        for name, patch in cases:
+            payload = {**projected, **patch}
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                eventkit_protocol.validate_mutation_receipt(
+                    payload,
+                    "update_reminder",
+                )
+
     def test_failed_no_mutation_rejects_contradictory_commit_evidence(self) -> None:
         clean = {
             "schema_version": 1,

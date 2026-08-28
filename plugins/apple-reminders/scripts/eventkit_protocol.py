@@ -41,6 +41,19 @@ EXIT_CODES = {
 STABLE_ERROR_CODES = set(CONTRACT_STABLE_ERROR_CODES)
 
 
+def _validated_status_and_ok(payload: dict[str, Any]) -> tuple[str, bool]:
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in EXIT_CODES:
+        raise RuntimeError(f"Native bridge returned unknown status: {status!r}")
+    ok = payload.get("ok")
+    if not isinstance(ok, bool):
+        raise RuntimeError("Native bridge response ok field must be boolean")
+    expected_ok = status != "failed_no_mutation"
+    if ok is not expected_ok:
+        raise RuntimeError("Native bridge response ok field disagrees with its receipt status")
+    return status, expected_ok
+
+
 def mutation_outcome_unknown_response(
     request: Mapping[str, Any],
     *,
@@ -105,14 +118,7 @@ def validate_response(payload: Any, operation: str) -> dict[str, Any]:
         raise RuntimeError("Native bridge response schema version does not match the launcher")
     if payload["operation"] != operation:
         raise RuntimeError("Native bridge response operation does not match the request")
-    status = payload["status"]
-    if not isinstance(status, str) or status not in EXIT_CODES:
-        raise RuntimeError(f"Native bridge returned unknown status: {payload['status']!r}")
-    if not isinstance(payload["ok"], bool):
-        raise RuntimeError("Native bridge response ok field must be boolean")
-    expected_ok = status != "failed_no_mutation"
-    if payload["ok"] is not expected_ok:
-        raise RuntimeError("Native bridge response ok field disagrees with its receipt status")
+    status, expected_ok = _validated_status_and_ok(payload)
     if not expected_ok:
         error = payload.get("error")
         if not isinstance(error, dict):
@@ -146,4 +152,5 @@ def validate_mutation_receipt(
     )
     if error:
         raise RuntimeError(error)
+    _validated_status_and_ok(payload)
     return payload
