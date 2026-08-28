@@ -61,6 +61,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   before dispatch, rejects ambiguous record/timestamp shapes, and removes
   malformed completed-result payloads without making their write-ahead fences
   eligible for capacity eviction.
+- Extracted strict EventKit response validation and outcome-unknown Receipt
+  construction into one pure protocol Module shared by the bridge, server, and
+  Core. Server/Core no longer load the executable bridge in-process for those
+  rules.
 
 ### Removed
 

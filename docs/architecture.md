@@ -94,7 +94,16 @@ user-facing promise.
      extension points.
    - Re-sanitizes complete v1 results under the same lock, preserving fence
      metadata while removing primitive user-authored arrays before replay.
-8. **Internal adapter and helpers**
+8. **EventKit response protocol Module**
+   - Owns wire response validation, projected/full mutation Receipt validation,
+     and exact outcome-unknown Receipt construction behind three pure
+     functions.
+   - Is imported directly by the executable EventKit bridge, MCP server, and
+     Core backend. Core and server do not load the giant bridge script
+     in-process to obtain protocol rules.
+   - Does not own subprocess provenance, request normalization, helper
+     compilation, native execution, or Core mutation-state interpretation.
+9. **Internal adapter and helpers**
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.
