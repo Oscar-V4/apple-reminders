@@ -418,14 +418,11 @@ def execute_idempotent(
                 )
             stored_result = record.get("result")
             if (
-                record.get("state") == "complete"
-                or (
-                    "state" not in record
-                    and isinstance(stored_result, dict)
-                    and bool(stored_result)
-                )
+                (record.get("state") == "complete" or "state" not in record)
+                and isinstance(stored_result, dict)
+                and bool(stored_result)
             ):
-                replay = dict(stored_result or {})
+                replay = dict(stored_result)
             else:
                 operation_id = record.get("operation_id")
                 if not isinstance(operation_id, str) or not operation_id:

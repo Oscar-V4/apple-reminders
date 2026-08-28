@@ -427,6 +427,105 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             "idempotency_outcome_unknown",
         )
 
+    def test_corrupt_complete_results_replay_outcome_unknown_without_dispatch(
+        self,
+    ) -> None:
+        missing = object()
+        cases: tuple[tuple[str, Any], ...] = (
+            ("string", "corrupt"),
+            ("list", ["private"]),
+            ("null", None),
+            ("missing", missing),
+            ("empty_object", {}),
+        )
+        for name, stored_result in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                input_payload = {"title": "Corrupt complete result"}
+                key_hash = stable_hash(
+                    {
+                        "operation": "eventkit_create_reminder",
+                        "key": "corrupt-complete",
+                    }
+                )
+                record: dict[str, Any] = {
+                    "operation": "eventkit_create_reminder",
+                    "input_hash": stable_hash(input_payload),
+                    "created_at_epoch": time.time(),
+                    "state": "complete",
+                    "operation_id": "12121212-1212-4212-8212-121212121212",
+                }
+                if stored_result is not missing:
+                    record["result"] = stored_result
+                seed_store(
+                    storage_dir,
+                    {"version": 1, "entries": {key_hash: record}},
+                )
+                callback = mock.Mock(return_value=verified_receipt())
+
+                replay = durable_idempotency.execute_idempotent(
+                    operation="eventkit_create_reminder",
+                    key="corrupt-complete",
+                    input_payload=input_payload,
+                    callback=callback,
+                    storage_dir=storage_dir,
+                )
+                stored = read_store(storage_dir)["entries"][key_hash]
+
+                callback.assert_not_called()
+                self.assertTrue(replay["replayed"])
+                self.assertEqual(
+                    replay["status"],
+                    "committed_verification_pending",
+                )
+                self.assertEqual(
+                    replay["operation_id"],
+                    "12121212-1212-4212-8212-121212121212",
+                )
+                self.assertEqual(
+                    replay["error"]["reason_code"],
+                    "idempotency_outcome_unknown",
+                )
+                self.assertEqual(stored, record)
+
+    def test_complete_non_empty_result_replays_stored_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            input_payload = {"title": "Valid complete result"}
+            key_hash = stable_hash(
+                {
+                    "operation": "eventkit_create_reminder",
+                    "key": "valid-complete",
+                }
+            )
+            result = verified_receipt(target={"reminder_id": "R-VALID"})
+            record = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash(input_payload),
+                "created_at_epoch": time.time(),
+                "state": "complete",
+                "operation_id": "13131313-1313-4313-8313-131313131313",
+                "result": result,
+            }
+            seed_store(
+                storage_dir,
+                {"version": 1, "entries": {key_hash: record}},
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+
+            replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="valid-complete",
+                input_payload=input_payload,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+
+        callback.assert_not_called()
+        self.assertEqual(replay["status"], "verified")
+        self.assertEqual(replay["target"], {"reminder_id": "R-VALID"})
+        self.assertTrue(replay["replayed"])
+
     def test_existing_replay_stays_redacted_when_privacy_scrub_write_fails(
         self,
     ) -> None:
