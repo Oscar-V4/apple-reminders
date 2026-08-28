@@ -44,14 +44,28 @@ scripts_root = Path(sys.argv[1])
 storage_dir = Path(sys.argv[2])
 role = sys.argv[3]
 started_path = Path(sys.argv[4])
-ready_path = Path(sys.argv[5])
-release_path = Path(sys.argv[6])
+blocked_path = Path(sys.argv[5])
+escaped_path = Path(sys.argv[6])
+release_path = Path(sys.argv[7])
 sys.path.insert(0, str(scripts_root))
 
-from durable_idempotency import execute_idempotent
+import durable_idempotency
 
 if role == "follower":
-    ready_path.write_text("ready", encoding="utf-8")
+    real_flock = durable_idempotency._fcntl.flock
+
+    def observed_flock(file_descriptor, operation):
+        try:
+            real_flock(
+                file_descriptor,
+                operation | durable_idempotency._fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            blocked_path.write_text("blocked", encoding="utf-8")
+            return real_flock(file_descriptor, operation)
+        escaped_path.write_text("escaped", encoding="utf-8")
+
+    durable_idempotency._fcntl.flock = observed_flock
 
 def callback():
     if role != "leader":
@@ -71,7 +85,7 @@ def callback():
         "target": {"id": "R-1"},
     }
 
-result = execute_idempotent(
+result = durable_idempotency.execute_idempotent(
     operation="eventkit_create_reminder",
     key="process-lock-key",
     input_payload={"title": "Synthetic process lock"},
@@ -170,6 +184,28 @@ def wait_for_path(path: Path, *, timeout: float = 5.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"Timed out waiting for {path.name}")
         time.sleep(0.01)
+
+
+def wait_for_any(paths: tuple[Path, ...], *, timeout: float = 5.0) -> Path:
+    deadline = time.monotonic() + timeout
+    while True:
+        for path in paths:
+            if path.exists():
+                return path
+        if time.monotonic() >= deadline:
+            names = ", ".join(path.name for path in paths)
+            raise AssertionError(f"Timed out waiting for one of: {names}")
+        time.sleep(0.01)
+
+
+def reap_process(process: subprocess.Popen[str] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=2)
 
 
 class DurableIdempotencyContractTests(unittest.TestCase):
@@ -1225,7 +1261,8 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
             base = Path(temp_dir)
             storage_dir = base / "support"
             started_path = base / "leader-started"
-            ready_path = base / "follower-ready"
+            blocked_path = base / "follower-blocked"
+            escaped_path = base / "follower-escaped"
             release_path = base / "release-leader"
             command = [
                 sys.executable,
@@ -1240,7 +1277,8 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
                     *command,
                     "leader",
                     str(started_path),
-                    str(ready_path),
+                    str(blocked_path),
+                    str(escaped_path),
                     str(release_path),
                 ],
                 text=True,
@@ -1249,6 +1287,8 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
                 env=environment,
             )
             follower: subprocess.Popen[str] | None = None
+            leader_stdout = leader_stderr = ""
+            follower_stdout = follower_stderr = ""
             try:
                 wait_for_path(started_path)
                 follower = subprocess.Popen(
@@ -1256,7 +1296,8 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
                         *command,
                         "follower",
                         str(started_path),
-                        str(ready_path),
+                        str(blocked_path),
+                        str(escaped_path),
                         str(release_path),
                     ],
                     text=True,
@@ -1264,18 +1305,21 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
                     stderr=subprocess.PIPE,
                     env=environment,
                 )
-                wait_for_path(ready_path)
-                time.sleep(0.2)
-                self.assertIsNone(
-                    follower.poll(),
-                    "the follower escaped the process lock while the callback ran",
+                lock_outcome = wait_for_any((blocked_path, escaped_path))
+                self.assertEqual(
+                    lock_outcome,
+                    blocked_path,
+                    "the follower acquired the lock while the leader callback ran",
                 )
+                release_path.write_text("release", encoding="utf-8")
+                leader_stdout, leader_stderr = leader.communicate(timeout=10)
+                follower_stdout, follower_stderr = follower.communicate(timeout=10)
             finally:
                 release_path.write_text("release", encoding="utf-8")
+                reap_process(leader)
+                reap_process(follower)
 
-            leader_stdout, leader_stderr = leader.communicate(timeout=10)
             assert follower is not None
-            follower_stdout, follower_stderr = follower.communicate(timeout=10)
             self.assertEqual(leader.returncode, 0, leader_stderr)
             self.assertEqual(follower.returncode, 0, follower_stderr)
             self.assertEqual(

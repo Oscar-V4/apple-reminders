@@ -244,6 +244,67 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
 
+    def test_extracted_package_constructs_core_and_starts_adapter_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            archive = build_source_package.build_package(PLUGIN_ROOT, base / "build")
+            with zipfile.ZipFile(archive) as handle:
+                handle.extractall(base / "extracted")
+            manifest = json.loads(
+                (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            plugin_root = base / "extracted" / manifest["name"]
+            server = plugin_root / "mcp" / "server.py"
+            probe = (
+                "import importlib.util,json,sys;"
+                "from pathlib import Path;"
+                "path=Path(sys.argv[1]);"
+                "spec=importlib.util.spec_from_file_location('packaged_core_probe',path);"
+                "module=importlib.util.module_from_spec(spec);"
+                "sys.modules[spec.name]=module;"
+                "spec.loader.exec_module(module);"
+                "facade=module._LocalToolDispatch(module.DEFAULT_BACKEND_PATHS).core_facade();"
+                "adapter_loaded=any(Path(str(getattr(item,'__file__',''))).name=="
+                "'reminders_adapter.py' for item in sys.modules.values());"
+                "print(json.dumps({'facade':type(facade).__name__,"
+                "'adapter_loaded':adapter_loaded}))"
+            )
+            core_probe = subprocess.run(
+                [sys.executable, "-c", probe, str(server)],
+                cwd=plugin_root,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            adapter_help = subprocess.run(
+                [
+                    sys.executable,
+                    str(plugin_root / "scripts" / "reminders_adapter.py"),
+                    "--help",
+                ],
+                cwd=plugin_root,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(core_probe.returncode, 0, core_probe.stderr)
+        self.assertEqual(
+            json.loads(core_probe.stdout),
+            {"facade": "V2CoreFacade", "adapter_loaded": False},
+        )
+        self.assertEqual(adapter_help.returncode, 0, adapter_help.stderr)
+        self.assertIn("recover_deleted_reminder", adapter_help.stdout)
+        self.assertIn("replace_attachment", adapter_help.stdout)
+
     def test_recursive_marketplace_source_copy_initializes_with_exact_public_tools(self) -> None:
         marketplace = json.loads(
             (REPO_ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")

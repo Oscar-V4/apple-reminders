@@ -17,6 +17,7 @@ assert SPEC and SPEC.loader
 adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(adapter)
 
+import durable_idempotency  # noqa: E402
 from receipt_contract import (  # noqa: E402
     AdapterError,
     MutationNotStartedError,
@@ -87,6 +88,10 @@ class ReceiptAndErrorContractTests(unittest.TestCase):
     def test_adapter_reexports_shared_error_types(self) -> None:
         self.assertIs(adapter.AdapterError, AdapterError)
         self.assertIs(adapter.MutationNotStartedError, MutationNotStartedError)
+        self.assertIs(
+            adapter.execute_idempotent,
+            durable_idempotency.execute_idempotent,
+        )
 
     def test_exact_reminder_selector_rejects_unbounded_or_title_only_delete(self) -> None:
         with self.assertRaises(adapter.AdapterError) as empty:
