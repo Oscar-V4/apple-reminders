@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl as _fcntl
 import hashlib as _hashlib
 import json as _json
+import math as _math
 import os as _os
 import sys as _sys
 import tempfile as _tempfile
@@ -220,21 +221,46 @@ def _privacy_scrub_warning(exc: OSError) -> dict[str, Any]:
     }
 
 
+def _entry_created_at_epoch(value: Any) -> float:
+    if not isinstance(value, dict):
+        raise _MutationNotStartedError(
+            "The durable idempotency store has an unsupported entry.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        )
+    try:
+        created_at_epoch = float(value.get("created_at_epoch", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _MutationNotStartedError(
+            "The durable idempotency store has an invalid entry timestamp.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        ) from exc
+    if not _math.isfinite(created_at_epoch):
+        raise _MutationNotStartedError(
+            "The durable idempotency store has an invalid entry timestamp.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        )
+    return created_at_epoch
+
+
 def _prune_entries(
     entries: dict[str, Any],
     *,
     now: float | None = None,
     protected_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    for value in entries.values():
+        _entry_created_at_epoch(value)
     current = now if now is not None else _time.time()
     cutoff = current - _RETENTION_DAYS * 86400
     retained = {
         key: value
         for key, value in entries.items()
-        if isinstance(value, dict)
-        and (
+        if (
             key in protected_keys
-            or float(value.get("created_at_epoch", 0)) >= cutoff
+            or _entry_created_at_epoch(value) >= cutoff
         )
     }
     in_progress = sorted(
@@ -243,7 +269,7 @@ def _prune_entries(
             for key, value in retained.items()
             if _record_in_progress(value)
         ),
-        key=lambda item: float(item[1].get("created_at_epoch", 0)),
+        key=lambda item: _entry_created_at_epoch(item[1]),
         reverse=True,
     )
     completed = sorted(
@@ -252,7 +278,7 @@ def _prune_entries(
             for key, value in retained.items()
             if not _record_in_progress(value)
         ),
-        key=lambda item: float(item[1].get("created_at_epoch", 0)),
+        key=lambda item: _entry_created_at_epoch(item[1]),
         reverse=True,
     )
     remaining_slots = max(0, _MAX_ENTRIES - len(in_progress))
@@ -429,7 +455,7 @@ def execute_idempotent(
                 )
             oldest_key = min(
                 completed_keys,
-                key=lambda item: float(entries[item].get("created_at_epoch", 0)),
+                key=lambda item: _entry_created_at_epoch(entries[item]),
             )
             entries.pop(oldest_key)
 

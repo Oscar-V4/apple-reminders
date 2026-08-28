@@ -56,7 +56,9 @@ legacy complete results without changing the store version:
   is held, then atomically rewritten with every fence metadata field intact;
 - a failed existing-key scrub returns only the sanitized in-memory replay plus
   a bounded warning and never invokes the callback, while a new key still
-  requires the combined scrub-and-fence write to succeed before dispatch.
+  requires the combined scrub-and-fence write to succeed before dispatch;
+- a non-object entry or invalid/non-finite timestamp is a typed unreadable-store
+  proof before dispatch rather than a pruned record or raw conversion error.
 
 ## Non-goals
 

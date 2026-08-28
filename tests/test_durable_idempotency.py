@@ -954,6 +954,49 @@ class DurableIdempotencyContractTests(unittest.TestCase):
         )
         self.assertTrue(raised.exception.details["mutation_not_started"])
 
+    def test_corrupt_entry_shapes_fail_typed_before_dispatch(self) -> None:
+        key_hash = stable_hash(
+            {"operation": "eventkit_create_reminder", "key": "request-1"}
+        )
+        base_record = {
+            "operation": "eventkit_create_reminder",
+            "input_hash": stable_hash({"title": "Bounded"}),
+            "created_at_epoch": 100.0,
+            "state": "complete",
+            "operation_id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            "result": verified_receipt(),
+        }
+        cases: tuple[tuple[str, Any], ...] = (
+            ("non_object_record", "corrupt"),
+            ("non_numeric_timestamp", {**base_record, "created_at_epoch": "bad"}),
+            ("non_finite_timestamp", {**base_record, "created_at_epoch": float("nan")}),
+        )
+        for name, bad_record in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                seed_store(
+                    storage_dir,
+                    {"version": 1, "entries": {key_hash: bad_record}},
+                )
+                callback = mock.Mock(return_value=verified_receipt())
+
+                with self.assertRaises(MutationNotStartedError) as raised:
+                    durable_idempotency.execute_idempotent(
+                        operation="eventkit_create_reminder",
+                        key="request-1",
+                        input_payload={"title": "Bounded"},
+                        callback=callback,
+                        storage_dir=storage_dir,
+                    )
+
+                callback.assert_not_called()
+                self.assertEqual(raised.exception.code, "unexpected_error")
+                self.assertEqual(
+                    raised.exception.details["reason_code"],
+                    "idempotency_store_unreadable",
+                )
+                self.assertTrue(raised.exception.details["mutation_not_started"])
+
     def test_no_write_cleanup_failure_keeps_fence_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_dir = Path(temp_dir) / "support"

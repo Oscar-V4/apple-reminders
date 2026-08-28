@@ -123,6 +123,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   rewritten without changing fence identity. A failed scrub never redispatches
   an existing callback and returns only an in-memory redacted replay plus a
   bounded warning.
+- Classified non-object idempotency entries and invalid or non-finite entry
+  timestamps as a typed unreadable-store failure before dispatch. Corrupt
+  records can no longer fall through pruning or escape as a raw conversion
+  error with ambiguous mutation state.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public
