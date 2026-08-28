@@ -117,6 +117,12 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   its fence for a safe retry; possible-commit failures retain it. Core create
   now carries contract-validated EventKit no-write results through that same
   cleanup path instead of leaving a permanent unresolved fence.
+- Removed primitive arrays and bare recurrence counts from persisted retry
+  snapshots. On the next keyed operation, complete modern and legacy v1
+  results are re-sanitized under the existing process lock and atomically
+  rewritten without changing fence identity. A failed scrub never redispatches
+  an existing callback and returns only an in-memory redacted replay plus a
+  bounded warning.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public

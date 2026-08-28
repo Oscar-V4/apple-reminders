@@ -92,6 +92,8 @@ user-facing promise.
    - Freezes the existing file format and failure ordering. Storage policy,
      hash algorithms, lock scope, and error classification are not pluggable
      extension points.
+   - Re-sanitizes complete v1 results under the same lock, preserving fence
+     metadata while removing primitive user-authored arrays before replay.
 8. **Internal adapter and helpers**
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and

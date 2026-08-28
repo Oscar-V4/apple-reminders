@@ -60,7 +60,12 @@ def _stable_hash(value: Any) -> str:
     ).hexdigest()
 
 
-def _result_snapshot(value: Any, *, key: str | None = None) -> Any:
+def _result_snapshot(
+    value: Any,
+    *,
+    key: str | None = None,
+    retain_sequence_scalars: bool = False,
+) -> Any:
     """Keep retry-critical identifiers/status while excluding user content."""
 
     if isinstance(value, dict):
@@ -78,7 +83,6 @@ def _result_snapshot(value: Any, *, key: str | None = None) -> Any:
                     "backend_requested",
                     "id",
                     "pk",
-                    "count",
                     "state",
                     "semantics",
                     "reason",
@@ -107,7 +111,11 @@ def _result_snapshot(value: Any, *, key: str | None = None) -> Any:
                 or normalized.endswith("_count")
             )
             if keep:
-                result[str(item_key)] = _result_snapshot(item, key=str(item_key))
+                result[str(item_key)] = _result_snapshot(
+                    item,
+                    key=str(item_key),
+                    retain_sequence_scalars=normalized.endswith("_ids"),
+                )
             elif isinstance(item, (dict, list, tuple)):
                 nested = _result_snapshot(item, key=str(item_key))
                 preserve_empty_receipt_object = (
@@ -119,7 +127,23 @@ def _result_snapshot(value: Any, *, key: str | None = None) -> Any:
                     result[str(item_key)] = nested
         return result
     if isinstance(value, (list, tuple)):
-        return [_result_snapshot(item, key=key) for item in value]
+        result: list[Any] = []
+        for item in value:
+            if isinstance(item, dict):
+                nested = _result_snapshot(item, key=key)
+            elif isinstance(item, (list, tuple)):
+                nested = _result_snapshot(
+                    item,
+                    key=key,
+                    retain_sequence_scalars=retain_sequence_scalars,
+                )
+            elif retain_sequence_scalars:
+                nested = item
+            else:
+                continue
+            if nested not in ({}, []):
+                result.append(nested)
+        return result
     return value
 
 
@@ -161,6 +185,39 @@ def _record_in_progress(value: Any) -> bool:
     # shape remains an incomplete fence so capacity maintenance fails closed.
     stored_result = value.get("result")
     return not isinstance(stored_result, dict) or not bool(stored_result)
+
+
+def _sanitize_completed_results(
+    entries: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Scrub old complete snapshots without changing fence authorization."""
+
+    changed = False
+    sanitized: dict[str, Any] = {}
+    for entry_key, value in entries.items():
+        if not isinstance(value, dict) or value.get("state") == "in_progress":
+            sanitized[entry_key] = value
+            continue
+        record = dict(value)
+        stored_result = record.get("result")
+        if isinstance(stored_result, dict):
+            safe_result = _result_snapshot(stored_result)
+            if safe_result != stored_result:
+                record["result"] = safe_result
+                changed = True
+        sanitized[entry_key] = record
+    return sanitized, changed
+
+
+def _privacy_scrub_warning(exc: OSError) -> dict[str, Any]:
+    return {
+        "code": "idempotency_privacy_scrub_failed",
+        "message": (
+            "This replay was redacted, but older local retry content could not "
+            "be scrubbed from disk."
+        ),
+        "detail": type(exc).__name__,
+    }
 
 
 def _prune_entries(
@@ -308,12 +365,25 @@ def execute_idempotent(
         lock_path.chmod(0o600)
         _fcntl.flock(lock.fileno(), _fcntl.LOCK_EX)
         payload = _load_store(store_path)
+        sanitized_entries, privacy_scrub_required = _sanitize_completed_results(
+            payload.get("entries", {})
+        )
         entries = _prune_entries(
-            payload.get("entries", {}),
+            sanitized_entries,
             protected_keys=frozenset({key_hash}),
         )
         record = entries.get(key_hash)
         if record:
+            privacy_warning: dict[str, Any] | None = None
+            if privacy_scrub_required:
+                try:
+                    _write_store(
+                        {"version": 1, "entries": entries},
+                        storage_dir=support,
+                        store_path=store_path,
+                    )
+                except OSError as exc:
+                    privacy_warning = _privacy_scrub_warning(exc)
             if record.get("input_hash") != input_hash:
                 raise _MutationNotStartedError(
                     "Idempotency key was already used with different input",
@@ -335,6 +405,12 @@ def execute_idempotent(
                 if not isinstance(operation_id, str) or not operation_id:
                     operation_id = _new_operation_id()
                 replay = _outcome_unknown_receipt(operation, operation_id)
+            if privacy_warning is not None:
+                warnings = replay.get("warnings")
+                if not isinstance(warnings, list):
+                    warnings = []
+                    replay["warnings"] = warnings
+                warnings.append(privacy_warning)
             replay["replayed"] = True
             replay["idempotency_key_hash"] = key_hash
             return replay

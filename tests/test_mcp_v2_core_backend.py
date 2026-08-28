@@ -440,6 +440,63 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         self.assertTrue(replay.payload["replayed"])
         self.assertEqual(bridge_call.call_count, 1)
 
+    def test_create_replay_stays_committed_after_private_recurrence_redaction(
+        self,
+    ) -> None:
+        verified = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "verified",
+            "operation": "create_reminder",
+            "operation_id": "99999999-9999-4999-8999-999999999999",
+            "backend": "eventkit_public_sdk",
+            "target": {"reminder_id": "R-RECURRENCE"},
+            "after": {
+                "reminder_id": "R-RECURRENCE",
+                "recurrence_rules": [
+                    {
+                        "frequency": "monthly",
+                        "days_of_month": [5, 20],
+                        "end": {"count": 12},
+                    }
+                ],
+            },
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+                "target_fields": ["title", "recurrence_rules"],
+            },
+            "recovery": {
+                "semantics": "not_applicable",
+                "automatic_retry_safe": False,
+            },
+        }
+        bridge_call = mock.Mock(return_value=transport(copy.deepcopy(verified)))
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Private recurring schedule",
+            "idempotency_key": "create-private-recurrence",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(Path(temp_dir) / "support"),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertEqual(first.mutation_state, "committed")
+        self.assertIn("recurrence_rules", first.payload["after"])
+        self.assertEqual(replay.mutation_state, "committed")
+        self.assertEqual(replay.payload["after"], {"reminder_id": "R-RECURRENCE"})
+        self.assertNotIn("target_fields", replay.payload["verification"])
+        self.assertTrue(replay.payload["replayed"])
+        self.assertEqual(bridge_call.call_count, 1)
+
     def test_create_invalid_success_receipt_remains_fenced(self) -> None:
         invalid = {
             "schema_version": 1,

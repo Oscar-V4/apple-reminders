@@ -36,8 +36,10 @@ implementation to a temporary storage directory. `AdapterError` and
 boundary uses one exact type identity. The private adapter imports and
 re-exports those names for retained command compatibility.
 
-The extraction preserves the existing v1 contract byte-for-byte and in the
-same order:
+The extraction preserves the existing v1 fence identity, record envelope,
+compact JSON serialization, and execution order. It deliberately tightens the
+privacy projection so primitive user-authored arrays are removed from new and
+legacy complete results without changing the store version:
 
 - a falsey key bypasses storage and locking;
 - SHA-256 canonicalization and operation namespaces do not change;
@@ -49,7 +51,12 @@ same order:
 - final Receipt persistence failure returns the successful live result with a
   warning and leaves replay outcome unknown;
 - legacy state-less v1 records, 30-day retention, 500-entry capacity, current
-  key protection, privacy projection, and operation aliases do not change.
+  key protection, and operation aliases do not change;
+- complete modern and legacy results are re-sanitized while the existing lock
+  is held, then atomically rewritten with every fence metadata field intact;
+- a failed existing-key scrub returns only the sanitized in-memory replay plus
+  a bounded warning and never invokes the callback, while a new key still
+  requires the combined scrub-and-fence write to succeed before dispatch.
 
 ## Non-goals
 
@@ -66,4 +73,6 @@ the private adapter. Retained Native commands keep their existing call shape.
 Characterization tests own exact hashes, JSON bytes, permissions, privacy,
 failure ordering, and replay behavior at the new Module boundary. Package
 auditing includes the new runtime file, while public MCP schemas and tool
-behavior remain unchanged.
+behavior remain unchanged. The privacy tightening needs no v2 store because it
+changes neither key identity nor mutation authorization and never edits an
+in-progress fence.

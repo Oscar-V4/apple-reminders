@@ -279,7 +279,10 @@ deep internal Module shared by Core create and the retained Native adapter
 commands. Its v1 hashes, JSON bytes, lock lifetime, write-ahead fence, and
 privacy projection are compatibility rules rather than configurable policy.
 The Core backend is composed with that narrow function and does not load the
-full private adapter merely to obtain idempotency.
+full private adapter merely to obtain idempotency. Complete v1 results are
+re-sanitized under the same lock on the next keyed operation so primitive
+user-authored arrays from an older retry snapshot are neither replayed nor
+retained after a successful atomic scrub.
 
 ## Local validation
 

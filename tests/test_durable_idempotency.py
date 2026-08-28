@@ -214,6 +214,326 @@ class DurableIdempotencyContractTests(unittest.TestCase):
         self.assertNotIn("Private list", stored)
         self.assertNotIn("request-1", stored)
 
+    def test_scalar_sequences_and_recurrence_content_are_not_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            callback = mock.Mock(
+                return_value=verified_receipt(
+                    target={"reminder_id": "R-1"},
+                    after={
+                        "reminder_id": "R-1",
+                        "source_attachment_ids": ["A-1", "A-2"],
+                        "recurrence_rules": [
+                            {
+                                "frequency": "monthly",
+                                "days_of_month": [5, 20],
+                                "months_of_year": [1, 7],
+                                "end": {"count": 12},
+                            }
+                        ],
+                    },
+                    verification={
+                        "state": "read_back",
+                        "write_performed": True,
+                        "final_read": True,
+                        "matched": True,
+                        "target_fields": ["title", "recurrence_rules"],
+                    },
+                    warnings=["Private warning text"],
+                )
+            )
+            first = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="recurrence-redaction",
+                input_payload={"title": "Private schedule"},
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="recurrence-redaction",
+                input_payload={"title": "Private schedule"},
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            record = next(iter(read_store(storage_dir)["entries"].values()))
+            snapshot = record["result"]
+
+        callback.assert_called_once_with()
+        self.assertIn("recurrence_rules", first["after"])
+        self.assertEqual(
+            snapshot["after"],
+            {
+                "reminder_id": "R-1",
+                "source_attachment_ids": ["A-1", "A-2"],
+            },
+        )
+        self.assertNotIn("target_fields", snapshot["verification"])
+        self.assertNotIn("warnings", snapshot)
+        self.assertEqual(replay["after"], snapshot["after"])
+        self.assertTrue(replay["replayed"])
+
+    def test_replay_scrubs_modern_and_legacy_complete_records_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            current_input = {"title": "Current"}
+            legacy_input = {"title": "Legacy"}
+            current_key = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "current-key"}
+            )
+            legacy_key = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "legacy-key"}
+            )
+            current_metadata = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash(current_input),
+                "created_at_epoch": time.time(),
+                "state": "complete",
+                "operation_id": "44444444-4444-4444-8444-444444444444",
+            }
+            legacy_metadata = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash(legacy_input),
+                "created_at_epoch": time.time(),
+                "operation_id": "55555555-5555-4555-8555-555555555555",
+            }
+            private_result = verified_receipt(
+                target={"reminder_id": "R-1"},
+                after={
+                    "reminder_id": "R-1",
+                    "recurrence_rules": [
+                        {"days_of_month": [5, 20], "end": {"count": 12}}
+                    ],
+                },
+            )
+            seed_store(
+                storage_dir,
+                {
+                    "version": 1,
+                    "entries": {
+                        current_key: {**current_metadata, "result": private_result},
+                        legacy_key: {**legacy_metadata, "result": private_result},
+                    },
+                },
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+
+            replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="current-key",
+                input_payload=current_input,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            legacy_replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="legacy-key",
+                input_payload=legacy_input,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            stored = read_store(storage_dir)["entries"]
+
+        callback.assert_not_called()
+        self.assertTrue(replay["replayed"])
+        self.assertNotIn("recurrence_rules", replay["after"])
+        self.assertTrue(legacy_replay["replayed"])
+        self.assertEqual(legacy_replay["status"], "verified")
+        self.assertEqual(
+            {key: stored[current_key][key] for key in current_metadata},
+            current_metadata,
+        )
+        self.assertEqual(
+            {key: stored[legacy_key][key] for key in legacy_metadata},
+            legacy_metadata,
+        )
+        self.assertNotIn("state", stored[legacy_key])
+        for record in stored.values():
+            self.assertNotIn("recurrence_rules", record["result"]["after"])
+
+    def test_legacy_record_without_state_or_result_replays_outcome_unknown(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            input_payload = {"title": "Legacy pending"}
+            key_hash = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "legacy-pending"}
+            )
+            seed_store(
+                storage_dir,
+                {
+                    "version": 1,
+                    "entries": {
+                        key_hash: {
+                            "operation": "eventkit_create_reminder",
+                            "input_hash": stable_hash(input_payload),
+                            "created_at_epoch": time.time(),
+                        }
+                    },
+                },
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+
+            replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="legacy-pending",
+                input_payload=input_payload,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+
+        callback.assert_not_called()
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["status"], "committed_verification_pending")
+        self.assertEqual(
+            replay["error"]["reason_code"],
+            "idempotency_outcome_unknown",
+        )
+
+    def test_existing_replay_stays_redacted_when_privacy_scrub_write_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            input_payload = {"title": "Existing"}
+            key_hash = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "existing-key"}
+            )
+            record = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash(input_payload),
+                "created_at_epoch": time.time(),
+                "state": "complete",
+                "operation_id": "66666666-6666-4666-8666-666666666666",
+                "result": verified_receipt(
+                    target={"reminder_id": "R-1"},
+                    after={
+                        "reminder_id": "R-1",
+                        "recurrence_rules": [{"days_of_month": [1, 15]}],
+                    },
+                ),
+            }
+            seed_store(
+                storage_dir,
+                {"version": 1, "entries": {key_hash: record}},
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+            with mock.patch.object(
+                durable_idempotency,
+                "_write_store",
+                side_effect=OSError("read-only volume"),
+            ):
+                replay = durable_idempotency.execute_idempotent(
+                    operation="eventkit_create_reminder",
+                    key="existing-key",
+                    input_payload=input_payload,
+                    callback=callback,
+                    storage_dir=storage_dir,
+                )
+            unchanged = read_store(storage_dir)["entries"][key_hash]
+
+        callback.assert_not_called()
+        self.assertNotIn("recurrence_rules", replay["after"])
+        self.assertEqual(
+            replay["warnings"][-1]["code"],
+            "idempotency_privacy_scrub_failed",
+        )
+        self.assertEqual(unchanged, record)
+
+    def test_new_key_does_not_dispatch_when_combined_scrub_and_fence_write_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            old_key = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "old-key"}
+            )
+            seed_store(
+                storage_dir,
+                {
+                    "version": 1,
+                    "entries": {
+                        old_key: {
+                            "operation": "eventkit_create_reminder",
+                            "input_hash": stable_hash({"title": "Old"}),
+                            "created_at_epoch": time.time(),
+                            "state": "complete",
+                            "operation_id": "77777777-7777-4777-8777-777777777777",
+                            "result": verified_receipt(
+                                after={
+                                    "reminder_id": "R-OLD",
+                                    "recurrence_rules": [
+                                        {"days_of_month": [3, 17]}
+                                    ],
+                                }
+                            ),
+                        }
+                    },
+                },
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+            with (
+                mock.patch.object(
+                    durable_idempotency,
+                    "_write_store",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaises(MutationNotStartedError) as raised,
+            ):
+                durable_idempotency.execute_idempotent(
+                    operation="eventkit_create_reminder",
+                    key="new-key",
+                    input_payload={"title": "New"},
+                    callback=callback,
+                    storage_dir=storage_dir,
+                )
+
+        callback.assert_not_called()
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "idempotency_fence_write_failed",
+        )
+
+    def test_in_progress_record_is_never_rewritten_or_redispatched_by_scrub(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            input_payload = {"title": "Pending"}
+            key_hash = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "pending-key"}
+            )
+            record = {
+                "operation": "eventkit_create_reminder",
+                "input_hash": stable_hash(input_payload),
+                "created_at_epoch": time.time(),
+                "state": "in_progress",
+                "operation_id": "88888888-8888-4888-8888-888888888888",
+                "result": {
+                    "after": {"recurrence_rules": [{"days_of_month": [9]}]}
+                },
+            }
+            seed_store(
+                storage_dir,
+                {"version": 1, "entries": {key_hash: record}},
+            )
+            callback = mock.Mock(return_value=verified_receipt())
+
+            replay = durable_idempotency.execute_idempotent(
+                operation="eventkit_create_reminder",
+                key="pending-key",
+                input_payload=input_payload,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            unchanged = read_store(storage_dir)["entries"][key_hash]
+
+        callback.assert_not_called()
+        self.assertEqual(replay["status"], "committed_verification_pending")
+        self.assertNotIn("recurrence_rules", repr(replay))
+        self.assertEqual(unchanged, record)
+
     def test_reusing_key_with_different_input_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_dir = Path(temp_dir) / "support"
@@ -727,6 +1047,50 @@ class DurableIdempotencyGoldenTests(unittest.TestCase):
             stored["entries"][expected_key_hash]["operation"],
             "eventkit_create_reminder",
         )
+
+    def test_pre_extraction_v1_store_bytes_are_a_literal_golden(self) -> None:
+        expected = (
+            '{"entries":{"7f07173859f85f03dfba2a4581de6b4f7be230ae31353bed7b72b673d9de4867":'
+            '{"created_at_epoch":100.0,"input_hash":"bd095b10a2f083dc0dd867dab2f9036775310350d140a3e89bdf2f1340c31aed",'
+            '"operation":"eventkit_create_reminder","operation_id":"11111111-1111-4111-8111-111111111111",'
+            '"result":{"backend":"eventkit_public_sdk","ok":true,"operation":"create_reminder",'
+            '"operation_id":"22222222-2222-4222-8222-222222222222","recovery":{"semantics":"not_applicable"},'
+            '"status":"verified","target":{"id":"R-1"},"verification":{"final_read":true,"state":"read_back",'
+            '"write_performed":true}},"state":"complete"}},"version":1}'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            with (
+                mock.patch.object(
+                    durable_idempotency,
+                    "_new_operation_id",
+                    return_value="11111111-1111-4111-8111-111111111111",
+                ),
+                mock.patch.object(durable_idempotency._time, "time", return_value=100.0),
+            ):
+                durable_idempotency.execute_idempotent(
+                    operation="eventkit_create_reminder",
+                    key="request-1",
+                    input_payload={"title": "Sensitive title"},
+                    callback=lambda: {
+                        "ok": True,
+                        "status": "verified",
+                        "operation": "create_reminder",
+                        "operation_id": "22222222-2222-4222-8222-222222222222",
+                        "backend": "eventkit_public_sdk",
+                        "target": {"id": "R-1", "title": "Sensitive title"},
+                        "verification": {
+                            "state": "read_back",
+                            "write_performed": True,
+                            "final_read": True,
+                        },
+                        "recovery": {"semantics": "not_applicable"},
+                    },
+                    storage_dir=storage_dir,
+                )
+            raw = (storage_dir / STORE_NAME).read_text(encoding="utf-8")
+
+        self.assertEqual(raw, expected)
 
     def test_store_is_exact_compact_sorted_version_one_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

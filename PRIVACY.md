@@ -65,6 +65,16 @@ be published. Current code applies bounded size and retention controls; old
 files produced by earlier versions should not be assumed to have the same
 format.
 
+The idempotency store is designed to retain only hashed request identity,
+operation identifiers/status, counts, and bounded verification proof. It does
+not retain raw titles, notes, URLs, recurrence values, or raw user-authored
+primitive arrays.
+The next keyed operation re-sanitizes complete modern and legacy v1 results
+under the process lock and atomically rewrites them when needed. If that scrub
+cannot be persisted, an existing-key replay remains redacted in memory, carries
+a bounded warning, and never redispatches the callback. Treat the store itself
+as private because hashes and stable identifiers remain linkable metadata.
+
 Legacy backups are the most sensitive artifact. A targeted SQLite backup can
 contain all reminder content in one store; a container archive can additionally
 cover multiple stores and attachment material. The current runtime neither
