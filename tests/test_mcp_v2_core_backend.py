@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -13,8 +14,13 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 sys.path.insert(0, str(PLUGIN_ROOT))
+sys.path.insert(0, str(SCRIPTS_DIR))
 
+import durable_idempotency
+from durable_idempotency import execute_idempotent
+from mcp import server as mcp_server
 from mcp.v2_core import V2CoreFacade
 from mcp.v2_core_backend import CoreBackend
 from mcp.v2_transport import DispatchCertainty, TransportResult
@@ -49,10 +55,6 @@ def load_script_module(name: str, path: Path) -> Any:
     return module
 
 
-REAL_ADAPTER = load_script_module(
-    "reminders_adapter_core_backend_tests",
-    PLUGIN_ROOT / "scripts" / "reminders_adapter.py",
-)
 REAL_BRIDGE = load_script_module(
     "eventkit_bridge_core_backend_tests",
     PLUGIN_ROOT / "scripts" / "eventkit_bridge.py",
@@ -82,12 +84,12 @@ class BridgeContract:
             raise RuntimeError("operation mismatch")
 
 
-class AdapterModule:
-    AdapterError = ()
+def idempotency_passthrough(**arguments: Any) -> dict[str, Any]:
+    return arguments["callback"]()
 
-    @staticmethod
-    def execute_idempotent(**arguments: Any) -> dict[str, Any]:
-        return arguments["callback"]()
+
+def bound_idempotency(storage_dir: Path) -> Any:
+    return partial(execute_idempotent, storage_dir=storage_dir)
 
 
 def make_backend(
@@ -96,33 +98,87 @@ def make_backend(
     adapter_call: Any | None = None,
     build_adapter_argv: Any | None = None,
     receipt_validator: Any | None = None,
-    adapter_module: Any | None = None,
+    idempotency_call: Any | None = None,
     bridge_module: Any | None = None,
 ) -> CoreBackend:
     return CoreBackend(
         bridge_call=bridge_call,
         adapter_call=adapter_call or mock.Mock(),
         build_adapter_argv=build_adapter_argv or mock.Mock(),
-        adapter_module=lambda: adapter_module or AdapterModule,
+        idempotency_call=idempotency_call or idempotency_passthrough,
         bridge_module=lambda: bridge_module or BridgeContract(),
         receipt_validator=receipt_validator or mock.Mock(return_value=None),
     )
 
 
 class CoreBackendInterfaceTests(unittest.TestCase):
-    def test_non_create_mutation_does_not_load_idempotency_adapter(self) -> None:
+    def test_server_composes_core_without_an_in_process_adapter_loader(self) -> None:
+        self.assertFalse(hasattr(mcp_server, "_ADAPTER_MODULE"))
+        self.assertFalse(hasattr(mcp_server, "bundled_adapter_module"))
+        dispatch = mcp_server._LocalToolDispatch(mcp_server.DEFAULT_BACKEND_PATHS)
+
+        with (
+            mock.patch("mcp.v2_core_backend.CoreBackend") as backend_type,
+            mock.patch("mcp.v2_core.V2CoreFacade") as facade_type,
+        ):
+            facade = dispatch.core_facade()
+
+        self.assertIs(facade, facade_type.return_value)
+        kwargs = backend_type.call_args.kwargs
+        self.assertIs(kwargs["idempotency_call"], mcp_server.execute_idempotent)
+        self.assertNotIn("adapter_module", kwargs)
+
+    def test_create_uses_narrow_idempotency_without_importing_adapter(self) -> None:
+        def loaded_adapter_modules() -> set[str]:
+            return {
+                name
+                for name, module in sys.modules.items()
+                if Path(str(getattr(module, "__file__", ""))).name
+                == "reminders_adapter.py"
+            }
+
+        payload = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "verified",
+            "ok": True,
+        }
+        idempotency_call = mock.Mock(side_effect=idempotency_passthrough)
+        backend = make_backend(
+            bridge_call=mock.Mock(return_value=transport(payload)),
+            idempotency_call=idempotency_call,
+        )
+        before = loaded_adapter_modules()
+
+        reply = backend.invoke(
+            "create_reminder",
+            {
+                "calendar_id": "LIST-1",
+                "title": "Narrow dependency",
+                "idempotency_key": "narrow-idempotency",
+            },
+            mutation=True,
+        )
+
+        self.assertFalse(reply.is_error)
+        self.assertEqual(loaded_adapter_modules(), before)
+        idempotency_call.assert_called_once()
+
+    def test_non_create_mutation_does_not_call_idempotency(self) -> None:
         payload = {
             "schema_version": 1,
             "operation": "update_reminder",
             "status": "verified",
             "ok": True,
         }
-        adapter_loader = mock.Mock(side_effect=RuntimeError("adapter unavailable"))
+        idempotency_call = mock.Mock(
+            side_effect=RuntimeError("idempotency unavailable")
+        )
         backend = CoreBackend(
             bridge_call=mock.Mock(return_value=transport(payload)),
             adapter_call=mock.Mock(),
             build_adapter_argv=mock.Mock(),
-            adapter_module=adapter_loader,
+            idempotency_call=idempotency_call,
             bridge_module=lambda: BridgeContract(),
             receipt_validator=mock.Mock(return_value=None),
         )
@@ -139,7 +195,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertFalse(reply.is_error)
         self.assertEqual(reply.payload, payload)
-        adapter_loader.assert_not_called()
+        idempotency_call.assert_not_called()
 
     def test_create_proven_no_write_bridge_failure_clears_fence_for_retry(
         self,
@@ -159,11 +215,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Safe retry",
@@ -173,26 +224,22 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
             store = support / "idempotency.json"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(REAL_ADAPTER, "IDEMPOTENCY_STORE", store),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke(
-                    "create_reminder",
-                    arguments,
-                    mutation=True,
-                )
-                second = backend.invoke(
-                    "create_reminder",
-                    arguments,
-                    mutation=True,
-                )
-                stored = json.loads(store.read_text(encoding="utf-8"))
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke(
+                "create_reminder",
+                arguments,
+                mutation=True,
+            )
+            second = backend.invoke(
+                "create_reminder",
+                arguments,
+                mutation=True,
+            )
+            stored = json.loads(store.read_text(encoding="utf-8"))
 
         self.assertTrue(first.is_error)
         self.assertTrue(second.is_error)
@@ -212,11 +259,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Unclassified failure",
@@ -225,29 +267,21 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke(
-                    "create_reminder",
-                    arguments,
-                    mutation=True,
-                )
-                replay = backend.invoke(
-                    "create_reminder",
-                    arguments,
-                    mutation=True,
-                )
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke(
+                "create_reminder",
+                arguments,
+                mutation=True,
+            )
+            replay = backend.invoke(
+                "create_reminder",
+                arguments,
+                mutation=True,
+            )
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, failed)
@@ -272,12 +306,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 proves_not_started=True,
             )
         )
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
-        facade = V2CoreFacade(backend)
         arguments = {
             "list_id": "LIST-1",
             "title": "Retry prelaunch",
@@ -287,22 +315,19 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
             store = support / "idempotency.json"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(REAL_ADAPTER, "IDEMPOTENCY_STORE", store),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first, first_state = facade.call_with_state(
-                    "create_reminder", arguments
-                )
-                second, second_state = facade.call_with_state(
-                    "create_reminder", arguments
-                )
-                stored = json.loads(store.read_text(encoding="utf-8"))
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            facade = V2CoreFacade(backend)
+            first, first_state = facade.call_with_state(
+                "create_reminder", arguments
+            )
+            second, second_state = facade.call_with_state(
+                "create_reminder", arguments
+            )
+            stored = json.loads(store.read_text(encoding="utf-8"))
 
         for receipt in (first, second):
             self.assertFalse(receipt["ok"])
@@ -343,11 +368,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(pending)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Pending create",
@@ -356,21 +376,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke("create_reminder", arguments, mutation=True)
-                replay = backend.invoke("create_reminder", arguments, mutation=True)
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertFalse(first.is_error)
         self.assertEqual(first.payload["status"], "committed_verification_pending")
@@ -404,11 +416,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(verified)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Committed replay",
@@ -418,21 +425,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke("create_reminder", arguments, mutation=True)
-                replay = backend.invoke("create_reminder", arguments, mutation=True)
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertEqual(first.payload["status"], "partial_success")
         self.assertEqual(first.mutation_state, "committed")
@@ -449,11 +448,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "ok": True,
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(invalid)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Invalid receipt",
@@ -462,21 +456,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke("create_reminder", arguments, mutation=True)
-                replay = backend.invoke("create_reminder", arguments, mutation=True)
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload["error"]["code"], "invalid_eventkit_receipt")
@@ -498,11 +484,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(rejected)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Rejected label",
@@ -511,21 +492,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke("create_reminder", arguments, mutation=True)
-                replay = backend.invoke("create_reminder", arguments, mutation=True)
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, rejected)
@@ -557,11 +530,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         bridge_call = mock.Mock(
             return_value=transport(copy.deepcopy(contradictory))
         )
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Contradictory no-write",
@@ -570,21 +538,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-            ):
-                first = backend.invoke("create_reminder", arguments, mutation=True)
-                replay = backend.invoke("create_reminder", arguments, mutation=True)
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            first = backend.invoke("create_reminder", arguments, mutation=True)
+            replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertTrue(first.is_error)
         self.assertEqual(first.payload, contradictory)
@@ -610,45 +570,41 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             },
         }
         bridge_call = mock.Mock(return_value=transport(copy.deepcopy(failed)))
-        backend = make_backend(
-            bridge_call=bridge_call,
-            adapter_module=REAL_ADAPTER,
-            bridge_module=REAL_BRIDGE,
-        )
         arguments = {
             "calendar_id": "LIST-1",
             "title": "Cleanup failure",
             "idempotency_key": "create-cleanup-failure",
         }
         writes = 0
-        real_write = REAL_ADAPTER.write_idempotency_store
+        real_write = durable_idempotency._write_store
 
-        def fail_cleanup(payload: dict[str, Any]) -> None:
+        def fail_cleanup(
+            payload: dict[str, Any],
+            *,
+            storage_dir: Path,
+            store_path: Path,
+        ) -> None:
             nonlocal writes
             writes += 1
             if writes == 2:
                 raise OSError("disk full")
-            real_write(payload)
+            real_write(
+                payload,
+                storage_dir=storage_dir,
+                store_path=store_path,
+            )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
-            with (
-                mock.patch.object(REAL_ADAPTER, "APP_SUPPORT", support),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_STORE",
-                    support / "idempotency.json",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "IDEMPOTENCY_LOCK",
-                    support / "idempotency.lock",
-                ),
-                mock.patch.object(
-                    REAL_ADAPTER,
-                    "write_idempotency_store",
-                    side_effect=fail_cleanup,
-                ),
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+                bridge_module=REAL_BRIDGE,
+            )
+            with mock.patch.object(
+                durable_idempotency,
+                "_write_store",
+                side_effect=fail_cleanup,
             ):
                 first = backend.invoke("create_reminder", arguments, mutation=True)
                 replay = backend.invoke("create_reminder", arguments, mutation=True)

@@ -1237,38 +1237,6 @@ class CrossReminderImageCopyTests(unittest.TestCase):
                 "source_image_file_not_regular",
             )
 
-    def test_idempotency_snapshot_keeps_receipt_proof_but_drops_private_paths(self) -> None:
-        snapshot = reminders_adapter.idempotency_result_snapshot(
-            {
-                "status": "verified",
-                "target": {"reminder_id": self.DESTINATION_ID},
-                "verification": {
-                    "state": "read_back",
-                    "write_performed": True,
-                    "final_read": True,
-                    "matched": True,
-                    "source_unchanged": True,
-                    "final_attachment_content_hash": "a" * 64,
-                },
-                "recovery": {
-                    "semantics": "not_applicable",
-                    "automatic_retry_safe": False,
-                },
-                "private_path": "/Users/example/Library/private.png",
-            }
-        )
-
-        self.assertTrue(snapshot["verification"]["write_performed"])
-        self.assertTrue(snapshot["verification"]["final_read"])
-        self.assertTrue(snapshot["verification"]["matched"])
-        self.assertEqual(
-            snapshot["verification"]["final_attachment_content_hash"],
-            "a" * 64,
-        )
-        self.assertFalse(snapshot["recovery"]["automatic_retry_safe"])
-        self.assertNotIn("private_path", snapshot)
-
-
 class AttachmentSyncTests(unittest.TestCase):
     def test_reminderkit_attach_does_not_hold_a_sqlite_write_transaction(self) -> None:
         con = sqlite3.connect(":memory:")

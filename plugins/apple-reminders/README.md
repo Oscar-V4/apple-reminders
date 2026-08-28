@@ -274,6 +274,13 @@ their documented schema-gated SQLite diagnostic branches; those are not a
 second Core-write surface. Public skills must not recreate or fall back to the
 removed routes.
 
+Durable mutation replay lives in `scripts/durable_idempotency.py`, a single
+deep internal Module shared by Core create and the retained Native adapter
+commands. Its v1 hashes, JSON bytes, lock lifetime, write-ahead fence, and
+privacy projection are compatibility rules rather than configurable policy.
+The Core backend imports that narrow function directly and does not load the
+full private adapter merely to obtain idempotency.
+
 ## Local validation
 
 These checks do not launch Reminders or read live reminder rows:

@@ -21,7 +21,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from receipt_contract import validated_receipt_mutation_state
+from receipt_contract import (
+    AdapterError,
+    MutationNotStartedError,
+    validated_receipt_mutation_state,
+)
 
 if __package__:  # Package import in tests; script-local import in the stdio server.
     from .v2_core import EventKitReply, MutationState
@@ -34,6 +38,7 @@ else:  # pragma: no cover - exercised by the script entry point
 BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
 AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
+IdempotencyCall = Callable[..., dict[str, Any]]
 ModuleLoader = Callable[[], Any]
 ReceiptValidator = Callable[..., str | None]
 
@@ -72,14 +77,14 @@ class CoreBackend:
         bridge_call: BridgeCall,
         adapter_call: AdapterCall,
         build_adapter_argv: ArgvBuilder,
-        adapter_module: ModuleLoader,
+        idempotency_call: IdempotencyCall,
         bridge_module: ModuleLoader,
         receipt_validator: ReceiptValidator,
     ) -> None:
         self._bridge_call = bridge_call
         self._adapter_call = adapter_call
         self._build_adapter_argv = build_adapter_argv
-        self._adapter_module = adapter_module
+        self._idempotency_call = idempotency_call
         self._bridge_module = bridge_module
         self._receipt_validator = receipt_validator
 
@@ -693,7 +698,6 @@ class CoreBackend:
         bridge_arguments = dict(arguments)
         idempotency_key = bridge_arguments.pop("idempotency_key", None)
         bridge_contract = self._bridge_module()
-        adapter: Any | None = None
         executed_state: MutationState | None = None
 
         def execute_once() -> dict[str, Any]:
@@ -702,16 +706,6 @@ class CoreBackend:
             payload = transport.payload
             is_error = transport.is_error
             if is_error:
-                adapter_error = (
-                    getattr(adapter, "AdapterError", None)
-                    if adapter is not None
-                    else None
-                )
-                mutation_not_started_error = (
-                    getattr(adapter, "MutationNotStartedError", None)
-                    if adapter is not None
-                    else None
-                )
                 validate_response = getattr(bridge_contract, "validate_response", None)
                 transport_not_started = (
                     transport.proves_not_started and payload.get("ok") is False
@@ -733,8 +727,6 @@ class CoreBackend:
                         error_state = "not_mutated"
                 proven_no_write = (
                     tool_name == "create_reminder"
-                    and isinstance(adapter_error, type)
-                    and isinstance(mutation_not_started_error, type)
                     and (transport_not_started or contract_proved_no_write)
                 )
                 if proven_no_write and error_state != "not_mutated":
@@ -756,7 +748,7 @@ class CoreBackend:
                     # remove its write-ahead fence and permit an exact retry.
                     # Preserve the bounded bridge payload after fence cleanup;
                     # launcher provenance is stripped before public MCP output.
-                    raise mutation_not_started_error(
+                    raise MutationNotStartedError(
                         str(error["message"]),
                         code=str(error["code"]),
                         reason_code=str(error.get("reason_code") or error["code"]),
@@ -792,13 +784,12 @@ class CoreBackend:
 
         try:
             if tool_name == "create_reminder":
-                adapter = self._adapter_module()
                 request = {
                     "schema_version": 1,
                     "operation": operation,
                     **bridge_arguments,
                 }
-                payload = adapter.execute_idempotent(
+                payload = self._idempotency_call(
                     operation="eventkit_create_reminder",
                     key=idempotency_key,
                     input_payload=request,
@@ -841,41 +832,29 @@ class CoreBackend:
                 True,
                 "unknown",
             )
-        except Exception as exc:
-            adapter_contract = (
-                adapter if adapter is not None else self._adapter_module()
+        except AdapterError as exc:
+            error_state: MutationState = (
+                "not_mutated"
+                if isinstance(exc, MutationNotStartedError)
+                else "unknown"
             )
-            adapter_error = getattr(adapter_contract, "AdapterError", ())
-            mutation_not_started_error = getattr(
-                adapter_contract,
-                "MutationNotStartedError",
-                (),
-            )
-            if adapter_error and isinstance(exc, adapter_error):
-                error_state: MutationState = (
-                    "not_mutated"
-                    if mutation_not_started_error
-                    and isinstance(exc, mutation_not_started_error)
-                    else "unknown"
-                )
-                eventkit_payload = getattr(exc, "public_payload", None)
-                if isinstance(eventkit_payload, dict):
-                    return copy.deepcopy(eventkit_payload), True, error_state
-                return (
-                    {
-                        "ok": False,
-                        "status": "failed_no_mutation",
-                        "operation": operation,
-                        "error": {
-                            "code": exc.code,
-                            "message": str(exc),
-                            "details": exc.details,
-                        },
+            eventkit_payload = getattr(exc, "public_payload", None)
+            if isinstance(eventkit_payload, dict):
+                return copy.deepcopy(eventkit_payload), True, error_state
+            return (
+                {
+                    "ok": False,
+                    "status": "failed_no_mutation",
+                    "operation": operation,
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "details": exc.details,
                     },
-                    True,
-                    error_state,
-                )
-            raise
+                },
+                True,
+                error_state,
+            )
         if executed_state is None:
             try:
                 bridge_contract.validate_mutation_receipt(payload, operation)

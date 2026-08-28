@@ -52,6 +52,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   server fallback. Final-proof loss keeps commits but degrades unproven
   no-write claims to unknown instead of reconstructing state from display
   status.
+- Extracted the durable write-ahead fence from the private adapter into one
+  shared deep Module. Core create now depends on the narrow idempotency
+  function and shared typed errors instead of loading the full private adapter
+  in-process; persisted v1 hashes, JSON bytes, locking, privacy projection, and
+  failure ordering remain unchanged.
 
 ### Removed
 

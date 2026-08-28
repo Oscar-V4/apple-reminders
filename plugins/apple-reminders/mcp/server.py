@@ -35,6 +35,8 @@ if str(MCP_DIR) not in sys.path:
 from receipt_contract import (  # noqa: E402
     adapter_receipt_error,
 )
+from durable_idempotency import execute_idempotent  # noqa: E402
+
 if __package__:  # Package import in tests; script-local import in the launcher.
     from .v2_contract import (  # noqa: E402
         MUTATION_TOOLS as V2_MUTATION_TOOLS,
@@ -248,7 +250,6 @@ def load_tools(path: Path = TOOLS_SCHEMA_PATH) -> list[dict[str, Any]]:
 
 TOOLS = load_tools()
 TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
-_ADAPTER_MODULE: Any | None = None
 _EVENTKIT_BRIDGE_MODULE: Any | None = None
 
 
@@ -538,16 +539,6 @@ def _load_local_module(name: str, path: Path) -> Any:
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
-
-
-def bundled_adapter_module() -> Any:
-    global _ADAPTER_MODULE
-    if _ADAPTER_MODULE is None:
-        _ADAPTER_MODULE = _load_local_module(
-            "_apple_reminders_adapter_for_mcp",
-            DEFAULT_ADAPTER_PATH,
-        )
-    return _ADAPTER_MODULE
 
 
 def bundled_eventkit_bridge_module() -> Any:
@@ -963,7 +954,7 @@ class _LocalToolDispatch:
                 bridge_call=self._bridge_call,
                 adapter_call=self._adapter_call,
                 build_adapter_argv=build_adapter_argv,
-                adapter_module=bundled_adapter_module,
+                idempotency_call=execute_idempotent,
                 bridge_module=bundled_eventkit_bridge_module,
                 receipt_validator=validate_adapter_receipt,
             )

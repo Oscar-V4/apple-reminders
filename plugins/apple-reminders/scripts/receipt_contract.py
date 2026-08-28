@@ -41,6 +41,39 @@ STABLE_ERROR_CODES = frozenset(
 )
 
 
+class AdapterError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_input",
+        **details: Any,
+    ) -> None:
+        super().__init__(message)
+        self.code = code if code in STABLE_ERROR_CODES else "unexpected_error"
+        self.details = details
+
+
+class MutationNotStartedError(AdapterError):
+    """A typed internal proof that the guarded callback never dispatched."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_input",
+        public_payload: dict[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            mutation_not_started=True,
+            **details,
+        )
+        self.public_payload = public_payload
+
+
 def receipt_status_is_success(status: Any) -> bool:
     return status in SUCCESS_RECEIPT_STATUSES
 
