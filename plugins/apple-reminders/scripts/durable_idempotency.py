@@ -181,18 +181,23 @@ def _load_store(store_path: Path) -> dict[str, Any]:
     return payload
 
 
-def _record_in_progress(value: Any) -> bool:
+def _record_unresolved(value: Any) -> bool:
     if not isinstance(value, dict):
-        return False
+        return True
     state = value.get("state")
+    stored_result = value.get("result")
+    has_replayable_result = isinstance(stored_result, dict) and bool(stored_result)
     if state == "in_progress":
         return True
     if state == "complete":
-        return False
-    # Legacy v1 records with a stored result are complete. Every other unknown
-    # shape remains an incomplete fence so capacity maintenance fails closed.
-    stored_result = value.get("result")
-    return not isinstance(stored_result, dict) or not bool(stored_result)
+        return not has_replayable_result
+    if "state" not in value:
+        # Legacy state-less v1 records are complete only when their final
+        # Receipt is actually replayable.
+        return not has_replayable_result
+    # An unknown explicit state is an unresolved fence even if it happens to
+    # carry a result object whose future semantics this runtime cannot know.
+    return True
 
 
 def _sanitize_completed_results(
@@ -241,14 +246,17 @@ def _entry_created_at_epoch(value: Any) -> float:
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
         )
-    try:
-        created_at_epoch = float(value.get("created_at_epoch", 0))
-    except (TypeError, ValueError, OverflowError) as exc:
+    raw_created_at_epoch = value.get("created_at_epoch", 0)
+    if isinstance(raw_created_at_epoch, bool) or not isinstance(
+        raw_created_at_epoch,
+        (int, float),
+    ):
         raise _MutationNotStartedError(
             "The durable idempotency store has an invalid entry timestamp.",
             code="unexpected_error",
             reason_code="idempotency_store_unreadable",
-        ) from exc
+        )
+    created_at_epoch = float(raw_created_at_epoch)
     if not _math.isfinite(created_at_epoch):
         raise _MutationNotStartedError(
             "The durable idempotency store has an invalid entry timestamp.",
@@ -276,26 +284,26 @@ def _prune_entries(
             or _entry_created_at_epoch(value) >= cutoff
         )
     }
-    in_progress = sorted(
+    unresolved = sorted(
         (
             (key, value)
             for key, value in retained.items()
-            if _record_in_progress(value)
+            if _record_unresolved(value)
         ),
         key=lambda item: _entry_created_at_epoch(item[1]),
         reverse=True,
     )
-    completed = sorted(
+    replayable = sorted(
         (
             (key, value)
             for key, value in retained.items()
-            if not _record_in_progress(value)
+            if not _record_unresolved(value)
         ),
         key=lambda item: _entry_created_at_epoch(item[1]),
         reverse=True,
     )
-    remaining_slots = max(0, _MAX_ENTRIES - len(in_progress))
-    return dict([*in_progress, *completed[:remaining_slots]])
+    remaining_slots = max(0, _MAX_ENTRIES - len(unresolved))
+    return dict([*unresolved, *replayable[:remaining_slots]])
 
 
 def _write_store(
@@ -411,8 +419,8 @@ def execute_idempotent(
             sanitized_entries,
             protected_keys=frozenset({key_hash}),
         )
-        record = entries.get(key_hash)
-        if record:
+        if key_hash in entries:
+            record = entries[key_hash]
             privacy_warning: dict[str, Any] | None = None
             if privacy_scrub_required:
                 try:
@@ -452,19 +460,19 @@ def execute_idempotent(
             return replay
 
         while len(entries) >= _MAX_ENTRIES:
-            completed_keys = [
+            replayable_keys = [
                 entry_key
                 for entry_key, entry in entries.items()
-                if not _record_in_progress(entry)
+                if not _record_unresolved(entry)
             ]
-            if not completed_keys:
+            if not replayable_keys:
                 raise _MutationNotStartedError(
                     "The durable idempotency fence capacity is occupied by unresolved operations.",
                     code="unexpected_error",
                     reason_code="idempotency_capacity_exhausted",
                 )
             oldest_key = min(
-                completed_keys,
+                replayable_keys,
                 key=lambda item: _entry_created_at_epoch(entries[item]),
             )
             entries.pop(oldest_key)

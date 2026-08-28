@@ -58,8 +58,9 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   in-process; persisted v1 hashes, JSON bytes, locking, privacy projection, and
   failure ordering remain unchanged.
 - Durable replay now rejects missing, malformed, or unknown store versions
-  before dispatch and removes malformed completed-result payloads without
-  removing their write-ahead fences.
+  before dispatch, rejects ambiguous record/timestamp shapes, and removes
+  malformed completed-result payloads without making their write-ahead fences
+  eligible for capacity eviction.
 
 ### Removed
 

@@ -1110,6 +1110,91 @@ class DurableIdempotencyContractTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["status"], "committed_verification_pending")
 
+    def test_capacity_never_evicts_unreplayable_or_unknown_state_fences(
+        self,
+    ) -> None:
+        now = 1_000.0
+        old_key = "old-uncertain"
+        old_operation = "eventkit_create_reminder"
+        old_input = {"title": "Old"}
+        old_hash = stable_hash({"operation": old_operation, "key": old_key})
+        cases = (
+            (
+                "complete_with_corrupt_result",
+                {
+                    "operation": old_operation,
+                    "input_hash": stable_hash(old_input),
+                    "created_at_epoch": now,
+                    "state": "complete",
+                    "operation_id": "15151515-1515-4515-8515-151515151515",
+                    "result": ["PRIVATE-CORRUPT-RESULT"],
+                },
+            ),
+            (
+                "unknown_state_with_result",
+                {
+                    "operation": old_operation,
+                    "input_hash": stable_hash(old_input),
+                    "created_at_epoch": now,
+                    "state": "future_state",
+                    "operation_id": "16161616-1616-4616-8616-161616161616",
+                    "result": verified_receipt(),
+                },
+            ),
+        )
+        for name, uncertain_record in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                entries = {old_hash: uncertain_record}
+                index = 0
+                while len(entries) < MAX_ENTRIES:
+                    entry_hash = f"{index:064x}"
+                    index += 1
+                    if entry_hash in entries:
+                        continue
+                    entries[entry_hash] = unresolved_record(
+                        operation="attach_image",
+                        input_hash=f"{index:064x}",
+                        created_at_epoch=now,
+                    )
+                seed_store(storage_dir, {"version": 1, "entries": entries})
+                callback = mock.Mock(return_value=verified_receipt())
+
+                with mock.patch.object(
+                    durable_idempotency._time,
+                    "time",
+                    return_value=now,
+                ):
+                    with self.assertRaises(MutationNotStartedError) as raised:
+                        durable_idempotency.execute_idempotent(
+                            operation=old_operation,
+                            key="new-request",
+                            input_payload={"title": "New"},
+                            callback=callback,
+                            storage_dir=storage_dir,
+                        )
+                    blocked_entries = read_store(storage_dir)["entries"]
+                    replay = durable_idempotency.execute_idempotent(
+                        operation=old_operation,
+                        key=old_key,
+                        input_payload=old_input,
+                        callback=callback,
+                        storage_dir=storage_dir,
+                    )
+
+                callback.assert_not_called()
+                self.assertIn(old_hash, blocked_entries)
+                self.assertEqual(
+                    raised.exception.details["reason_code"],
+                    "idempotency_capacity_exhausted",
+                )
+                self.assertTrue(replay["replayed"])
+                self.assertEqual(
+                    replay["status"],
+                    "committed_verification_pending",
+                )
+                self.assertIn(old_hash, read_store(storage_dir)["entries"])
+
     def test_corrupt_existing_store_fails_closed_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_dir = Path(temp_dir) / "support"
@@ -1133,6 +1218,33 @@ class DurableIdempotencyContractTests(unittest.TestCase):
             "idempotency_store_unreadable",
         )
         self.assertTrue(raised.exception.details["mutation_not_started"])
+
+    def test_empty_current_record_is_a_fence_not_an_absent_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            key_hash = stable_hash(
+                {"operation": "eventkit_create_reminder", "key": "request-1"}
+            )
+            seed_store(
+                storage_dir,
+                {"version": 1, "entries": {key_hash: {}}},
+            )
+            original_bytes = (storage_dir / STORE_NAME).read_bytes()
+            callback = mock.Mock(return_value=verified_receipt())
+
+            with self.assertRaises(MutationNotStartedError) as raised:
+                durable_idempotency.execute_idempotent(
+                    operation="eventkit_create_reminder",
+                    key="request-1",
+                    input_payload={"title": "Bounded"},
+                    callback=callback,
+                    storage_dir=storage_dir,
+                )
+
+            callback.assert_not_called()
+            self.assertEqual(raised.exception.code, "concurrent_modification")
+            self.assertEqual((storage_dir / STORE_NAME).read_bytes(), original_bytes)
+            self.assertIn(key_hash, read_store(storage_dir)["entries"])
 
     def test_unknown_or_missing_store_version_fails_closed_without_rewrite(
         self,
@@ -1197,6 +1309,8 @@ class DurableIdempotencyContractTests(unittest.TestCase):
         cases: tuple[tuple[str, Any], ...] = (
             ("non_object_record", "corrupt"),
             ("non_numeric_timestamp", {**base_record, "created_at_epoch": "bad"}),
+            ("numeric_string_timestamp", {**base_record, "created_at_epoch": "100"}),
+            ("boolean_timestamp", {**base_record, "created_at_epoch": True}),
             ("non_finite_timestamp", {**base_record, "created_at_epoch": float("nan")}),
         )
         for name, bad_record in cases:

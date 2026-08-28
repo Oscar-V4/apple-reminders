@@ -57,12 +57,17 @@ legacy complete results without changing the store version:
 - a failed existing-key scrub returns only the sanitized in-memory replay plus
   a bounded warning and never invokes the callback, while a new key still
   requires the combined scrub-and-fence write to succeed before dispatch;
-- a non-object entry or invalid/non-finite timestamp is a typed unreadable-store
-  proof before dispatch rather than a pruned record or raw conversion error.
+- a non-object entry or nonnumeric, boolean, or non-finite timestamp is a typed
+  unreadable-store proof before dispatch rather than a pruned record or raw
+  conversion error;
+- current-key membership, not record truthiness, establishes that a fence
+  already exists, so even an empty corrupt record cannot authorize dispatch;
 - only an explicit top-level integer `version: 1` is readable; a missing,
   malformed, or unknown version fails before dispatch without rewriting bytes;
 - a malformed complete `result` is removed during the locked privacy scrub
-  while its fence metadata remains intact and replay stays outcome-unknown.
+  while its fence metadata remains intact and replay stays outcome-unknown;
+- capacity maintenance treats complete records without a replayable Receipt
+  and every unknown explicit state as unresolved, non-evictable fences.
 
 ## Non-goals
 
