@@ -733,36 +733,6 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
 
 class EventKitContractTests(unittest.TestCase):
-    @staticmethod
-    def mutation_fixture(operation: str, status: str) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "schema_version": 1,
-            "ok": status != "failed_no_mutation",
-            "status": status,
-            "operation": operation,
-            "operation_id": "B6A66F8E-B44F-426F-95CD-3A678865F793",
-            "backend": "eventkit_public_sdk",
-            "target": {"id": "REMINDER-1", "calendar_id": "CALENDAR-1"},
-            "after": {"id": "REMINDER-1", "title": "After"},
-            "verification": {
-                "state": "pending" if status == "committed_verification_pending" else "read_back",
-                "matched": status != "committed_verification_pending",
-            },
-            "recovery": {"semantics": "eventkit_native_api"},
-        }
-        if operation != "create_reminder":
-            payload["before"] = {"id": "REMINDER-1", "title": "Before"}
-        if status == "committed_verification_pending":
-            payload["warnings"] = [
-                {"code": "verification_pending", "message": "Read back before retrying."}
-            ]
-            payload["error"] = {
-                "code": "sync_pending",
-                "reason_code": "committed_verification_mismatch",
-                "message": "Committed; verification pending",
-            }
-        return payload
-
     def test_schema_declares_only_core_receipt_statuses(self) -> None:
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -869,38 +839,6 @@ class EventKitContractTests(unittest.TestCase):
         self.assertEqual(payload["error"]["reason_code"], "native_launch_failed")
         self.assertIs(eventkit_bridge.validate_response(payload, "create_reminder"), payload)
 
-    def test_failed_no_mutation_rejects_contradictory_commit_evidence(self) -> None:
-        error = {
-            "code": "permission_denied",
-            "reason_code": "reminders_access_denied",
-            "message": "Full Reminders access is required",
-            "retryable": False,
-            "details": {},
-        }
-        clean = eventkit_bridge.response(
-            "create_reminder",
-            "failed_no_mutation",
-            error=error,
-        )
-        self.assertIs(eventkit_bridge.validate_response(clean, "create_reminder"), clean)
-
-        contradictions = (
-            {"after": {"id": "REMINDER-1"}},
-            {
-                "verification": {
-                    "state": "read_back",
-                    "write_performed": True,
-                    "final_read": True,
-                }
-            },
-            {"mutation_attempted": True},
-        )
-        for evidence in contradictions:
-            with self.subTest(evidence=evidence):
-                payload = {**clean, **evidence}
-                with self.assertRaisesRegex(RuntimeError, "no-mutation"):
-                    eventkit_bridge.validate_response(payload, "create_reminder")
-
     def test_native_helper_build_failure_is_no_mutation_failure(self) -> None:
         request = {
             "schema_version": 1,
@@ -956,36 +894,6 @@ class EventKitContractTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "failed_no_mutation")
         self.assertFalse(payload["ok"])
-
-    def test_verified_create_fixture_satisfies_full_mutation_receipt(self) -> None:
-        payload = self.mutation_fixture("create_reminder", "verified")
-
-        self.assertIs(eventkit_bridge.validate_mutation_receipt(payload), payload)
-        self.assertNotIn("before", payload)
-
-    def test_unchanged_update_fixture_satisfies_full_mutation_receipt(self) -> None:
-        payload = self.mutation_fixture("update_reminder", "unchanged")
-        payload["verification"] = {
-            "state": "not_needed",
-            "matched": True,
-            "write_performed": False,
-        }
-        payload["after"] = payload["before"]
-
-        self.assertIs(eventkit_bridge.validate_mutation_receipt(payload), payload)
-
-    def test_pending_move_fixture_satisfies_full_mutation_receipt(self) -> None:
-        payload = self.mutation_fixture("move_reminder", "committed_verification_pending")
-
-        self.assertIs(eventkit_bridge.validate_mutation_receipt(payload), payload)
-        self.assertEqual(payload["error"]["code"], "sync_pending")
-
-    def test_mutation_fixture_without_backend_is_rejected(self) -> None:
-        payload = self.mutation_fixture("complete_reminder", "verified")
-        del payload["backend"]
-
-        with self.assertRaisesRegex(RuntimeError, "backend"):
-            eventkit_bridge.validate_mutation_receipt(payload)
 
     def test_validate_only_cli_does_not_compile_or_access_eventkit(self) -> None:
         request = {

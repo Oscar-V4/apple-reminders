@@ -315,6 +315,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 Path("mcp/v2_recovery_backend.py"),
                 Path("mcp/v2_transport.py"),
                 Path("scripts/durable_idempotency.py"),
+                Path("scripts/eventkit_protocol.py"),
                 Path("scripts/reminders_image_input.py"),
                 Path("scripts/remkit_recover.m"),
                 Path("scripts/reminders_service.py"),
@@ -374,7 +375,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
 
-    def test_extracted_package_constructs_core_and_starts_adapter_cli(self) -> None:
+    def test_extracted_package_constructs_core_without_giant_runtime_imports(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             archive = build_source_package.build_package(self.plugin_root, base / "build")
@@ -398,8 +401,13 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "facade=module._LocalToolDispatch(module.DEFAULT_BACKEND_PATHS).core_facade();"
                 "adapter_loaded=any(Path(str(getattr(item,'__file__',''))).name=="
                 "'reminders_adapter.py' for item in sys.modules.values());"
+                "bridge_loaded=any(Path(str(getattr(item,'__file__',''))).name=="
+                "'eventkit_bridge.py' for item in sys.modules.values());"
+                "protocol_loaded=any(Path(str(getattr(item,'__file__',''))).name=="
+                "'eventkit_protocol.py' for item in sys.modules.values());"
                 "print(json.dumps({'facade':type(facade).__name__,"
-                "'adapter_loaded':adapter_loaded}))"
+                "'adapter_loaded':adapter_loaded,'bridge_loaded':bridge_loaded,"
+                "'protocol_loaded':protocol_loaded}))"
             )
             core_probe = subprocess.run(
                 [sys.executable, "-c", probe, str(server)],
@@ -429,7 +437,12 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(core_probe.returncode, 0, core_probe.stderr)
         self.assertEqual(
             json.loads(core_probe.stdout),
-            {"facade": "V2CoreFacade", "adapter_loaded": False},
+            {
+                "facade": "V2CoreFacade",
+                "adapter_loaded": False,
+                "bridge_loaded": False,
+                "protocol_loaded": True,
+            },
         )
         self.assertEqual(adapter_help.returncode, 0, adapter_help.stderr)
         self.assertIn("recover_deleted_reminder", adapter_help.stdout)

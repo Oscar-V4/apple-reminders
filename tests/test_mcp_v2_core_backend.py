@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import sys
 import tempfile
@@ -47,41 +46,38 @@ def transport(
     )
 
 
-def load_script_module(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-REAL_BRIDGE = load_script_module(
-    "eventkit_bridge_core_backend_tests",
-    PLUGIN_ROOT / "scripts" / "eventkit_bridge.py",
-)
-
-
-class BridgeContract:
-    def validate_response(
-        self,
-        payload: dict[str, Any],
-        operation: str,
-    ) -> None:
-        if payload.get("operation") != operation:
-            raise RuntimeError("operation mismatch")
-        if payload.get("status") == "failed_no_mutation":
-            if payload.get("ok") is not False or not isinstance(
-                payload.get("error"), dict
-            ):
-                raise RuntimeError("invalid failed-no-mutation response")
-
-    def validate_mutation_receipt(
-        self,
-        payload: dict[str, Any],
-        operation: str,
-    ) -> None:
-        if payload.get("operation") != operation:
-            raise RuntimeError("operation mismatch")
+def valid_eventkit_receipt(
+    operation: str,
+    *,
+    status: str = "verified",
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Build a complete EventKit mutation Receipt for Core transport tests."""
+    write_performed = status == "verified"
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "operation": operation,
+        "status": status,
+        "ok": True,
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "backend": "eventkit_public_sdk",
+        "target": {"id": REMINDER_ID},
+        "after": {"id": REMINDER_ID},
+        "verification": {
+            "state": "read_back",
+            "write_performed": write_performed,
+            "final_read": True,
+            "matched": True,
+        },
+        "recovery": {
+            "semantics": "not_applicable",
+            "automatic_retry_safe": not write_performed,
+        },
+    }
+    if operation != "create_reminder":
+        payload["before"] = {"id": REMINDER_ID}
+    payload.update(copy.deepcopy(overrides))
+    return payload
 
 
 def idempotency_passthrough(**arguments: Any) -> dict[str, Any]:
@@ -99,22 +95,23 @@ def make_backend(
     build_adapter_argv: Any | None = None,
     receipt_validator: Any | None = None,
     idempotency_call: Any | None = None,
-    bridge_module: Any | None = None,
 ) -> CoreBackend:
     return CoreBackend(
         bridge_call=bridge_call,
         adapter_call=adapter_call or mock.Mock(),
         build_adapter_argv=build_adapter_argv or mock.Mock(),
         idempotency_call=idempotency_call or idempotency_passthrough,
-        bridge_module=lambda: bridge_module or BridgeContract(),
         receipt_validator=receipt_validator or mock.Mock(return_value=None),
     )
 
 
 class CoreBackendInterfaceTests(unittest.TestCase):
-    def test_server_composes_core_without_an_in_process_adapter_loader(self) -> None:
+    def test_server_composes_core_without_in_process_backend_loaders(self) -> None:
         self.assertFalse(hasattr(mcp_server, "_ADAPTER_MODULE"))
         self.assertFalse(hasattr(mcp_server, "bundled_adapter_module"))
+        self.assertFalse(hasattr(mcp_server, "_EVENTKIT_BRIDGE_MODULE"))
+        self.assertFalse(hasattr(mcp_server, "bundled_eventkit_bridge_module"))
+        self.assertFalse(hasattr(mcp_server, "_load_local_module"))
         dispatch = mcp_server._LocalToolDispatch(mcp_server.DEFAULT_BACKEND_PATHS)
 
         with (
@@ -127,6 +124,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         kwargs = backend_type.call_args.kwargs
         self.assertIs(kwargs["idempotency_call"], mcp_server.execute_idempotent)
         self.assertNotIn("adapter_module", kwargs)
+        self.assertNotIn("bridge_module", kwargs)
 
     def test_create_uses_narrow_idempotency_without_importing_adapter(self) -> None:
         def loaded_adapter_modules() -> set[str]:
@@ -137,12 +135,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 == "reminders_adapter.py"
             }
 
-        payload = {
-            "schema_version": 1,
-            "operation": "create_reminder",
-            "status": "verified",
-            "ok": True,
-        }
+        payload = valid_eventkit_receipt("create_reminder")
         idempotency_call = mock.Mock(side_effect=idempotency_passthrough)
         backend = make_backend(
             bridge_call=mock.Mock(return_value=transport(payload)),
@@ -165,12 +158,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         idempotency_call.assert_called_once()
 
     def test_non_create_mutation_does_not_call_idempotency(self) -> None:
-        payload = {
-            "schema_version": 1,
-            "operation": "update_reminder",
-            "status": "verified",
-            "ok": True,
-        }
+        payload = valid_eventkit_receipt("update_reminder")
         idempotency_call = mock.Mock(
             side_effect=RuntimeError("idempotency unavailable")
         )
@@ -179,7 +167,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             adapter_call=mock.Mock(),
             build_adapter_argv=mock.Mock(),
             idempotency_call=idempotency_call,
-            bridge_module=lambda: BridgeContract(),
             receipt_validator=mock.Mock(return_value=None),
         )
 
@@ -227,7 +214,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke(
                 "create_reminder",
@@ -270,7 +256,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke(
                 "create_reminder",
@@ -318,7 +303,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             facade = V2CoreFacade(backend)
             first, first_state = facade.call_with_state(
@@ -379,7 +363,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -428,7 +411,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -484,7 +466,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(Path(temp_dir) / "support"),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -516,7 +497,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -552,7 +532,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -598,7 +577,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
@@ -656,7 +634,6 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             backend = make_backend(
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
-                bridge_module=REAL_BRIDGE,
             )
             with mock.patch.object(
                 durable_idempotency,
@@ -685,12 +662,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "ok": True,
             "data": {"items": []},
         }
-        mutation_payload = {
-            "schema_version": 1,
-            "operation": "update_reminder",
-            "status": "verified",
-            "ok": True,
-        }
+        mutation_payload = valid_eventkit_receipt("update_reminder")
         bridge_call = mock.Mock(
             side_effect=[transport(read_payload), transport(mutation_payload)]
         )
@@ -743,7 +715,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             "operation_id": "22222222-2222-4222-8222-222222222222",
             "backend": "eventkit_public_sdk",
             "target": {"id": REMINDER_ID, "calendar_id": "LIST-1"},
-            "before": None,
+            "before": {},
             "after": {
                 "id": REMINDER_ID,
                 "url": url,
@@ -1150,20 +1122,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
     def test_native_url_write_promotes_composite_unchanged_to_committed(self) -> None:
         url = "https://example.com/new-visible-url"
-        eventkit_receipt = {
-            "ok": True,
-            "status": "unchanged",
-            "operation": "update_reminder",
-            "target": {"id": REMINDER_ID},
-            "before": {"id": REMINDER_ID, "url": url},
-            "after": {"id": REMINDER_ID, "url": url},
-            "verification": {
-                "state": "read_back",
-                "write_performed": False,
-                "final_read": True,
-            },
-            "recovery": {"semantics": "not_applicable"},
-        }
+        eventkit_receipt = valid_eventkit_receipt(
+            "update_reminder",
+            status="unchanged",
+            target={"id": REMINDER_ID},
+            before={"id": REMINDER_ID, "url": url},
+            after={"id": REMINDER_ID, "url": url},
+        )
         final_read = {
             "ok": True,
             "status": "verified",
@@ -1230,16 +1195,13 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
     def test_native_url_commit_survives_failed_composite_final_read(self) -> None:
         url = "https://example.com/new-visible-url"
-        eventkit_receipt = {
-            "ok": True,
-            "status": "unchanged",
-            "operation": "update_reminder",
-            "target": {"id": REMINDER_ID},
-            "before": {"id": REMINDER_ID, "url": url},
-            "after": {"id": REMINDER_ID, "url": url},
-            "verification": {"write_performed": False, "final_read": True},
-            "recovery": {"semantics": "not_applicable"},
-        }
+        eventkit_receipt = valid_eventkit_receipt(
+            "update_reminder",
+            status="unchanged",
+            target={"id": REMINDER_ID},
+            before={"id": REMINDER_ID, "url": url},
+            after={"id": REMINDER_ID, "url": url},
+        )
         bridge_call = mock.Mock(
             side_effect=[
                 transport(eventkit_receipt),

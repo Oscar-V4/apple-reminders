@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import importlib.util
 import json
 import re
 import subprocess
@@ -36,6 +35,10 @@ from receipt_contract import (  # noqa: E402
     adapter_receipt_error,
 )
 from durable_idempotency import execute_idempotent  # noqa: E402
+from eventkit_protocol import (  # noqa: E402
+    mutation_outcome_unknown_response,
+    validate_response as validate_eventkit_response,
+)
 
 if __package__:  # Package import in tests; script-local import in the launcher.
     from .v2_contract import (  # noqa: E402
@@ -250,7 +253,6 @@ def load_tools(path: Path = TOOLS_SCHEMA_PATH) -> list[dict[str, Any]]:
 
 TOOLS = load_tools()
 TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
-_EVENTKIT_BRIDGE_MODULE: Any | None = None
 
 
 class ToolInputError(ValueError):
@@ -531,26 +533,6 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return walk(payload, "")
 
 
-def _load_local_module(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load local module: {path.name}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def bundled_eventkit_bridge_module() -> Any:
-    global _EVENTKIT_BRIDGE_MODULE
-    if _EVENTKIT_BRIDGE_MODULE is None:
-        _EVENTKIT_BRIDGE_MODULE = _load_local_module(
-            "_apple_reminders_eventkit_bridge_for_mcp",
-            DEFAULT_EVENTKIT_BRIDGE_PATH,
-        )
-    return _EVENTKIT_BRIDGE_MODULE
-
-
 def invoke_adapter(
     argv: list[str],
     *,
@@ -779,7 +761,7 @@ def invoke_eventkit_bridge(
         *, code: str, message: str, details: dict[str, Any] | None = None
     ) -> TransportResult:
         if operation in EVENTKIT_MUTATION_ROUTES.values():
-            payload = bundled_eventkit_bridge_module().mutation_outcome_unknown_response(
+            payload = mutation_outcome_unknown_response(
                 request,
                 reason_code=code,
                 message=message,
@@ -856,7 +838,7 @@ def invoke_eventkit_bridge(
     # Dispatch provenance belongs to this launcher, never to child JSON.
     payload.pop("__dispatch_phase", None)
     try:
-        bundled_eventkit_bridge_module().validate_response(payload, operation)
+        validate_eventkit_response(payload, operation)
     except RuntimeError as exc:
         return transport_failure(
             code="invalid_eventkit_bridge_response",
@@ -955,7 +937,6 @@ class _LocalToolDispatch:
                 adapter_call=self._adapter_call,
                 build_adapter_argv=build_adapter_argv,
                 idempotency_call=execute_idempotent,
-                bridge_module=bundled_eventkit_bridge_module,
                 receipt_validator=validate_adapter_receipt,
             )
             self._core = V2CoreFacade(backend)

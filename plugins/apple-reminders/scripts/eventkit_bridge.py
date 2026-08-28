@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -29,14 +28,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from receipt_contract import (  # noqa: E402
-    STABLE_ERROR_CODES as CONTRACT_STABLE_ERROR_CODES,
-    eventkit_mutation_receipt_error,
-    failed_no_mutation_evidence_error,
+from eventkit_protocol import (  # noqa: E402
+    EXIT_CODES,
+    MUTATION_OPERATIONS,
+    SCHEMA_VERSION,
+    STABLE_ERROR_CODES,
+    mutation_outcome_unknown_response,
+    validate_mutation_receipt,
+    validate_response,
 )
 
 
-SCHEMA_VERSION = 1
 SOURCE_PATH = SCRIPT_DIR / "reminders_eventkit.m"
 INFO_PLIST_PATH = SCRIPT_DIR / "eventkit_bridge_info.plist"
 SCHEMA_PATH = SCRIPT_DIR / "eventkit_bridge_schema.json"
@@ -63,26 +65,6 @@ OPERATIONS = {
     "move_reminder",
     "delete_reminder",
 }
-
-MUTATION_OPERATIONS = {
-    "ensure_reminder_list",
-    "create_reminder",
-    "update_reminder",
-    "complete_reminder",
-    "reopen_reminder",
-    "move_reminder",
-    "delete_reminder",
-}
-
-EXIT_CODES = {
-    "unchanged": 0,
-    "verified": 0,
-    "committed_verification_pending": 7,
-    "partial_success": 7,
-    "failed_no_mutation": 2,
-}
-
-STABLE_ERROR_CODES = set(CONTRACT_STABLE_ERROR_CODES)
 
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
@@ -153,56 +135,6 @@ def validation_error_response(
             "details": exc.details,
         },
     )
-
-
-def mutation_outcome_unknown_response(
-    request: dict[str, Any],
-    *,
-    reason_code: str,
-    message: str,
-    details: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    operation = request.get("operation")
-    if operation not in MUTATION_OPERATIONS:
-        raise ValueError("Only EventKit mutations can have an unknown commit outcome")
-    target = {
-        key: request[key]
-        for key in ("reminder_id", "calendar_id")
-        if isinstance(request.get(key), str)
-    }
-    payload: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "operation": operation,
-        "status": "committed_verification_pending",
-        "ok": True,
-        "operation_id": str(uuid.uuid4()).upper(),
-        "backend": "eventkit_public_sdk",
-        "target": target,
-        "before": {},
-        "after": {},
-        "verification": {
-            "state": "pending",
-            "write_performed": None,
-            "reason_code": reason_code,
-        },
-        "recovery": {
-            "semantics": "read_before_retry",
-            "automatic_retry_safe": False,
-        },
-        "warnings": [
-            {
-                "code": "verification_pending",
-                "message": "The native process may have committed; read the target before retrying.",
-            }
-        ],
-        "error": {
-            "code": "sync_pending",
-            "reason_code": reason_code,
-            "message": message,
-            "details": details or {},
-        },
-    }
-    return payload
 
 
 def fail(
@@ -1058,52 +990,6 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
     temporary_binary.chmod(0o700)
     os.replace(temporary_binary, binary)
     return binary
-
-
-def validate_response(payload: Any, operation: str) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise RuntimeError("Native bridge returned a non-object JSON response")
-    required = {"schema_version", "operation", "status", "ok"}
-    missing = sorted(required - set(payload))
-    if missing:
-        raise RuntimeError(f"Native bridge response is missing: {', '.join(missing)}")
-    if payload["schema_version"] != SCHEMA_VERSION:
-        raise RuntimeError("Native bridge response schema version does not match the launcher")
-    if payload["operation"] != operation:
-        raise RuntimeError("Native bridge response operation does not match the request")
-    if payload["status"] not in EXIT_CODES:
-        raise RuntimeError(f"Native bridge returned unknown status: {payload['status']!r}")
-    if not isinstance(payload["ok"], bool):
-        raise RuntimeError("Native bridge response ok field must be boolean")
-    expected_ok = payload["status"] != "failed_no_mutation"
-    if payload["ok"] is not expected_ok:
-        raise RuntimeError("Native bridge response ok field disagrees with its receipt status")
-    if not expected_ok:
-        error = payload.get("error")
-        if not isinstance(error, dict):
-            raise RuntimeError("Failed native bridge response must include an error object")
-        if error.get("code") not in STABLE_ERROR_CODES or not isinstance(error.get("message"), str):
-            raise RuntimeError("Native bridge error must include a stable code and message")
-    if operation in MUTATION_OPERATIONS:
-        if payload["status"] == "failed_no_mutation":
-            no_write_error = failed_no_mutation_evidence_error(payload)
-            if no_write_error:
-                raise RuntimeError(f"Invalid no-mutation response: {no_write_error}")
-        else:
-            validate_mutation_receipt(payload, operation)
-    return payload
-
-
-def validate_mutation_receipt(payload: Any, operation: str | None = None) -> dict[str, Any]:
-    error = eventkit_mutation_receipt_error(
-        payload,
-        operation=operation,
-        mutation_operations=MUTATION_OPERATIONS,
-        stable_error_codes=STABLE_ERROR_CODES,
-    )
-    if error:
-        raise RuntimeError(error)
-    return payload
 
 
 def invoke_native(
