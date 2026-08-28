@@ -101,7 +101,7 @@ def mutation_outcome_unknown_response(
             "code": "sync_pending",
             "reason_code": reason_code,
             "message": message,
-            "details": details or {},
+            "details": dict(details) if details is not None else {},
         },
     }
     return payload

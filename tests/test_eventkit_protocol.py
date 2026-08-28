@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 import uuid
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 
@@ -172,6 +174,23 @@ class EventKitProtocolTests(unittest.TestCase):
                     reason_code="native_timeout",
                     message="Timed out",
                 )
+
+    def test_unknown_outcome_normalizes_mapping_details_for_json(self) -> None:
+        payload = eventkit_protocol.mutation_outcome_unknown_response(
+            MappingProxyType(
+                {
+                    "schema_version": 1,
+                    "operation": "update_reminder",
+                    "reminder_id": "REMINDER-1",
+                }
+            ),
+            reason_code="native_timeout",
+            message="Timed out",
+            details=MappingProxyType({"timeout_seconds": 70}),
+        )
+
+        self.assertEqual(payload["error"]["details"], {"timeout_seconds": 70})
+        self.assertIsInstance(json.dumps(payload), str)
 
     def test_unhashable_wire_status_and_error_code_use_runtime_errors(self) -> None:
         for status in ([], {}):
