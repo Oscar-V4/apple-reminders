@@ -292,6 +292,54 @@ class EventKitProtocolTests(unittest.TestCase):
                     "update_reminder",
                 )
 
+    def test_projected_failed_no_mutation_requires_consistent_evidence(
+        self,
+    ) -> None:
+        clean = {
+            "ok": False,
+            "status": "failed_no_mutation",
+            "operation": "update_reminder",
+            "operation_id": "B6A66F8E-B44F-426F-95CD-3A678865F793",
+            "backend": "eventkit_public_sdk",
+            "target": {"id": "REMINDER-1"},
+            "before": {},
+            "after": {},
+            "verification": {
+                "state": "not_performed",
+                "write_performed": False,
+                "final_read": False,
+            },
+            "recovery": {"semantics": "not_applicable"},
+        }
+        self.assertIs(
+            eventkit_protocol.validate_mutation_receipt(
+                clean,
+                "update_reminder",
+            ),
+            clean,
+        )
+
+        contradictions = (
+            {"after": {"id": "REMINDER-1"}},
+            {
+                "verification": {
+                    "state": "read_back",
+                    "write_performed": True,
+                    "final_read": True,
+                }
+            },
+            {"mutation_attempted": True},
+        )
+        for evidence in contradictions:
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(
+                RuntimeError,
+                "no-mutation",
+            ):
+                eventkit_protocol.validate_mutation_receipt(
+                    {**clean, **evidence},
+                    "update_reminder",
+                )
+
     def test_failed_no_mutation_rejects_contradictory_commit_evidence(self) -> None:
         clean = {
             "schema_version": 1,

@@ -152,5 +152,9 @@ def validate_mutation_receipt(
     )
     if error:
         raise RuntimeError(error)
-    _validated_status_and_ok(payload)
+    status, _ = _validated_status_and_ok(payload)
+    if status == "failed_no_mutation":
+        no_write_error = failed_no_mutation_evidence_error(payload)
+        if no_write_error:
+            raise RuntimeError(f"Invalid no-mutation response: {no_write_error}")
     return payload
