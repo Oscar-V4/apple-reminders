@@ -52,6 +52,15 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   server fallback. Final-proof loss keeps commits but degrades unproven
   no-write claims to unknown instead of reconstructing state from display
   status.
+- Extracted the durable write-ahead fence from the private adapter into one
+  shared deep Module. Core create now depends on the narrow idempotency
+  function and shared typed errors instead of loading the full private adapter
+  in-process; persisted v1 hashes, JSON bytes, locking, privacy projection, and
+  failure ordering remain unchanged.
+- Durable replay now rejects missing, malformed, or unknown store versions
+  before dispatch, rejects ambiguous record/timestamp shapes, and removes
+  malformed completed-result payloads without making their write-ahead fences
+  eligible for capacity eviction.
 
 ### Removed
 
@@ -112,6 +121,16 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   its fence for a safe retry; possible-commit failures retain it. Core create
   now carries contract-validated EventKit no-write results through that same
   cleanup path instead of leaving a permanent unresolved fence.
+- Removed primitive arrays and bare recurrence counts from persisted retry
+  snapshots. On the next keyed operation, complete modern and legacy v1
+  results are re-sanitized under the existing process lock and atomically
+  rewritten without changing fence identity. A failed scrub never redispatches
+  an existing callback and returns only an in-memory redacted replay plus a
+  bounded warning.
+- Classified non-object idempotency entries and invalid or non-finite entry
+  timestamps as a typed unreadable-store failure before dispatch. Corrupt
+  records can no longer fall through pruning or escape as a raw conversion
+  error with ambiguous mutation state.
 - Added a native ReminderKit snapshot guard immediately before deleted-item
   recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
   count agreement, and independent mutation-state transport into public

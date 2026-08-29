@@ -82,7 +82,19 @@ user-facing promise.
      the requested area.
    - Static private-framework path absence is inconclusive when dyld can load
      from the shared cache.
-7. **Internal adapter and helpers**
+7. **Durable idempotency Module**
+   - Owns the write-ahead fence, process lock, privacy-preserving Receipt
+     snapshot, replay, retention, and atomic v1 JSON persistence behind one
+     `execute_idempotent` function.
+   - Is composed directly into Core create and imported by the retained Native
+     adapter commands. Core no longer loads the full private adapter in-process
+     merely to obtain durability or error types.
+   - Freezes the existing file format and failure ordering. Storage policy,
+     hash algorithms, lock scope, and error classification are not pluggable
+     extension points.
+   - Re-sanitizes complete v1 results under the same lock, preserving fence
+     metadata while removing primitive user-authored arrays before replay.
+8. **Internal adapter and helpers**
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.
@@ -156,7 +168,9 @@ contents.
 
 The packaged server always uses its bundled adapter, EventKit bridge, and
 Doctor. Production backend paths cannot be changed through environment
-variables.
+variables. Durable idempotency uses its fixed Application Support location in
+production; tests bind the same implementation to a temporary directory rather
+than substituting a different storage protocol.
 
 Source tests construct `BackendPaths(adapter=..., eventkit_bridge=...,
 doctor=...)` and inject it into a fresh `McpRuntime` (or through the source-only

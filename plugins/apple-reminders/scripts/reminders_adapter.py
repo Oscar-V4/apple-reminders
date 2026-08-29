@@ -31,11 +31,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from receipt_contract import (  # noqa: E402
+    AdapterError,
     FAILURE_RECEIPT_STATUSES,
+    MutationNotStartedError,
     SUCCESS_RECEIPT_STATUSES,
-    STABLE_ERROR_CODES,
     build_operation_receipt,
 )
+from durable_idempotency import execute_idempotent  # noqa: E402
 from reminders_contracts import (  # noqa: E402
     REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
     command_schema_requirements,
@@ -53,8 +55,6 @@ STORES = GROUP / "Stores"
 FILES = GROUP / "Files"
 APP_SUPPORT = HOME / "Library/Application Support/apple-reminders-codex"
 JOURNAL = APP_SUPPORT / "actions.jsonl"
-IDEMPOTENCY_STORE = APP_SUPPORT / "idempotency.json"
-IDEMPOTENCY_LOCK = APP_SUPPORT / "idempotency.lock"
 CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 APPLE_EPOCH_OFFSET = 978307200
 IMAGE_ATTACHMENT_ENT = 25
@@ -67,12 +67,9 @@ REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS = 10
 SECTION_SYNC_VERIFY_TIMEOUT_SECONDS = 10
 JOURNAL_MAX_BYTES = 1_000_000
 JOURNAL_RETENTION_DAYS = 30
-IDEMPOTENCY_RETENTION_DAYS = 30
-IDEMPOTENCY_MAX_ENTRIES = 500
 RECENTLY_DELETED_RETENTION_DAYS = 30
 RECENTLY_DELETED_SNAPSHOT_LIMIT = 10_000
 
-ERROR_CODES = set(STABLE_ERROR_CODES)
 REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
 COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("runtime")
 MUTATION_COMMANDS = frozenset(
@@ -89,33 +86,6 @@ MUTATION_COMMANDS = frozenset(
         "replace_attachment",
     }
 )
-
-
-class AdapterError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "invalid_input", **details: Any) -> None:
-        super().__init__(message)
-        self.code = code if code in ERROR_CODES else "unexpected_error"
-        self.details = details
-
-
-class MutationNotStartedError(AdapterError):
-    """A typed internal proof that the guarded callback never dispatched."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "invalid_input",
-        public_payload: dict[str, Any] | None = None,
-        **details: Any,
-    ) -> None:
-        super().__init__(
-            message,
-            code=code,
-            mutation_not_started=True,
-            **details,
-        )
-        self.public_payload = public_payload
 
 
 class AttachmentVerificationError(AdapterError):
@@ -526,359 +496,6 @@ def stable_hash(value: Any) -> str:
             "utf-8"
         )
     ).hexdigest()
-
-
-def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
-    """Keep retry-critical identifiers/status while excluding user-authored content."""
-
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for item_key, item in value.items():
-            normalized = str(item_key).casefold()
-            keep = (
-                normalized
-                in {
-                    "ok",
-                    "status",
-                    "operation",
-                    "operation_id",
-                    "backend",
-                    "backend_requested",
-                    "id",
-                    "pk",
-                    "count",
-                    "state",
-                    "semantics",
-                    "reason",
-                    "verified",
-                    "replayed",
-                    "attachment_active",
-                    "automatic_retry_safe",
-                    "code",
-                    "final_read",
-                    "final_attachment_content_hash",
-                    "final_attachment_content_matched",
-                    "matched",
-                    "mobile_visible_likely",
-                    "reason_code",
-                    "retryable",
-                    "destination_attachment_active",
-                    "destination_content_matched",
-                    "destination_mobile_visible_likely",
-                    "source_bytes_matched",
-                    "source_unchanged",
-                    "write_performed",
-                }
-                or normalized.endswith("_id")
-                or normalized.endswith("_ids")
-                or normalized.endswith("_pk")
-                or normalized.endswith("_count")
-            )
-            if keep:
-                result[str(item_key)] = idempotency_result_snapshot(item, key=str(item_key))
-            elif isinstance(item, (dict, list, tuple)):
-                nested = idempotency_result_snapshot(item, key=str(item_key))
-                preserve_empty_receipt_object = (
-                    isinstance(item, dict)
-                    and normalized
-                    in {"target", "before", "after", "verification", "recovery"}
-                )
-                if nested not in ({}, []) or preserve_empty_receipt_object:
-                    result[str(item_key)] = nested
-        return result
-    if isinstance(value, (list, tuple)):
-        return [idempotency_result_snapshot(item, key=key) for item in value]
-    return value
-
-
-def load_idempotency_store() -> dict[str, Any]:
-    try:
-        with IDEMPOTENCY_STORE.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except FileNotFoundError:
-        return {"version": 1, "entries": {}}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MutationNotStartedError(
-            "The durable idempotency store could not be read safely.",
-            code="unexpected_error",
-            reason_code="idempotency_store_unreadable",
-        ) from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
-        raise MutationNotStartedError(
-            "The durable idempotency store has an unsupported structure.",
-            code="unexpected_error",
-            reason_code="idempotency_store_unreadable",
-        )
-    return payload
-
-
-def idempotency_record_in_progress(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    state = value.get("state")
-    if state == "in_progress":
-        return True
-    if state == "complete":
-        return False
-    # Legacy v1 records with a stored result are complete. Any other unknown
-    # shape is treated as an incomplete fence so capacity maintenance fails
-    # closed instead of authorizing a duplicate write.
-    stored_result = value.get("result")
-    return not isinstance(stored_result, dict) or not bool(stored_result)
-
-
-def prune_idempotency_entries(
-    entries: dict[str, Any],
-    *,
-    now: float | None = None,
-    protected_keys: frozenset[str] = frozenset(),
-) -> dict[str, Any]:
-    current = now if now is not None else time.time()
-    cutoff = current - IDEMPOTENCY_RETENTION_DAYS * 86400
-    retained = {
-        key: value
-        for key, value in entries.items()
-        if isinstance(value, dict)
-        and (
-            key in protected_keys
-            or float(value.get("created_at_epoch", 0)) >= cutoff
-        )
-    }
-    in_progress = sorted(
-        (
-            (key, value)
-            for key, value in retained.items()
-            if idempotency_record_in_progress(value)
-        ),
-        key=lambda item: float(item[1].get("created_at_epoch", 0)),
-        reverse=True,
-    )
-    completed = sorted(
-        (
-            (key, value)
-            for key, value in retained.items()
-            if not idempotency_record_in_progress(value)
-        ),
-        key=lambda item: float(item[1].get("created_at_epoch", 0)),
-        reverse=True,
-    )
-    remaining_slots = max(0, IDEMPOTENCY_MAX_ENTRIES - len(in_progress))
-    return dict([*in_progress, *completed[:remaining_slots]])
-
-
-def write_idempotency_store(payload: dict[str, Any]) -> None:
-    ensure_private_dir(APP_SUPPORT)
-    temp_handle = tempfile.NamedTemporaryFile(
-        prefix=".idempotency.",
-        suffix=".tmp",
-        dir=APP_SUPPORT,
-        mode="w",
-        encoding="utf-8",
-        delete=False,
-    )
-    temp_path = Path(temp_handle.name)
-    try:
-        with temp_handle as fh:
-            json.dump(payload, fh, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        temp_path.chmod(0o600)
-        os.replace(temp_path, IDEMPOTENCY_STORE)
-        IDEMPOTENCY_STORE.chmod(0o600)
-        directory_fd = os.open(APP_SUPPORT, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def idempotency_outcome_unknown_receipt(
-    operation: str,
-    operation_id: str,
-) -> dict[str, Any]:
-    receipt_operation = {
-        "eventkit_create_reminder": "create_reminder",
-        "copy_image_attachment": "copy_image",
-    }.get(operation, operation)
-    message = (
-        "A prior call crossed its durable idempotency fence, but its final "
-        "Receipt was not persisted. Read the exact target before retrying."
-    )
-    return operation_receipt(
-        status="committed_verification_pending",
-        operation=receipt_operation,
-        operation_id=operation_id,
-        backend="idempotency_fence",
-        target={},
-        before={},
-        after={},
-        verification={
-            "state": "pending",
-            "write_performed": None,
-            "final_read": False,
-        },
-        recovery={
-            "semantics": "read_before_retry",
-            "automatic_retry_safe": False,
-        },
-        warnings=[
-            {
-                "code": "verification_pending",
-                "message": message,
-            }
-        ],
-        error={
-            "code": "sync_pending",
-            "reason_code": "idempotency_outcome_unknown",
-            "message": message,
-            "retryable": False,
-        },
-    )
-
-
-def execute_idempotent(
-    *,
-    operation: str,
-    key: str | None,
-    input_payload: dict[str, Any],
-    callback: Any,
-) -> dict[str, Any]:
-    if not key:
-        return callback()
-    ensure_private_dir(APP_SUPPORT)
-    key_hash = stable_hash({"operation": operation, "key": key})
-    input_hash = stable_hash(input_payload)
-    with IDEMPOTENCY_LOCK.open("a+", encoding="utf-8") as lock:
-        IDEMPOTENCY_LOCK.chmod(0o600)
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        payload = load_idempotency_store()
-        entries = prune_idempotency_entries(
-            payload.get("entries", {}),
-            protected_keys=frozenset({key_hash}),
-        )
-        record = entries.get(key_hash)
-        if record:
-            if record.get("input_hash") != input_hash:
-                raise MutationNotStartedError(
-                    "Idempotency key was already used with different input",
-                    code="concurrent_modification",
-                    operation=operation,
-                )
-            stored_result = record.get("result")
-            if (
-                record.get("state") == "complete"
-                or (
-                    "state" not in record
-                    and isinstance(stored_result, dict)
-                    and bool(stored_result)
-                )
-            ):
-                replay = dict(stored_result or {})
-            else:
-                operation_id = record.get("operation_id")
-                if not isinstance(operation_id, str) or not operation_id:
-                    operation_id = new_operation_id()
-                replay = idempotency_outcome_unknown_receipt(
-                    operation,
-                    operation_id,
-                )
-            replay["replayed"] = True
-            replay["idempotency_key_hash"] = key_hash
-            return replay
-
-        while len(entries) >= IDEMPOTENCY_MAX_ENTRIES:
-            completed_keys = [
-                entry_key
-                for entry_key, entry in entries.items()
-                if not idempotency_record_in_progress(entry)
-            ]
-            if not completed_keys:
-                raise MutationNotStartedError(
-                    "The durable idempotency fence capacity is occupied by unresolved operations.",
-                    code="unexpected_error",
-                    reason_code="idempotency_capacity_exhausted",
-                )
-            oldest_key = min(
-                completed_keys,
-                key=lambda item: float(entries[item].get("created_at_epoch", 0)),
-            )
-            entries.pop(oldest_key)
-        created_at_epoch = time.time()
-        fence_operation_id = new_operation_id()
-        entries[key_hash] = {
-            "operation": operation,
-            "input_hash": input_hash,
-            "created_at_epoch": created_at_epoch,
-            "state": "in_progress",
-            "operation_id": fence_operation_id,
-        }
-        try:
-            write_idempotency_store(
-                {
-                    "version": 1,
-                    "entries": prune_idempotency_entries(
-                        entries,
-                        protected_keys=frozenset({key_hash}),
-                    ),
-                }
-            )
-        except OSError as exc:
-            raise MutationNotStartedError(
-                "The idempotency fence could not be persisted before dispatch.",
-                code="unexpected_error",
-                reason_code="idempotency_fence_write_failed",
-            ) from exc
-
-        try:
-            result = callback()
-        except AdapterError as exc:
-            if not isinstance(exc, MutationNotStartedError):
-                raise
-            entries.pop(key_hash, None)
-            try:
-                write_idempotency_store(
-                    {"version": 1, "entries": prune_idempotency_entries(entries)}
-                )
-            except OSError as cleanup_exc:
-                # The callback itself proved no write, but the durable fence
-                # could not be removed. Keep the on-disk fence fail-closed so
-                # a retry cannot accidentally redispatch under uncertainty.
-                raise MutationNotStartedError(
-                    "The no-write callback failed and its idempotency fence could not be cleared.",
-                    code="unexpected_error",
-                    reason_code="idempotency_fence_cleanup_failed",
-                ) from cleanup_exc
-            raise
-        entries[key_hash] = {
-            "operation": operation,
-            "input_hash": input_hash,
-            "created_at_epoch": created_at_epoch,
-            "state": "complete",
-            "operation_id": fence_operation_id,
-            "result": idempotency_result_snapshot(result),
-        }
-        try:
-            write_idempotency_store(
-                {
-                    "version": 1,
-                    "entries": prune_idempotency_entries(
-                        entries,
-                        protected_keys=frozenset({key_hash}),
-                    ),
-                }
-            )
-        except OSError as exc:
-            result.setdefault("warnings", []).append(
-                {
-                    "code": "idempotency_receipt_write_failed",
-                    "message": "The mutation completed, but its local retry receipt could not be persisted.",
-                    "detail": type(exc).__name__,
-                }
-            )
-        result["idempotency_key_hash"] = key_hash
-        return result
 
 
 def find_list(con: sqlite3.Connection, name: str | None = None, list_id: str | None = None) -> dict[str, Any]:

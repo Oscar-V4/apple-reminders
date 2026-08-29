@@ -61,6 +61,7 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/eventkit_bridge_info.plist"),
     Path("scripts/eventkit_bridge_schema.json"),
     Path("scripts/launch_mcp.sh"),
+    Path("scripts/durable_idempotency.py"),
     Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
     Path("scripts/reminders_image_input.py"),
