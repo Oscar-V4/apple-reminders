@@ -55,15 +55,102 @@ class EventKitProtocolTests(unittest.TestCase):
             }
         return payload
 
-    def test_public_interface_has_exactly_three_entry_points(self) -> None:
+    def test_public_interface_has_exactly_six_entry_points(self) -> None:
         self.assertEqual(
             eventkit_protocol.__all__,
             [
                 "validate_response",
                 "validate_mutation_receipt",
                 "mutation_outcome_unknown_response",
+                "validate_ensure_list_receipt",
+                "project_reminder_list",
+                "reminder_list_metadata_value_is_safe",
             ],
         )
+
+    def test_ensure_list_interface_validates_live_and_rehydrates_a_copy(self) -> None:
+        reminder_list = {
+            "id": "LIST-1",
+            "title": "Work",
+            "type": "caldav",
+            "allows_content_modifications": True,
+            "subscribed": False,
+            "immutable": False,
+            "source": {
+                "id": "SOURCE-1",
+                "title": "Private account title",
+                "type": "caldav",
+                "is_delegate": False,
+                "reminder_calendar_count": 3,
+            },
+        }
+        payload = {
+            "ok": True,
+            "status": "verified",
+            "operation": "ensure_reminder_list",
+            "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
+            "before": {},
+            "after": reminder_list,
+        }
+
+        live = eventkit_protocol.validate_ensure_list_receipt(
+            payload,
+            source_id="SOURCE-1",
+            name="Work",
+        )
+        snapshot = json.loads(json.dumps(payload))
+        snapshot["after"].pop("title")
+        snapshot["after"]["source"].pop("title")
+        replay = eventkit_protocol.validate_ensure_list_receipt(
+            snapshot,
+            source_id="SOURCE-1",
+            name="Work",
+            rehydrate=True,
+        )
+
+        self.assertEqual(live, payload)
+        self.assertIsNot(live, payload)
+        self.assertEqual(replay["after"]["title"], "Work")
+        self.assertNotIn("title", replay["after"]["source"])
+        self.assertNotIn("title", snapshot["after"])
+
+    def test_ensure_list_interface_rejects_invalid_safe_metadata(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "verified",
+            "operation": "ensure_reminder_list",
+            "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
+            "after": {
+                "id": "LIST-1",
+                "title": "Work",
+                "type": "caldav",
+                "allows_content_modifications": True,
+                "subscribed": False,
+                "immutable": False,
+                "source": {
+                    "id": "SOURCE-1",
+                    "type": "caldav",
+                    "is_delegate": False,
+                    "reminder_calendar_count": True,
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "identity was invalid"):
+            eventkit_protocol.validate_ensure_list_receipt(
+                payload,
+                source_id="SOURCE-1",
+                name="Work",
+            )
+
+    def test_reminder_list_metadata_safety_uses_the_shared_vocabulary(self) -> None:
+        safe = eventkit_protocol.reminder_list_metadata_value_is_safe
+
+        self.assertTrue(safe("type", "caldav"))
+        self.assertTrue(safe("type", "mobile_me"))
+        self.assertFalse(safe("type", "Private user text"))
+        self.assertTrue(safe("subscribed", False))
+        self.assertFalse(safe("subscribed", 0))
 
     def test_bridge_directly_reexports_protocol_functions_and_constants(self) -> None:
         self.assertIs(

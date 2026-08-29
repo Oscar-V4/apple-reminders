@@ -618,7 +618,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["reason_code"], "invalid_access_response")
 
-    def test_ensure_list_uses_exact_source_and_replays_idempotently(self) -> None:
+    def test_ensure_list_passes_normalized_input_to_durable_backend(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue(
             "ensure_reminder_list",
@@ -629,6 +629,7 @@ class V2CoreFacadeTests(unittest.TestCase):
                 "operation": "ensure_reminder_list",
                 "operation_id": "12345678-1234-4234-9234-1234567890ab",
                 "backend": "eventkit_public_sdk",
+                "idempotency_key_hash": "a" * 64,
                 "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
                 "before": None,
                 "after": {
@@ -664,6 +665,8 @@ class V2CoreFacadeTests(unittest.TestCase):
             mutation=True,
         )
         subject = facade(eventkit)
+        self.assertFalse(hasattr(subject, "_idempotency"))
+        self.assertFalse(hasattr(subject, "_idempotency_lock"))
         arguments = {
             "source_id": "SOURCE-1",
             "name": "  Work  ",
@@ -671,14 +674,17 @@ class V2CoreFacadeTests(unittest.TestCase):
         }
 
         first = subject.ensure_reminder_list(arguments)
-        second = subject.ensure_reminder_list(arguments)
 
         self.assertEqual(
             eventkit.calls,
             [
                 (
                     "ensure_reminder_list",
-                    {"source_id": "SOURCE-1", "name": "Work"},
+                    {
+                        "source_id": "SOURCE-1",
+                        "name": "Work",
+                        "idempotency_key": "ensure:work:1",
+                    },
                     True,
                 )
             ],
@@ -690,53 +696,10 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertNotIn("private_backend_field", first["after"])
         self.assertNotIn("private_source_field", first["after"]["source"])
         self.assertFalse(first["replayed"])
-        self.assertTrue(second["replayed"])
-        self.assertEqual(first["operation_id"], second["operation_id"])
         self.assertEqual(len(first["idempotency_key_hash"]), 64)
         validate_public_result("ensure_reminder_list", first, "committed")
-        validate_public_result("ensure_reminder_list", second, "committed")
 
-    def test_ensure_list_idempotency_key_rejects_different_input(self) -> None:
-        eventkit = FakeEventKit()
-        eventkit.queue(
-            "ensure_reminder_list",
-            {
-                "ok": True,
-                "status": "verified",
-                "operation": "ensure_reminder_list",
-                "operation_id": "12345678-1234-4234-9234-1234567890ab",
-                "backend": "eventkit_public_sdk",
-                "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
-                "before": None,
-                "after": {
-                    "id": "LIST-1",
-                    "title": "Work",
-                    "type": "caldav",
-                    "allows_content_modifications": True,
-                    "subscribed": False,
-                    "immutable": False,
-                    "source": {"id": "SOURCE-1", "type": "caldav"},
-                },
-                "verification": {"state": "read_back", "write_performed": True},
-                "recovery": {"semantics": "delete_list_in_reminders"},
-            },
-            mutation=True,
-        )
-        subject = facade(eventkit)
-        subject.ensure_reminder_list(
-            {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": "same:key"}
-        )
-
-        result = subject.ensure_reminder_list(
-            {"source_id": "SOURCE-1", "name": "Home", "idempotency_key": "same:key"}
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "failed_no_mutation")
-        self.assertEqual(result["error"]["reason_code"], "idempotency_key_conflict")
-        self.assertEqual(len(eventkit.calls), 1)
-
-    def test_ensure_list_dispatch_exception_is_pending_and_replays_without_redispatch(self) -> None:
+    def test_ensure_list_dispatch_exception_is_pending(self) -> None:
         eventkit = FakeEventKit()
         eventkit.fail(
             "ensure_reminder_list",
@@ -751,20 +714,16 @@ class V2CoreFacadeTests(unittest.TestCase):
         }
 
         first = subject.ensure_reminder_list(arguments)
-        second = subject.ensure_reminder_list(arguments)
 
         self.assertEqual(len(eventkit.calls), 1)
         self.assertEqual(first["status"], "committed_verification_pending")
         self.assertFalse(first["replayed"])
-        self.assertTrue(second["replayed"])
-        self.assertEqual(first["operation_id"], second["operation_id"])
         self.assertEqual(first["error"]["code"], "sync_pending")
         self.assertFalse(first["error"]["retryable"])
         self.assertEqual(first["warnings"][0]["code"], "verification_pending")
         self.assertEqual(first["next_action"]["tool"], "list_reminder_lists")
         self.assertFalse(first["next_action"]["retry_original_once"])
         validate_public_result("ensure_reminder_list", first, "unknown")
-        validate_public_result("ensure_reminder_list", second, "unknown")
 
     def test_ensure_list_malformed_post_dispatch_reply_is_pending(self) -> None:
         eventkit = FakeEventKit()
@@ -1585,54 +1544,6 @@ class V2CoreFacadeTests(unittest.TestCase):
                 )
                 self.assertEqual(state, raw_state)
                 validate_public_result("create_reminder", payload, state)
-
-    def test_call_with_state_preserves_in_process_ensure_list_replay_state(self) -> None:
-        eventkit = FakeEventKit()
-        eventkit.queue(
-            "ensure_reminder_list",
-            {
-                "schema_version": 1,
-                "ok": True,
-                "status": "verified",
-                "operation": "ensure_reminder_list",
-                "operation_id": "12345678-1234-4234-9234-1234567890ab",
-                "backend": "eventkit_public_sdk",
-                "target": {"source_id": "SOURCE-1", "list_id": "LIST-1"},
-                "before": None,
-                "after": {
-                    "id": "LIST-1",
-                    "title": "Work",
-                    "source": {"id": "SOURCE-1", "title": "iCloud"},
-                },
-                "verification": {
-                    "state": "read_back",
-                    "write_performed": True,
-                    "final_read": True,
-                    "matched": True,
-                },
-                "recovery": {
-                    "semantics": "delete_list_in_reminders",
-                    "automatic_retry_safe": True,
-                },
-            },
-            mutation=True,
-            mutation_state="committed",
-        )
-        subject = facade(eventkit)
-        arguments = {
-            "source_id": "SOURCE-1",
-            "name": "Work",
-            "idempotency_key": "ensure-state-replay",
-        }
-
-        first, first_state = subject.call_with_state("ensure_reminder_list", arguments)
-        replay, replay_state = subject.call_with_state("ensure_reminder_list", arguments)
-
-        self.assertEqual(first_state, "committed")
-        self.assertEqual(replay_state, "committed")
-        self.assertFalse(first["replayed"])
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(len(eventkit.calls), 1)
 
     def test_change_contract_failure_preserves_raw_committed_state(self) -> None:
         eventkit = FakeEventKit()

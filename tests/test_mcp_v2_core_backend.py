@@ -4,7 +4,9 @@ import copy
 import json
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from durable_idempotency import execute_idempotent
 from mcp import server as mcp_server
 from mcp.v2_core import V2CoreFacade
 from mcp.v2_core_backend import CoreBackend
+from mcp.v2_contract import validate_public_result
 from mcp.v2_transport import DispatchCertainty, TransportResult
 
 
@@ -88,6 +91,13 @@ def bound_idempotency(storage_dir: Path) -> Any:
     return partial(execute_idempotent, storage_dir=storage_dir)
 
 
+def without_durable_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(payload)
+    result.pop("idempotency_key_hash", None)
+    result.pop("replayed", None)
+    return result
+
+
 def make_backend(
     *,
     bridge_call: Any,
@@ -103,6 +113,977 @@ def make_backend(
         idempotency_call=idempotency_call or idempotency_passthrough,
         receipt_validator=receipt_validator or mock.Mock(return_value=None),
     )
+
+
+def ensure_list_receipt(
+    *,
+    list_id: str,
+    source_id: str,
+    name: str,
+    status: str,
+    operation_id: str,
+) -> dict[str, Any]:
+    reminder_list = {
+        "id": list_id,
+        "title": name,
+        "type": "caldav",
+        "allows_content_modifications": True,
+        "subscribed": False,
+        "immutable": False,
+        "source": {
+            "id": source_id,
+            "title": "Test Account",
+            "type": "caldav",
+            "is_delegate": False,
+            "reminder_calendar_count": 3,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "status": status,
+        "operation": "ensure_reminder_list",
+        "operation_id": operation_id,
+        "backend": "eventkit_public_sdk",
+        "target": {"source_id": source_id, "list_id": list_id},
+        "before": copy.deepcopy(reminder_list) if status == "unchanged" else {},
+        "after": copy.deepcopy(reminder_list),
+        "verification": {
+            "state": "read_back",
+            "write_performed": status == "verified",
+            "final_read": True,
+            "matched": True,
+        },
+        "recovery": {
+            "semantics": "not_applicable",
+            "automatic_retry_safe": status == "unchanged",
+        },
+    }
+
+
+class RacingEnsureListBridge:
+    """Deterministic fake for EventKit's non-atomic check-then-create flow."""
+
+    def __init__(self) -> None:
+        self._race = threading.Barrier(2)
+        self._lock = threading.Lock()
+        self._lists: list[dict[str, str]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    @property
+    def created_lists(self) -> list[dict[str, str]]:
+        with self._lock:
+            return copy.deepcopy(self._lists)
+
+    def __call__(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+    ) -> TransportResult:
+        if operation != "ensure_reminder_list":
+            raise AssertionError(f"unexpected bridge operation: {operation}")
+        source_id = str(arguments["source_id"])
+        name = str(arguments["name"])
+        with self._lock:
+            self.calls.append((operation, copy.deepcopy(arguments)))
+            matches = [
+                copy.deepcopy(item)
+                for item in self._lists
+                if item["source_id"] == source_id and item["title"] == name
+            ]
+
+        # When callbacks overlap, both finish their empty read before either
+        # creates. When a durable lock serializes them, the first wait times out
+        # and the second callback observes the newly-created exact-name list.
+        try:
+            self._race.wait(timeout=0.15)
+        except threading.BrokenBarrierError:
+            pass
+
+        if matches:
+            item = matches[0]
+            status = "unchanged"
+        else:
+            with self._lock:
+                sequence = len(self._lists) + 1
+                item = {
+                    "id": f"LIST-{sequence}",
+                    "source_id": source_id,
+                    "title": name,
+                }
+                self._lists.append(item)
+            status = "verified"
+        sequence = int(item["id"].removeprefix("LIST-"))
+        return transport(
+            ensure_list_receipt(
+                list_id=item["id"],
+                source_id=source_id,
+                name=name,
+                status=status,
+                operation_id=f"00000000-0000-4000-8000-{sequence:012d}",
+            )
+        )
+
+
+class DurableEnsureListTests(unittest.TestCase):
+    @staticmethod
+    def facade(
+        bridge_call: Any,
+        support: Path,
+    ) -> V2CoreFacade:
+        return V2CoreFacade(
+            make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+            )
+        )
+
+    def call_concurrently(
+        self,
+        facades: list[V2CoreFacade],
+        arguments: list[dict[str, Any]],
+    ) -> list[tuple[dict[str, Any], str | None]]:
+        ready = threading.Barrier(len(facades))
+
+        def invoke(index: int) -> tuple[dict[str, Any], str | None]:
+            ready.wait(timeout=2)
+            return facades[index].call_with_state(
+                "ensure_reminder_list",
+                arguments[index],
+            )
+
+        with ThreadPoolExecutor(max_workers=len(facades)) as pool:
+            return list(pool.map(invoke, range(len(facades))))
+
+    def test_same_key_across_facade_graphs_creates_once_and_replays_identity(
+        self,
+    ) -> None:
+        bridge = RacingEnsureListBridge()
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "  Work  ",
+            "idempotency_key": "ensure:work:shared",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            results = self.call_concurrently(
+                [self.facade(bridge, support), self.facade(bridge, support)],
+                [copy.deepcopy(arguments), copy.deepcopy(arguments)],
+            )
+
+        payloads = [payload for payload, _ in results]
+        states = [state for _, state in results]
+        self.assertEqual(len(bridge.created_lists), 1)
+        self.assertEqual(len(bridge.calls), 1)
+        self.assertCountEqual(
+            [payload.get("replayed", False) for payload in payloads],
+            [False, True],
+        )
+        self.assertEqual(
+            {payload["target"]["list_id"] for payload in payloads},
+            {"LIST-1"},
+        )
+        self.assertEqual(
+            {payload["operation_id"] for payload in payloads},
+            {"00000000-0000-4000-8000-000000000001"},
+        )
+        self.assertEqual(states, ["committed", "committed"])
+        for payload in payloads:
+            self.assertEqual(payload["after"]["title"], "Work")
+            self.assertEqual(payload["after"]["source"]["id"], "SOURCE-1")
+            validate_public_result("ensure_reminder_list", payload, "committed")
+
+    def test_same_name_with_different_keys_serializes_and_rechecks_current_state(
+        self,
+    ) -> None:
+        bridge = RacingEnsureListBridge()
+        common = {"source_id": "SOURCE-1", "name": "Work"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            results = self.call_concurrently(
+                [self.facade(bridge, support), self.facade(bridge, support)],
+                [
+                    {**common, "idempotency_key": "ensure:work:first"},
+                    {**common, "idempotency_key": "ensure:work:second"},
+                ],
+            )
+            conflict = self.facade(bridge, support).ensure_reminder_list(
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Home",
+                    "idempotency_key": "ensure:work:first",
+                }
+            )
+
+        payloads = [payload for payload, _ in results]
+        self.assertEqual(len(bridge.calls), 2)
+        self.assertEqual(
+            bridge.created_lists,
+            [{"id": "LIST-1", "source_id": "SOURCE-1", "title": "Work"}],
+        )
+        self.assertCountEqual(
+            [payload["status"] for payload in payloads], ["verified", "unchanged"]
+        )
+        self.assertEqual([payload["replayed"] for payload in payloads], [False, False])
+        self.assertEqual(
+            {payload["target"]["list_id"] for payload in payloads},
+            {"LIST-1"},
+        )
+        self.assertEqual(
+            conflict["error"]["reason_code"],
+            "idempotency_key_conflict",
+        )
+        self.assertEqual(
+            conflict["idempotency_key_hash"],
+            payloads[0]["idempotency_key_hash"],
+        )
+        self.assertCountEqual(
+            [state for _payload, state in results], ["committed", "not_mutated"]
+        )
+        for payload, state in results:
+            validate_public_result("ensure_reminder_list", payload, state)
+
+    def test_fresh_key_rechecks_after_the_previously_verified_list_disappears(
+        self,
+    ) -> None:
+        bridge_call = mock.Mock(
+            side_effect=[
+                transport(
+                    ensure_list_receipt(
+                        list_id="LIST-1",
+                        source_id="SOURCE-1",
+                        name="Work",
+                        status="verified",
+                        operation_id="00000000-0000-4000-8000-000000000001",
+                    )
+                ),
+                transport(
+                    ensure_list_receipt(
+                        list_id="LIST-2",
+                        source_id="SOURCE-1",
+                        name="Work",
+                        status="verified",
+                        operation_id="00000000-0000-4000-8000-000000000002",
+                    )
+                ),
+            ]
+        )
+        common = {"source_id": "SOURCE-1", "name": "Work"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first = self.facade(bridge_call, support).ensure_reminder_list(
+                {**common, "idempotency_key": "ensure:work:first"}
+            )
+            current = self.facade(bridge_call, support).ensure_reminder_list(
+                {**common, "idempotency_key": "ensure:work:after-delete"}
+            )
+
+        self.assertEqual(bridge_call.call_count, 2)
+        self.assertEqual(first["target"]["list_id"], "LIST-1")
+        self.assertEqual(current["target"]["list_id"], "LIST-2")
+        self.assertFalse(current["replayed"])
+
+    def test_same_key_with_different_normalized_input_conflicts_without_dispatch(
+        self,
+    ) -> None:
+        bridge = RacingEnsureListBridge()
+        key = "ensure:normalized-input:shared"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first_facade = self.facade(bridge, support)
+            second_facade = self.facade(bridge, support)
+            first, first_state = first_facade.call_with_state(
+                "ensure_reminder_list",
+                {
+                    "source_id": " SOURCE-1 ",
+                    "name": "  Work  ",
+                    "idempotency_key": key,
+                },
+            )
+            conflict, conflict_state = second_facade.call_with_state(
+                "ensure_reminder_list",
+                {
+                    "source_id": "SOURCE-1",
+                    "name": " Home ",
+                    "idempotency_key": key,
+                },
+            )
+
+        self.assertEqual(first["status"], "verified")
+        self.assertEqual(first_state, "committed")
+        self.assertEqual(conflict["status"], "failed_no_mutation")
+        self.assertEqual(conflict_state, "not_mutated")
+        self.assertEqual(
+            conflict["error"]["reason_code"],
+            "idempotency_key_conflict",
+        )
+        self.assertEqual(len(bridge.calls), 1)
+        self.assertEqual(len(bridge.created_lists), 1)
+        validate_public_result(
+            "ensure_reminder_list",
+            conflict,
+            "not_mutated",
+        )
+
+    def test_durable_replay_keeps_name_private_and_reconstructs_public_list(
+        self,
+    ) -> None:
+        bridge = RacingEnsureListBridge()
+        name = "Private Roadmap"
+        key = "ensure:private-roadmap:shared"
+        arguments = {
+            "source_id": "SOURCE-PRIVATE",
+            "name": name,
+            "idempotency_key": key,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first, first_state = self.facade(bridge, support).call_with_state(
+                "ensure_reminder_list",
+                arguments,
+            )
+            replay, replay_state = self.facade(bridge, support).call_with_state(
+                "ensure_reminder_list",
+                arguments,
+            )
+            store_path = support / "idempotency.json"
+            self.assertTrue(
+                store_path.exists(),
+                "ensure_reminder_list did not enter the durable idempotency Module",
+            )
+            store_text = store_path.read_text(encoding="utf-8")
+
+        self.assertNotIn(name, store_text)
+        self.assertNotIn(key, store_text)
+        self.assertFalse(first.get("replayed", False))
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["operation_id"], first["operation_id"])
+        self.assertEqual(replay["target"], first["target"])
+        self.assertEqual(replay["after"]["title"], name)
+        self.assertEqual(replay["after"]["source"]["id"], "SOURCE-PRIVATE")
+        self.assertEqual(first["after"]["source"]["title"], "Test Account")
+        self.assertNotIn("title", replay["after"]["source"])
+        self.assertEqual(first_state, "committed")
+        self.assertEqual(replay_state, "committed")
+        self.assertEqual(len(bridge.calls), 1)
+        validate_public_result("ensure_reminder_list", replay, "committed")
+
+    def test_parent_proven_not_started_clears_ensure_list_fence(self) -> None:
+        failure = {
+            "schema_version": 1,
+            "ok": False,
+            "status": "failed_no_mutation",
+            "operation": "ensure_reminder_list",
+            "target": {"source_id": "SOURCE-1", "list_id": None},
+            "before": {},
+            "after": {},
+            "verification": {
+                "state": "not_needed",
+                "write_performed": False,
+                "final_read": False,
+            },
+            "recovery": {
+                "semantics": "retry_after_environment_repair",
+                "automatic_retry_safe": True,
+            },
+            "error": {
+                "code": "eventkit_bridge_unavailable",
+                "reason_code": "eventkit_helper_build_not_started",
+                "message": "The EventKit helper did not start.",
+                "retryable": True,
+            },
+        }
+        bridge_call = mock.Mock(
+            return_value=transport(
+                copy.deepcopy(failure),
+                proves_not_started=True,
+            )
+        )
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:helper-build:retry",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+            second = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+            store_path = support / "idempotency.json"
+            self.assertTrue(
+                store_path.exists(),
+                "a proven-not-started ensure never created its durable fence",
+            )
+            stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["status"], "failed_no_mutation")
+        self.assertEqual(second["status"], "failed_no_mutation")
+        self.assertEqual(bridge_call.call_count, 2)
+        self.assertEqual(stored, {"version": 1, "entries": {}})
+
+    def test_uncertain_ensure_list_failures_remain_fenced_without_redispatch(
+        self,
+    ) -> None:
+        cases = {
+            "timeout": transport(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "eventkit_timeout",
+                        "message": "The EventKit helper timed out.",
+                    },
+                }
+            ),
+            "malformed": transport(
+                {"ok": True, "unexpected": "shape"},
+                is_error=False,
+            ),
+            "identity_mismatch": transport(
+                ensure_list_receipt(
+                    list_id="LIST-WRONG",
+                    source_id="SOURCE-1",
+                    name="Wrong Name",
+                    status="verified",
+                    operation_id="00000000-0000-4000-8000-999999999999",
+                )
+            ),
+        }
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:uncertain:shared",
+        }
+
+        for label, transport_result in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                support = Path(temp_dir) / "support"
+                bridge_call = mock.Mock(return_value=transport_result)
+                first, first_state = self.facade(
+                    bridge_call,
+                    support,
+                ).call_with_state("ensure_reminder_list", arguments)
+                replay, replay_state = self.facade(
+                    bridge_call,
+                    support,
+                ).call_with_state("ensure_reminder_list", arguments)
+                store_path = support / "idempotency.json"
+                self.assertTrue(
+                    store_path.exists(),
+                    "an uncertain ensure outcome did not retain a durable fence",
+                )
+                stored = json.loads(store_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(first["status"], "committed_verification_pending")
+                self.assertEqual(first_state, "unknown")
+                self.assertEqual(replay["status"], "committed_verification_pending")
+                self.assertEqual(replay_state, "unknown")
+                self.assertTrue(replay["replayed"])
+                self.assertEqual(bridge_call.call_count, 1)
+                self.assertEqual(
+                    next(iter(stored["entries"].values()))["state"],
+                    "in_progress",
+                )
+                validate_public_result("ensure_reminder_list", replay, "unknown")
+
+    def test_pending_ensure_receipt_replays_with_a_valid_warning(self) -> None:
+        pending = {
+            "schema_version": 1,
+            "ok": True,
+            "status": "committed_verification_pending",
+            "operation": "ensure_reminder_list",
+            "operation_id": "00000000-0000-4000-8000-999999999999",
+            "backend": "eventkit_public_sdk",
+            "target": {"source_id": "SOURCE-1", "list_id": None},
+            "before": {},
+            "after": {},
+            "verification": {"state": "pending", "write_performed": None},
+            "recovery": {
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+            "warnings": [
+                {"code": "eventkit_list_read_back_pending", "message": "Native wording"}
+            ],
+            "error": {
+                "code": "sync_pending",
+                "reason_code": "eventkit_final_read_pending",
+                "message": "Native wording",
+                "retryable": False,
+            },
+        }
+        bridge_call = mock.Mock(return_value=transport(pending, is_error=False))
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:pending-replay",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first, first_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+            replay, replay_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+
+        self.assertEqual(bridge_call.call_count, 1)
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(first_state, "unknown")
+        self.assertEqual(replay_state, "unknown")
+        self.assertEqual(
+            replay["warnings"][0]["code"],
+            "eventkit_list_read_back_pending",
+        )
+        validate_public_result("ensure_reminder_list", replay, "unknown")
+
+    def test_uncertain_identity_blocks_a_different_key_without_redispatch(self) -> None:
+        bridge_call = mock.Mock(
+            return_value=transport(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "eventkit_timeout",
+                        "message": "The EventKit helper timed out.",
+                    },
+                }
+            )
+        )
+        common = {"source_id": "SOURCE-1", "name": "Work"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first, first_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {**common, "idempotency_key": "ensure:work:first"},
+            )
+            blocked, blocked_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {**common, "idempotency_key": "ensure:work:second"},
+            )
+            conflict = self.facade(bridge_call, support).ensure_reminder_list(
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Home",
+                    "idempotency_key": "ensure:work:second",
+                }
+            )
+
+        self.assertEqual(bridge_call.call_count, 1)
+        self.assertEqual(first["status"], "committed_verification_pending")
+        self.assertEqual(blocked["status"], "committed_verification_pending")
+        self.assertIsNone(blocked["before"])
+        self.assertIsNone(blocked["after"])
+        self.assertTrue(blocked["replayed"])
+        self.assertEqual(conflict["error"]["reason_code"], "idempotency_key_conflict")
+        self.assertEqual(first_state, "unknown")
+        self.assertEqual(blocked_state, "unknown")
+        validate_public_result("ensure_reminder_list", blocked, "unknown")
+
+    def test_corrupt_unresolved_ensure_identity_fails_closed(self) -> None:
+        bridge_call = mock.Mock(
+            return_value=transport(
+                ensure_list_receipt(
+                    list_id="LIST-1",
+                    source_id="SOURCE-1",
+                    name="Work",
+                    status="verified",
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            support.mkdir()
+            (support / "idempotency.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "a" * 64: {
+                                "operation": "eventkit_ensure_reminder_list",
+                                "created_at_epoch": 1_000.0,
+                                "state": "in_progress",
+                                "operation_id": (
+                                    "00000000-0000-4000-8000-999999999999"
+                                ),
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            payload, state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Work",
+                    "idempotency_key": "ensure:corrupt-identity",
+                },
+            )
+
+        bridge_call.assert_not_called()
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+
+    def test_live_ensure_rejects_a_mismatched_target_source(self) -> None:
+        receipt = ensure_list_receipt(
+            list_id="LIST-1",
+            source_id="SOURCE-1",
+            name="Work",
+            status="verified",
+            operation_id="00000000-0000-4000-8000-000000000001",
+        )
+        receipt["target"]["source_id"] = "SOURCE-WRONG"
+        bridge_call = mock.Mock(return_value=transport(receipt))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload, state = self.facade(
+                bridge_call,
+                Path(temp_dir) / "support",
+            ).call_with_state(
+                "ensure_reminder_list",
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Work",
+                    "idempotency_key": "ensure:wrong-target-source",
+                },
+            )
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_unchanged_ensure_rejects_changed_safe_metadata(self) -> None:
+        receipt = ensure_list_receipt(
+            list_id="LIST-1",
+            source_id="SOURCE-1",
+            name="Work",
+            status="unchanged",
+            operation_id="00000000-0000-4000-8000-000000000001",
+        )
+        receipt["before"]["allows_content_modifications"] = False
+        bridge_call = mock.Mock(return_value=transport(receipt))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload, state = self.facade(
+                bridge_call, Path(temp_dir) / "support"
+            ).call_with_state(
+                "ensure_reminder_list",
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Work",
+                    "idempotency_key": "ensure:contradictory-unchanged",
+                },
+            )
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+
+    def test_replay_validates_stored_source_before_rehydrating_title(self) -> None:
+        bridge_call = mock.Mock(
+            return_value=transport(
+                ensure_list_receipt(
+                    list_id="LIST-1",
+                    source_id="SOURCE-1",
+                    name="Work",
+                    status="verified",
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+            )
+        )
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:tampered-source",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+            store_path = support / "idempotency.json"
+            stored = json.loads(store_path.read_text(encoding="utf-8"))
+            record = next(iter(stored["entries"].values()))
+            future = record["created_at_epoch"] + 32 * 86400
+            record["result"]["target"]["source_id"] = "SOURCE-WRONG"
+            record["result"]["after"]["source"]["id"] = "SOURCE-WRONG"
+            store_path.write_text(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            replay, replay_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                arguments,
+            )
+            other_key, other_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {**arguments, "idempotency_key": "ensure:tampered-source:other"},
+            )
+            with mock.patch.object(
+                durable_idempotency._time,
+                "time",
+                return_value=future,
+            ):
+                retained, retained_state = self.facade(
+                    bridge_call,
+                    support,
+                ).call_with_state(
+                    "ensure_reminder_list",
+                    {**arguments, "idempotency_key": "ensure:tampered-source:future"},
+                )
+
+        self.assertEqual(first["status"], "verified")
+        self.assertEqual(replay["status"], "committed_verification_pending")
+        self.assertEqual(replay_state, "unknown")
+        self.assertEqual(other_key["status"], "committed_verification_pending")
+        self.assertEqual(other_state, "unknown")
+        self.assertEqual(retained["status"], "committed_verification_pending")
+        self.assertEqual(retained_state, "unknown")
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_same_key_with_a_corrupt_input_hash_stays_outcome_unknown(self) -> None:
+        key = "ensure:corrupt-same-key"
+        bridge_call = mock.Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            support.mkdir()
+            (support / "idempotency.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            durable_idempotency.idempotency_key_hash(
+                                "eventkit_ensure_reminder_list", key
+                            ): {
+                                "operation": "eventkit_ensure_reminder_list",
+                                "created_at_epoch": 1_000.0,
+                                "state": "in_progress",
+                                "operation_id": "00000000-0000-4000-8000-999999999999",
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            payload, state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": key},
+            )
+
+        bridge_call.assert_not_called()
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+
+    def test_complete_ensure_with_a_corrupt_input_hash_blocks_a_fresh_key(
+        self,
+    ) -> None:
+        bridge_call = mock.Mock(
+            return_value=transport(
+                ensure_list_receipt(
+                    list_id="LIST-1",
+                    source_id="SOURCE-1",
+                    name="Work",
+                    status="verified",
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+            )
+        )
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:corrupt-complete:first",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+            store_path = support / "idempotency.json"
+            stored = json.loads(store_path.read_text(encoding="utf-8"))
+            next(iter(stored["entries"].values()))["input_hash"] = "corrupt"
+            store_path.write_text(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            blocked, state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list",
+                {
+                    **arguments,
+                    "idempotency_key": "ensure:corrupt-complete:fresh",
+                },
+            )
+
+        self.assertEqual(first["status"], "verified")
+        self.assertEqual(blocked["status"], "committed_verification_pending")
+        self.assertEqual(state, "unknown")
+        self.assertEqual(bridge_call.call_count, 1)
+
+    def test_verified_and_unchanged_replays_preserve_safe_list_metadata(self) -> None:
+        for status in ("verified", "unchanged"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_dir:
+                receipt = ensure_list_receipt(
+                    list_id="LIST-1",
+                    source_id="SOURCE-1",
+                    name="Work",
+                    status=status,
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+                if status == "unchanged":
+                    receipt["warnings"] = [
+                        {
+                            "code": "duplicate_list_name_in_source",
+                            "message": "untrusted native wording",
+                        }
+                    ]
+                bridge_call = mock.Mock(return_value=transport(receipt))
+                support = Path(temp_dir) / "support"
+                arguments = {
+                    "source_id": "SOURCE-1",
+                    "name": "Work",
+                    "idempotency_key": f"ensure:metadata:{status}",
+                }
+                first = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+                replay = self.facade(bridge_call, support).ensure_reminder_list(arguments)
+
+                for field in (
+                    "id",
+                    "title",
+                    "type",
+                    "allows_content_modifications",
+                    "subscribed",
+                    "immutable",
+                ):
+                    self.assertEqual(replay["after"][field], first["after"][field])
+                for field in ("id", "type", "is_delegate", "reminder_list_count"):
+                    self.assertEqual(
+                        replay["after"]["source"][field],
+                        first["after"]["source"][field],
+                    )
+                if status == "unchanged":
+                    self.assertEqual(replay["before"]["title"], "Work")
+                    self.assertEqual(
+                        replay["warnings"],
+                        [
+                            {
+                                "code": "duplicate_list_name_in_source",
+                                "message": (
+                                    "More than one reminder list in this source has the exact "
+                                    "name; the first stable identifier was returned."
+                                ),
+                            }
+                        ],
+                    )
+                self.assertEqual(bridge_call.call_count, 1)
+
+    def test_fresh_bridge_cannot_spoof_replayed_provenance(self) -> None:
+        receipt = ensure_list_receipt(
+            list_id="LIST-1",
+            source_id="SOURCE-1",
+            name="Work",
+            status="verified",
+            operation_id="00000000-0000-4000-8000-000000000001",
+        )
+        receipt["replayed"] = True
+        bridge_call = mock.Mock(return_value=transport(receipt))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = self.facade(
+                bridge_call,
+                Path(temp_dir) / "support",
+            ).ensure_reminder_list(
+                {
+                    "source_id": "SOURCE-1",
+                    "name": "Work",
+                    "idempotency_key": "ensure:spoofed-replay",
+                }
+            )
+
+        self.assertFalse(payload["replayed"])
+
+    def test_same_key_uses_one_hash_on_success_conflict_unknown_and_replay(self) -> None:
+        verified_bridge = mock.Mock(
+            return_value=transport(
+                ensure_list_receipt(
+                    list_id="LIST-1",
+                    source_id="SOURCE-1",
+                    name="Work",
+                    status="verified",
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+            )
+        )
+        uncertain_bridge = mock.Mock(
+            return_value=transport(
+                {
+                    "ok": False,
+                    "error": {"code": "eventkit_timeout", "message": "timed out"},
+                }
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            verified_support = Path(temp_dir) / "verified"
+            key = "ensure:stable-public-hash"
+            first = self.facade(verified_bridge, verified_support).ensure_reminder_list(
+                {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": key}
+            )
+            conflict = self.facade(verified_bridge, verified_support).ensure_reminder_list(
+                {"source_id": "SOURCE-1", "name": "Home", "idempotency_key": key}
+            )
+            uncertain_support = Path(temp_dir) / "uncertain"
+            unknown = self.facade(uncertain_bridge, uncertain_support).ensure_reminder_list(
+                {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": key}
+            )
+            replay = self.facade(uncertain_bridge, uncertain_support).ensure_reminder_list(
+                {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": key}
+            )
+
+        self.assertEqual(first["idempotency_key_hash"], conflict["idempotency_key_hash"])
+        self.assertEqual(unknown["idempotency_key_hash"], replay["idempotency_key_hash"])
+
+    def test_malformed_parent_no_dispatch_proof_clears_the_fence(self) -> None:
+        bridge_call = mock.Mock(
+            return_value=transport(
+                {"ok": False, "error": {}},
+                proves_not_started=True,
+            )
+        )
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:malformed-parent-proof",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first, first_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+            second, second_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+            stored = json.loads((support / "idempotency.json").read_text(encoding="utf-8"))
+
+        for payload in (first, second):
+            self.assertEqual(payload["status"], "failed_no_mutation")
+            self.assertEqual(
+                payload["error"]["reason_code"],
+                "invalid_prelaunch_failure_payload",
+            )
+        self.assertEqual(first_state, "not_mutated")
+        self.assertEqual(second_state, "not_mutated")
+        self.assertEqual(bridge_call.call_count, 2)
+        self.assertEqual(stored["entries"], {})
 
 
 class CoreBackendInterfaceTests(unittest.TestCase):
@@ -157,7 +1138,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         self.assertEqual(loaded_adapter_modules(), before)
         idempotency_call.assert_called_once()
 
-    def test_non_create_mutation_does_not_call_idempotency(self) -> None:
+    def test_update_mutation_does_not_call_idempotency(self) -> None:
         payload = valid_eventkit_receipt("update_reminder")
         idempotency_call = mock.Mock(
             side_effect=RuntimeError("idempotency unavailable")
@@ -229,8 +1210,8 @@ class CoreBackendInterfaceTests(unittest.TestCase):
 
         self.assertTrue(first.is_error)
         self.assertTrue(second.is_error)
-        self.assertEqual(first.payload, failed)
-        self.assertEqual(second.payload, failed)
+        self.assertEqual(without_durable_metadata(first.payload), failed)
+        self.assertEqual(without_durable_metadata(second.payload), failed)
         self.assertEqual(bridge_call.call_count, 2)
         self.assertEqual(stored["entries"], {})
 
@@ -269,7 +1250,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             )
 
         self.assertTrue(first.is_error)
-        self.assertEqual(first.payload, failed)
+        self.assertEqual(without_durable_metadata(first.payload), failed)
         self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
@@ -366,6 +1347,14 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             )
             first = backend.invoke("create_reminder", arguments, mutation=True)
             replay = backend.invoke("create_reminder", arguments, mutation=True)
+            public, public_state = V2CoreFacade(backend).call_with_state(
+                "create_reminder",
+                {
+                    "list_id": "LIST-1",
+                    "title": "Pending create",
+                    "idempotency_key": "create-pending",
+                },
+            )
 
         self.assertFalse(first.is_error)
         self.assertEqual(first.payload["status"], "committed_verification_pending")
@@ -376,6 +1365,70 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         self.assertEqual(replay.mutation_state, "unknown")
         self.assertTrue(replay.payload["replayed"])
         self.assertEqual(bridge_call.call_count, 1)
+        self.assertEqual(public_state, "unknown")
+        self.assertEqual(public["warnings"][0]["code"], "verification_pending")
+        validate_public_result("create_reminder", public, "unknown")
+
+    def test_create_pending_replay_preserves_durable_privacy_warning(self) -> None:
+        pending = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            "status": "committed_verification_pending",
+            "ok": True,
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "backend": "idempotency_fence",
+            "target": {},
+            "before": {},
+            "after": {},
+            "verification": {
+                "state": "pending",
+                "write_performed": None,
+                "final_read": False,
+            },
+            "recovery": {
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+            "warnings": [
+                *[
+                    {"code": f"existing_warning_{index}", "message": "Existing."}
+                    for index in range(20)
+                ],
+                {
+                    "code": "idempotency_privacy_scrub_failed",
+                    "message": "Older retry content could not be scrubbed.",
+                }
+            ],
+            "error": {
+                "code": "sync_pending",
+                "reason_code": "idempotency_outcome_unknown",
+                "message": "Read before retrying.",
+                "retryable": False,
+            },
+            "replayed": True,
+        }
+
+        def replay(**_arguments: Any) -> dict[str, Any]:
+            return copy.deepcopy(pending)
+
+        backend = make_backend(
+            bridge_call=mock.Mock(),
+            idempotency_call=replay,
+        )
+        reply = backend.invoke(
+            "create_reminder",
+            {
+                "calendar_id": "LIST-1",
+                "title": "Pending create",
+                "idempotency_key": "create-pending-warning",
+            },
+            mutation=True,
+        )
+
+        warning_codes = [warning["code"] for warning in reply.payload["warnings"]]
+        self.assertIn("idempotency_privacy_scrub_failed", warning_codes)
+        self.assertIn("verification_pending", warning_codes)
+        self.assertEqual(len(warning_codes), 20)
 
     def test_create_committed_projection_replay_preserves_state(self) -> None:
         verified = {
@@ -537,7 +1590,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertTrue(first.is_error)
-        self.assertEqual(first.payload, rejected)
+        self.assertEqual(without_durable_metadata(first.payload), rejected)
         self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")
@@ -582,7 +1635,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             replay = backend.invoke("create_reminder", arguments, mutation=True)
 
         self.assertTrue(first.is_error)
-        self.assertEqual(first.payload, contradictory)
+        self.assertEqual(without_durable_metadata(first.payload), contradictory)
         self.assertEqual(first.mutation_state, "unknown")
         self.assertFalse(replay.is_error)
         self.assertEqual(replay.payload["status"], "committed_verification_pending")

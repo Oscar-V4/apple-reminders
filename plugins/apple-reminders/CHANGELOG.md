@@ -58,10 +58,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   no-write claims to unknown instead of reconstructing state from display
   status.
 - Extracted the durable write-ahead fence from the private adapter into one
-  shared deep Module. Core create now depends on the narrow idempotency
-  function and shared typed errors instead of loading the full private adapter
-  in-process; persisted v1 hashes, JSON bytes, locking, privacy projection, and
-  failure ordering remain unchanged.
+  shared deep Module. Core create and exact list ensure now use its narrow
+  function and shared typed errors; list check-then-create is serialized across
+  runtimes without a competing facade cache. Fresh keys recheck current list
+  state; unresolved same-input work blocks redispatch.
 - Durable replay now rejects missing, malformed, or unknown store versions
   before dispatch, rejects ambiguous record/timestamp shapes, and removes
   malformed completed-result payloads without making their write-ahead fences
@@ -138,9 +138,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   a crash or final-Receipt persistence failure blocks redispatch and returns
   verification-pending on replay. The current key survives wall-clock jumps,
   and unresolved fences cannot be evicted merely to make capacity for a new
-  write or age into a second dispatch; retention expires only redispatch-safe
-  results. A callback failure that affirmatively occurred before mutation clears
-  its fence for a safe retry; possible-commit failures retain it. Core create
+  write or age into a second dispatch; the 30-day cutoff applies only to
+  redispatch-safe results. A callback failure that affirmatively occurred
+  before mutation clears its fence for a safe retry; possible-commit failures
+  retain it. Core create
   now carries contract-validated EventKit no-write results through that same
   cleanup path instead of leaving a permanent unresolved fence.
 - Removed primitive arrays and bare recurrence counts from persisted retry

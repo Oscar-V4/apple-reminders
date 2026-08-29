@@ -16,7 +16,6 @@ import hashlib
 import json
 import re
 import sys
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from eventkit_protocol import project_reminder_list as _public_list  # noqa: E402
 from reminders_service import (  # noqa: E402
     ActionRejected,
     AdapterConflict,
@@ -141,13 +141,6 @@ class EventKitReply:
 
 
 @dataclass(frozen=True)
-class _IdempotentResult:
-    fingerprint: str
-    payload: dict[str, Any]
-    mutation_state: MutationState
-
-
-@dataclass(frozen=True)
 class _CoreCallResult:
     payload: dict[str, Any]
     mutation_state: MutationState
@@ -233,57 +226,6 @@ def _trimmed_string(value: Any, name: str, maximum: int) -> str:
     if len(normalized) > maximum:
         raise FacadeInputError(f"{name} exceeds its {maximum}-character limit")
     return normalized
-
-
-def _public_source(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return copy.deepcopy(value)
-    raw = dict(value)
-    source_type = str(raw.get("type") or "unknown")
-    if source_type not in {
-        "local",
-        "exchange",
-        "caldav",
-        "mobile_me",
-        "subscribed",
-        "birthdays",
-        "unknown",
-    }:
-        source_type = "unknown"
-    raw_count = raw.get("reminder_list_count", raw.get("reminder_calendar_count", 0))
-    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
-    return {
-        "id": str(raw.get("id") or "")[:2048],
-        "title": str(raw.get("title") or "")[:512],
-        "type": source_type,
-        "is_delegate": raw.get("is_delegate") is True,
-        "reminder_list_count": max(0, min(count, 10_000)),
-    }
-
-
-def _public_list(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return copy.deepcopy(value)
-    raw = dict(value)
-    list_type = str(raw.get("type") or "unknown")
-    if list_type not in {
-        "local",
-        "caldav",
-        "exchange",
-        "subscription",
-        "birthday",
-        "unknown",
-    }:
-        list_type = "unknown"
-    return {
-        "id": str(raw.get("id") or raw.get("list_id") or "")[:2048],
-        "title": str(raw.get("title") or raw.get("name") or "")[:512],
-        "type": list_type,
-        "allows_content_modifications": raw.get("allows_content_modifications") is True,
-        "subscribed": raw.get("subscribed") is True,
-        "immutable": raw.get("immutable") is True,
-        "source": _public_source(raw.get("source")),
-    }
 
 
 def _public_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -782,6 +724,15 @@ def _warnings(value: Any) -> list[dict[str, str]]:
             continue
         code = _reason_code(item.get("code"), "warning")
         message = item.get("message")
+        if code == "duplicate_list_name_in_source":
+            message = (
+                "More than one reminder list in this source has the exact name; "
+                "the first stable identifier was returned."
+            )
+        elif code == "verification_pending":
+            message = "The prior mutation outcome is still awaiting verification."
+        elif code == "eventkit_list_read_back_pending":
+            message = "The Reminder List may exist, but its final read-back is pending."
         if isinstance(message, str) and message:
             result.append({"code": code, "message": message[:2000]})
     return result
@@ -943,15 +894,9 @@ class V2CoreFacade:
         operation_id_source: Callable[[], str] = lambda: str(uuid.uuid4()),
         reference_ttl_seconds: float = 300.0,
         max_active_references: int = 1024,
-        max_idempotency_results: int = 256,
     ) -> None:
-        if max_idempotency_results <= 0:
-            raise ValueError("Facade bounds must be positive")
         self._eventkit = eventkit
         self._operation_id_source = operation_id_source
-        self._max_idempotency_results = max_idempotency_results
-        self._idempotency: dict[str, _IdempotentResult] = {}
-        self._idempotency_lock = threading.RLock()
         self._adapter = EventKitCoreAdapter(
             eventkit,
             operation_id_source=operation_id_source,
@@ -1159,71 +1104,46 @@ class V2CoreFacade:
                 ),
                 "not_mutated",
             )
-        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        request_fingerprint = hashlib.sha256(
-            json.dumps(
-                {"source_id": source_id, "name": name},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        with self._idempotency_lock:
-            previous = self._idempotency.get(key_hash)
-            if previous is not None:
-                if previous.fingerprint != request_fingerprint:
-                    return _CoreCallResult(
-                        self._mutation_failure(
-                            "ensure_reminder_list",
-                            target={"source_id": source_id, "list_id": None},
-                            code="invalid_input",
-                            reason_code="idempotency_key_conflict",
-                            message="The idempotency key was already used for different list input.",
-                            retryable=False,
-                        ),
-                        "not_mutated",
-                    )
-                replay = copy.deepcopy(previous.payload)
-                replay["replayed"] = True
-                return _CoreCallResult(replay, previous.mutation_state)
-
-            try:
-                reply = self._eventkit.invoke(
-                    "ensure_reminder_list",
-                    {"source_id": source_id, "name": name},
-                    mutation=True,
+        raw_reply: dict[str, Any] = {}
+        try:
+            reply = self._eventkit.invoke(
+                "ensure_reminder_list",
+                {
+                    "source_id": source_id,
+                    "name": name,
+                    "idempotency_key": key,
+                },
+                mutation=True,
+            )
+        except Exception:
+            mutation_state: MutationState = "unknown"
+            result = self._pending_list_result(
+                source_id,
+                reason_code="eventkit_list_dispatch_failed",
+                message=(
+                    "The Reminder List may have been created; list the exact "
+                    "source before retrying."
+                ),
+            )
+        else:
+            raw_reply = _deep_dict(reply.payload)
+            mutation_state = _reply_mutation_state(reply)
+            result = self._project_list_receipt(
+                reply,
+                source_id=source_id,
+                expected_name=name,
+            )
+            if result.get("status") == "committed_verification_pending":
+                mutation_state = mutation_state_after_unverified_projection(
+                    mutation_state
                 )
-            except Exception:
-                mutation_state: MutationState = "unknown"
-                result = self._pending_list_result(
-                    source_id,
-                    reason_code="eventkit_list_dispatch_failed",
-                    message=(
-                        "The Reminder List may have been created; list the exact "
-                        "source before retrying."
-                    ),
-                )
-            else:
-                mutation_state = _reply_mutation_state(reply)
-                result = self._project_list_receipt(
-                    reply,
-                    source_id=source_id,
-                    expected_name=name,
-                )
-                if result.get("status") == "committed_verification_pending":
-                    mutation_state = mutation_state_after_unverified_projection(
-                        mutation_state
-                    )
-            result["replayed"] = False
-            result["idempotency_key_hash"] = key_hash
-            if result["status"] in SUCCESS_STATUSES:
-                while len(self._idempotency) >= self._max_idempotency_results:
-                    self._idempotency.pop(next(iter(self._idempotency)))
-                self._idempotency[key_hash] = _IdempotentResult(
-                    request_fingerprint,
-                    copy.deepcopy(result),
-                    mutation_state,
-                )
-            return _CoreCallResult(result, mutation_state)
+        result["replayed"] = raw_reply.get("replayed") is True
+        durable_key_hash = raw_reply.get("idempotency_key_hash")
+        if isinstance(durable_key_hash, str) and re.fullmatch(
+            r"[0-9a-f]{64}", durable_key_hash
+        ):
+            result["idempotency_key_hash"] = durable_key_hash
+        return _CoreCallResult(result, mutation_state)
 
     def _project_list_receipt(
         self,
@@ -1251,8 +1171,18 @@ class V2CoreFacade:
                     "exact source before retrying."
                 ),
             )
-        before = _public_list(payload.get("before"))
-        after = _public_list(payload.get("after"))
+        before_raw = payload.get("before")
+        after_raw = payload.get("after")
+        before = (
+            _public_list(before_raw)
+            if isinstance(before_raw, Mapping) and bool(before_raw)
+            else None
+        )
+        after = (
+            _public_list(after_raw)
+            if isinstance(after_raw, Mapping) and bool(after_raw)
+            else None
+        )
         target_raw = payload.get("target") if isinstance(payload.get("target"), Mapping) else {}
         list_id = target_raw.get("list_id") or (
             after.get("id") if isinstance(after, Mapping) else None
@@ -1651,9 +1581,8 @@ class V2CoreFacade:
         )
         receipt["replayed"] = payload.get("replayed") is True
         key_hash = payload.get("idempotency_key_hash")
-        if not isinstance(key_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", key_hash):
-            key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
-        receipt["idempotency_key_hash"] = key_hash
+        if isinstance(key_hash, str) and re.fullmatch(r"[0-9a-f]{64}", key_hash):
+            receipt["idempotency_key_hash"] = key_hash
 
         if status in {"verified", "unchanged"}:
             if not isinstance(reminder_id, str) or not reminder_id:

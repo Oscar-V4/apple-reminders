@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -18,6 +19,9 @@ __all__ = [
     "validate_response",
     "validate_mutation_receipt",
     "mutation_outcome_unknown_response",
+    "validate_ensure_list_receipt",
+    "project_reminder_list",
+    "reminder_list_metadata_value_is_safe",
 ]
 
 
@@ -40,6 +44,141 @@ EXIT_CODES = {
 }
 STABLE_ERROR_CODES = set(CONTRACT_STABLE_ERROR_CODES)
 COLLECTION_READ_OPERATIONS = {"list_calendars", "fetch_reminders"}
+_LIST_TYPES = frozenset(
+    {"local", "caldav", "exchange", "subscription", "birthday", "unknown"}
+)
+_SOURCE_TYPES = frozenset(
+    {
+        "local",
+        "exchange",
+        "caldav",
+        "mobile_me",
+        "subscribed",
+        "birthdays",
+        "unknown",
+    }
+)
+_LIST_METADATA_BOOLEANS = frozenset(
+    {"allows_content_modifications", "subscribed", "immutable", "is_delegate"}
+)
+_LIST_METADATA_TYPES = _LIST_TYPES | _SOURCE_TYPES
+
+
+def reminder_list_metadata_value_is_safe(key: str, value: Any) -> bool:
+    return (
+        key == "type"
+        and isinstance(value, str)
+        and value in _LIST_METADATA_TYPES
+    ) or (key in _LIST_METADATA_BOOLEANS and type(value) is bool)
+
+
+def _project_source(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return copy.deepcopy(value)
+    raw = dict(value)
+    source_type = str(raw.get("type") or "unknown")
+    if source_type not in _SOURCE_TYPES:
+        source_type = "unknown"
+    raw_count = raw.get(
+        "reminder_list_count",
+        raw.get("reminder_calendar_count", 0),
+    )
+    count = raw_count if type(raw_count) is int else 0
+    result = {
+        "id": str(raw.get("id") or "")[:2048],
+        "type": source_type,
+        "is_delegate": raw.get("is_delegate") is True,
+        "reminder_list_count": max(0, min(count, 10_000)),
+    }
+    if "title" in raw:
+        result["title"] = str(raw.get("title") or "")[:512]
+    return result
+
+
+def project_reminder_list(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return copy.deepcopy(value)
+    raw = dict(value)
+    list_type = str(raw.get("type") or "unknown")
+    if list_type not in _LIST_TYPES:
+        list_type = "unknown"
+    return {
+        "id": str(raw.get("id") or raw.get("list_id") or "")[:2048],
+        "title": str(raw.get("title") or raw.get("name") or "")[:512],
+        "type": list_type,
+        "allows_content_modifications": (
+            raw.get("allows_content_modifications") is True
+        ),
+        "subscribed": raw.get("subscribed") is True,
+        "immutable": raw.get("immutable") is True,
+        "source": _project_source(raw.get("source")),
+    }
+
+
+def validate_ensure_list_receipt(
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    name: str | None,
+    rehydrate: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("EventKit ensure-list receipt identity was invalid")
+    result = copy.deepcopy(dict(payload))
+    if result.get("status") not in {"unchanged", "verified"}:
+        return result
+    target = result.get("target")
+    list_id = target.get("list_id") if isinstance(target, dict) else None
+
+    def reject() -> None:
+        raise RuntimeError("EventKit ensure-list receipt identity was invalid")
+
+    if not (
+        result.get("operation") == "ensure_reminder_list"
+        and isinstance(source_id, str)
+        and source_id
+        and (rehydrate or isinstance(name, str) and bool(name))
+        and isinstance(list_id, str)
+        and list_id
+        and target.get("source_id") == source_id
+    ):
+        reject()
+
+    def validated_list(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            reject()
+        source = value.get("source")
+        count = (
+            source.get("reminder_calendar_count")
+            if isinstance(source, dict)
+            else None
+        )
+        if not (
+            value.get("id") == list_id
+            and (rehydrate or value.get("title") == name)
+            and value.get("type") in _LIST_TYPES
+            and all(
+                type(value.get(field)) is bool
+                for field in ("allows_content_modifications", "subscribed", "immutable")
+            )
+            and isinstance(source, dict)
+            and source.get("id") == source_id
+            and source.get("type") in _SOURCE_TYPES
+            and type(source.get("is_delegate")) is bool
+            and type(count) is int
+            and 0 <= count <= 10_000
+        ):
+            reject()
+        if rehydrate and isinstance(name, str):
+            value["title"] = name
+        return value
+
+    result["after"] = validated_list(result.get("after"))
+    if result.get("status") == "unchanged":
+        result["before"] = validated_list(result.get("before"))
+        if result["before"] != result["after"]:
+            reject()
+    return result
 
 
 def _validated_status_and_ok(payload: dict[str, Any]) -> tuple[str, bool]:

@@ -20,7 +20,7 @@ rules, so it passes the deletion test for a deep Module.
    adapter.
 2. Extract one functional Module with a fixed production policy and only a
    temporary-directory test seam. This improves locality while keeping one
-   caller-facing operation.
+   stateful caller-facing operation.
 3. Build a configurable engine with store, serializer, clock, lock, outcome,
    and retention interfaces. This creates extension points for which there is
    only one production implementation and makes persisted safety policy appear
@@ -28,10 +28,13 @@ rules, so it passes the deletion test for a deep Module.
 
 ## Decision
 
-Choose option 2. `scripts/durable_idempotency.py` exposes
-`execute_idempotent`; production callers provide an operation, optional key,
-input fingerprint payload, and zero-argument callback. Tests may bind the same
-implementation to a temporary storage directory. `AdapterError` and
+Choose option 2. `scripts/durable_idempotency.py` exposes the stateful
+`execute_idempotent` operation and the pure `idempotency_key_hash` projection.
+The latter lets Core attach the exact persisted key hash to pre-dispatch error
+Receipts without duplicating canonicalization. Production callers provide an
+operation, optional key, input fingerprint payload, and zero-argument callback.
+Tests may bind the same implementation to a temporary storage directory.
+`AdapterError` and
 `MutationNotStartedError` live with the shared Receipt/error contract so every
 boundary uses one exact type identity. The private adapter imports and
 re-exports those names for retained command compatibility.
@@ -51,8 +54,8 @@ legacy complete results without changing the store version:
 - final Receipt persistence failure returns the successful live result with a
   warning and leaves replay outcome unknown;
 - legacy state-less v1 records, 500-entry capacity, current-key protection, and
-  operation aliases do not change; retention expires only redispatch-safe
-  records, never unresolved fences;
+  operation aliases do not change; the 30-day cutoff removes only
+  redispatch-safe records, never unresolved fences;
 - complete modern and legacy results are re-sanitized while the existing lock
   is held, then atomically rewritten with every fence metadata field intact;
 - a failed existing-key scrub returns only the sanitized in-memory replay plus
@@ -85,8 +88,9 @@ interfaces without a second real implementation.
 
 ## Consequences
 
-Core create depends on one callable and shared typed errors instead of loading
-the private adapter. Retained Native commands keep their existing call shape.
+Core create depends on one stateful callable, one pure hash projection, and
+shared typed errors instead of loading the private adapter. Retained Native
+commands keep their existing call shape.
 Characterization tests own exact hashes, JSON bytes, permissions, privacy,
 failure ordering, and replay behavior at the new Module boundary. Package
 auditing includes the new runtime file, while public MCP schemas and tool

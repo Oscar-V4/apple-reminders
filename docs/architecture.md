@@ -89,11 +89,12 @@ user-facing promise.
      from the shared cache.
 7. **Durable idempotency Module**
    - Owns the write-ahead fence, process lock, privacy-preserving Receipt
-     snapshot, replay, retention, and atomic v1 JSON persistence behind one
-     `execute_idempotent` function.
-   - Is composed directly into Core create and imported by the retained Native
-     adapter commands. Core no longer loads the full private adapter in-process
-     merely to obtain durability or error types.
+     snapshot, replay, retention, and atomic v1 JSON persistence behind
+     `execute_idempotent`. Its only other entry point, `idempotency_key_hash`,
+     is a pure projection of the same persisted key identity for Core errors.
+   - Is composed directly into Core create and exact list ensure, and imported
+     by the retained Native adapter commands. It is the sole list-idempotency
+     authority across MCP runtimes; the facade keeps no competing memory cache.
    - Freezes the existing file format and failure ordering. Storage policy,
      hash algorithms, lock scope, and error classification are not pluggable
      extension points.
@@ -101,8 +102,10 @@ user-facing promise.
      metadata while removing primitive user-authored arrays before replay.
 8. **EventKit response protocol Module**
    - Owns wire response validation, projected/full mutation Receipt validation,
-     and exact outcome-unknown Receipt construction behind three pure
-     functions.
+     exact outcome-unknown Receipt construction, and the closed Reminder
+     List/Source vocabulary. Its six pure functions also own ensure-list
+     identity validation, public list projection, and privacy-safe metadata
+     classification.
    - Is imported directly by the executable EventKit bridge, MCP server, and
      Core backend. Core and server do not load the giant bridge script
      in-process to obtain protocol rules.
