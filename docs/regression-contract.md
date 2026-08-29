@@ -205,6 +205,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `unchanged`; pending, partial, failed, or manual-repair states set
     `isError=true` without discarding structured evidence or authorizing a
     blind retry.
+31. Every successful public collection contains only object records. EventKit
+    list/fetch transport validation, Core projection, Recently Deleted
+    projection, and the central public result contract each reject a non-object
+    member. A malformed member anywhere in the backend page fails the complete
+    bounded read; it is never preserved, silently filtered, or hidden beyond a
+    public page limit and then reported as `verified`.
 
 ## Deliberately withheld behavior
 

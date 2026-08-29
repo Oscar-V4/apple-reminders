@@ -208,6 +208,48 @@ class EventKitProtocolTests(unittest.TestCase):
                     "read_reminder",
                 )
 
+    def test_successful_collection_reads_reject_non_object_items(self) -> None:
+        for operation, item in (("list_calendars", None), ("fetch_reminders", 42)):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                RuntimeError,
+                r"Native bridge response data\.items\[0\] must be an object",
+            ):
+                eventkit_protocol.validate_response(
+                    {
+                        "schema_version": 1,
+                        "operation": operation,
+                        "status": "verified",
+                        "ok": True,
+                        "data": {"items": [item]},
+                    },
+                    operation,
+                )
+
+    def test_collection_reads_reject_mutation_only_success_statuses(self) -> None:
+        for operation in ("list_calendars", "fetch_reminders"):
+            for status in (
+                "unchanged",
+                "committed_verification_pending",
+                "partial_success",
+            ):
+                with (
+                    self.subTest(operation=operation, status=status),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "Native bridge collection reads must use verified status",
+                    ),
+                ):
+                    eventkit_protocol.validate_response(
+                        {
+                            "schema_version": 1,
+                            "operation": operation,
+                            "status": status,
+                            "ok": True,
+                            "data": {"items": [None]},
+                        },
+                        operation,
+                    )
+
         for code in ([], {}):
             with self.subTest(code=code), self.assertRaisesRegex(
                 RuntimeError,
