@@ -55,6 +55,11 @@ user-facing promise.
 2. **Local MCP boundary**
    - Provides JSON-RPC/stdio transport, tool input validation, dispatch, result
      sanitization, concise text summaries, and centralized result validation.
+   - Marks all eight mutation tools as open-world because Apple account sync and
+     shared lists can carry their effects beyond the local process. A mutation
+     Receipt that is pending, partial, or otherwise unresolved sets MCP
+     `isError=true` while preserving the full structured Receipt and its safe
+     read-only next action.
    - Constructs one `McpRuntime` per stdio session. Initialization, rate-limit
      history, immutable backend paths, and lazy Facade instances are not
      process-global mutable state.

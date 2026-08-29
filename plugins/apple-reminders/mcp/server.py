@@ -1210,6 +1210,17 @@ def tool_result(payload: dict[str, Any], *, is_error: bool) -> dict[str, Any]:
     }
 
 
+def _mcp_tool_call_is_error(tool_name: str, payload: Mapping[str, Any]) -> bool:
+    """Signal every mutation that still needs resolution as a tool error."""
+
+    if payload.get("ok") is not True:
+        return True
+    return (
+        tool_name in V2_MUTATION_TOOLS
+        and payload.get("status") not in {"verified", "unchanged"}
+    )
+
+
 _V2_CORE_TOOLS = frozenset(
     {
         "request_reminders_access",
@@ -1539,7 +1550,7 @@ def _call_tool(
             message=str(exc),
         )
         payload = validate_public_result(name, payload, mutation_state)
-    return tool_result(payload, is_error=payload.get("ok") is not True)
+    return tool_result(payload, is_error=_mcp_tool_call_is_error(name, payload))
 
 
 def jsonrpc_result(request_id: Any, result: Any) -> dict[str, Any]:

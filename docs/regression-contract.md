@@ -185,6 +185,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
     Lost final-read, identity, or projection evidence preserves `committed` but
     degrades a prior no-write claim to `unknown`. Read-only and Diagnostics
     calls carry no mutation state.
+30. MCP discovery marks all eight mutation tools `openWorldHint=true` because
+    writes can sync through Apple accounts and affect shared lists. A mutation
+    is a successful MCP tool call only when its Receipt is `verified` or
+    `unchanged`; pending, partial, failed, or manual-repair states set
+    `isError=true` without discarding structured evidence or authorizing a
+    blind retry.
 
 ## Deliberately withheld behavior
 

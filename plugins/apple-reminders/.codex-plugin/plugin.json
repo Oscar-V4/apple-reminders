@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "Apple Reminders",
     "shortDescription": "Plan, recover, and safely update Apple Reminders",
-    "longDescription": "Review upcoming work, capture reminders, safely organize or update them, and recover one exact item from Recently Deleted through a local MCP. There is no plugin-owned remote backend; tool results return to Codex. Recovery and advanced fields use version-sensitive macOS interfaces with explicit verification limits.",
+    "longDescription": "Review upcoming work, capture reminders, safely organize or update them, and recover one exact item from Recently Deleted through a local MCP. Writes can sync through Apple accounts and affect shared lists. There is no plugin-owned remote backend; tool results return to Codex. Recovery and advanced fields use version-sensitive macOS interfaces with explicit verification limits.",
     "developerName": "Sungsoo Kim (Oscar-V4)",
     "category": "Productivity",
     "capabilities": [
