@@ -1,8 +1,10 @@
-# Apple Reminders 0.4 public-beta launch kit
+# Apple Reminders 0.4 release and community launch kit
 
-This kit prepares a truthful public launch; it is not evidence that the release
-has happened. Replace every angle-bracket placeholder, delete any unsupported
-claim, and use copy from this file only after the corresponding gate is green.
+The tagged GitHub pre-release is public. This kit records its verified identity
+and separates completed release gates from the remaining demo, Showcase,
+Developer Forum, and SNS actions. Replace the remaining angle-bracket
+placeholders, delete unsupported claims, and use copy from this file only after
+the corresponding gate is green.
 
 The product should be described as a **community-built, open-source, local-first
 Apple Reminders plugin for Codex**. It is distributed through a GitHub repo
@@ -22,56 +24,56 @@ everywhere:
 
 | Placeholder | Final value |
 | --- | --- |
-| `<TAG>` | Target `v0.4.0`; fill only after the reviewed commit is tagged |
-| `<RELEASE_URL>` | Public GitHub Release URL |
-| `<COMMIT_SHA>` | Commit referenced by the tag |
-| `<ZIP_URL>` | Release artifact URL |
-| `<ZIP_SHA256>` | SHA-256 printed by the deterministic package builder |
-| `<CI_URL>` | Passing CI run for `<COMMIT_SHA>` |
-| `<CLEAN_INSTALL_EVIDENCE_URL>` | Redacted exact-tag marketplace-install report |
-| `<LIVE_SMOKE_EVIDENCE_URL>` | Redacted disposable-list live-smoke report |
-| `<BENCHMARK_EVIDENCE_URL>` | Benchmark output with machine/runtime context |
+| `<TAG>` | `v0.4.0` |
+| `<RELEASE_URL>` | `https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.4.0` |
+| `<COMMIT_SHA>` | `f8eb9e25e6eec486cbf99650bc74ec57f1d5de65` |
+| `<ZIP_URL>` | `https://github.com/Oscar-V4/apple-reminders/releases/download/v0.4.0/apple-reminders-0.4.0.zip` |
+| `<ZIP_SHA256>` | `a0f53ae4053053abe75541e68ae35b01f904ff4a013b99b14e686b95fa1355da` |
+| `<CI_URL>` | `https://github.com/Oscar-V4/apple-reminders/actions/runs/33257175249` |
+| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
+| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
+| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
 | `<DEMO_URL>` | Public 60–90 second demo |
 | `<COVER_IMAGE_URL>` | Public Showcase cover image |
-| `<ISSUES_URL>` | Public issue-report URL |
-| `<MODEL_BUILD_NOTES>` | Models/agents actually used, with no invented detail |
+| `<ISSUES_URL>` | `https://github.com/Oscar-V4/apple-reminders/issues/new/choose` |
+| `<MODEL_BUILD_NOTES>` | Codex desktop; WebGPT Agent Pro for an independent public PR review. Do not add a model-specific claim without a linkable record. |
 
 ## Launch gates
 
 ### Before any announcement
 
-- [ ] Merge the reviewed candidate; create `<TAG>` from the intended
+- [x] Merge the reviewed candidate; create `<TAG>` from the intended
   `<COMMIT_SHA>`; keep the tag, manifest, changelog, ZIP filename, and release
   notes on the same version.
-- [ ] Build the allowlisted archive from that tag twice and confirm identical
+- [x] Build the allowlisted archive from that tag twice and confirm identical
   bytes and `<ZIP_SHA256>`. Publish both `<ZIP_URL>` and the checksum.
-- [ ] Confirm `<CI_URL>` is green for the tagged commit and that the documented
+- [x] Confirm `<CI_URL>` is green for the tagged commit and that the documented
   Python/macOS matrix is accurate. Do not copy a test count from an older run.
-- [ ] On an isolated Codex home that does not use the development checkout, run
+- [x] On an isolated Codex home that does not use the development checkout, run
   the README's exact tagged marketplace add/install commands and save a
   redacted report at `<CLEAN_INSTALL_EVIDENCE_URL>`.
-- [ ] Verify MCP initialization, the expected 15-tool Interface, targeted
+- [x] Verify MCP initialization, the expected 15-tool Interface, targeted
   diagnosis, and a first Core read from the installed artifact. Record the
   actual Python selected by the launcher.
-- [ ] Run the opt-in live smoke against one uniquely named synthetic list,
+- [x] Run the opt-in live smoke against one uniquely named synthetic list,
   prove exact cleanup, and publish only content-free status/latency evidence at
   `<LIVE_SMOKE_EVIDENCE_URL>`. Never publish personal reminder data.
-- [ ] Review [README](../../README.md), [privacy](../../PRIVACY.md),
+- [x] Review [README](../../README.md), [privacy](../../PRIVACY.md),
   [security](../../SECURITY.md), [support](../../SUPPORT.md),
   [terms](../../TERMS.md), and [license](../../LICENSE) links from the tag.
-- [ ] Confirm the first README screen clearly states macOS, Python, Xcode
+- [x] Confirm the first README screen clearly states macOS, Python, Xcode
   command-line tool, permission, local-MCP, private-interface, install, and
   support boundaries.
 - [ ] Record and review `<DEMO_URL>` using only synthetic content. Crop or hide
   the Reminders sidebar, notifications, account names, menu-bar data, file
   paths, and any other personal information.
-- [ ] Use one consistent public author name across GitHub, plugin metadata,
+- [x] Use one consistent public author name across GitHub, plugin metadata,
   social profiles, and the Showcase draft. Confirm rights to the logo, cover,
   video, music, and screenshots.
 - [ ] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
   report template for install, permission, Core, Native Extension, and privacy
   reports.
-- [ ] Read the final announcement aloud once. Remove “official,” “approved,”
+- [x] Read the final announcement aloud once. Remove “official,” “approved,”
   “certified,” “partner,” “production-ready,” or any unverified adoption or
   performance claim.
 
@@ -381,23 +383,23 @@ Plugins Directory listing.
 
 ### Release evidence
 
-- [ ] `<RELEASE_URL>` points to `<TAG>` at `<COMMIT_SHA>` and contains release
+- [x] `<RELEASE_URL>` points to `<TAG>` at `<COMMIT_SHA>` and contains release
   notes, requirements, upgrade notes, known limits, `<ZIP_URL>`, and
   `<ZIP_SHA256>`.
-- [ ] `<CI_URL>` shows the supported runtime matrix at the tagged commit.
-- [ ] `<CLEAN_INSTALL_EVIDENCE_URL>` records disposable Codex/Home directories,
+- [x] `<CI_URL>` shows the supported runtime matrix at the tagged commit.
+- [x] `<CLEAN_INSTALL_EVIDENCE_URL>` records disposable Codex/Home directories,
   exact tag/SHA, installed file boundary, initialization, tool discovery,
   selected Python, and first non-mutating Core result.
-- [ ] `<LIVE_SMOKE_EVIDENCE_URL>` records only operation name, status, latency,
+- [x] `<LIVE_SMOKE_EVIDENCE_URL>` records only operation name, status, latency,
   and exact cleanup outcome for a reserved synthetic list.
-- [ ] `<BENCHMARK_EVIDENCE_URL>` states machine, OS, Python, samples, warmups,
+- [x] `<BENCHMARK_EVIDENCE_URL>` states machine, OS, Python, samples, warmups,
   and subprocess wall-time definition; it does not present a cross-machine
   speed score.
-- [ ] The [public schema](../../plugins/apple-reminders/schemas/mcp-tools.json),
+- [x] The [public schema](../../plugins/apple-reminders/schemas/mcp-tools.json),
   [architecture](../architecture.md), [release
   contract](../regression-contract.md), [changelog](../../CHANGELOG.md), and
   user-facing policies are reachable from the release.
-- [ ] Any “built/audited with Codex” claim links to a public build history or
+- [x] Any “built/audited with Codex” claim links to a public build history or
   review artifact. Any external-user claim links to a public issue,
   contribution, or permissioned testimonial.
 
