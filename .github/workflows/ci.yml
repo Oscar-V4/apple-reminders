@@ -34,11 +34,16 @@ jobs:
         env:
           AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           AUDIT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # PR commits are fully checked before merge. On a push, GitHub may
+          # synthesize a commit author from the account's public email setting;
+          # retain the machine-local email guard without rejecting that
+          # platform-generated metadata.
+          AUDIT_PROTECTED_NAME: ${{ github.event_name == 'pull_request' && 'Oscar-V4' || '' }}
         run: >-
           python3 scripts/audit_commit_identity.py
           --base "$AUDIT_BASE_SHA"
           --head "$AUDIT_HEAD_SHA"
-          --protected-name "Oscar-V4"
+          --protected-name "$AUDIT_PROTECTED_NAME"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
