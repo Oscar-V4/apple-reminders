@@ -34,7 +34,7 @@ everywhere:
 | `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
 | `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
 | `<DEMO_URL>` | Public 60–90 second demo |
-| `<COVER_IMAGE_URL>` | Public Showcase cover image |
+| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/main/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
 | `<ISSUES_URL>` | `https://github.com/Oscar-V4/apple-reminders/issues/new/choose` |
 | `<MODEL_BUILD_NOTES>` | Codex desktop; WebGPT Agent Pro for an independent public PR review. Do not add a model-specific claim without a linkable record. |
 
