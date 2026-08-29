@@ -30,14 +30,9 @@ withheld operations.
 - Xcode command-line tools while native helpers are distributed as source.
 - Reminders permission for Core operations.
 
-The local MCP launcher checks the Codex process `PATH` first, then the standard
-Homebrew and python.org installation paths. This keeps a Finder-launched Codex
-from missing an already installed supported Python without sourcing shell
-startup files.
-
-Native Extension support cannot be inferred from the macOS version alone. A
-specific Native operation can be unavailable while Core operations continue to
-work.
+Finder-launched Codex checks `PATH` plus standard Homebrew and python.org
+locations. Native availability is capability-specific; Core can remain usable
+when one Native operation is unavailable.
 
 ## 60-second preflight
 
@@ -48,9 +43,8 @@ python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 xcode-select -p
 ```
 
-If the second command fails, run `xcode-select --install`, finish the macOS
-installer, and restart Codex. The plugin will also route a helper-build failure
-to content-free packaging diagnosis instead of asking for a blind retry.
+If the second command fails, run `xcode-select --install`, finish installation,
+and restart Codex.
 
 ## Quick Start
 
@@ -68,22 +62,14 @@ Start a new Codex task so that it loads the installed skills and tools, then try
 쇼핑 목록에 우유 사기를 추가해줘.
 ```
 
-This release has passed current-Mac live Reminders and iCloud attachment checks,
-but first-use permission behavior on a genuinely fresh macOS permission subject
-remains follow-up validation. Report any unexpected permission prompt or
-reauthorization requirement through the repository issue tracker.
+Current-Mac Reminders and iCloud attachment checks pass. Fresh-profile
+permission behavior remains follow-up validation; report unexpected prompts.
 
 ## First permission
 
-When an operation needs Reminders permission, the plugin reports that need and
-offers the explicit `request_reminders_access` step. macOS may then display a
-permission prompt for the app running Codex. The tool reports that the request
-was attempted, whether a first-decision prompt was expected, and
-`prompt_observed: null`; the process cannot observe the macOS prompt itself.
-The deprecated `prompted_explicitly` compatibility field means only that this
-explicit access tool ran. A denial preserves the same bounded receipt and does
-not loop back into another automatic access request. Normal first use does not
-require Doctor or private-interface setup.
+When requested, run `request_reminders_access` and answer the macOS prompt.
+The tool can report its request but cannot observe the prompt itself; denial
+does not trigger an automatic prompt loop. Normal first use needs no Doctor.
 
 ## Public Interface
 
@@ -97,124 +83,45 @@ smaller than the internal development surface:
 | Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
 | Diagnostics | `diagnose_reminders` |
 
-Core reads and non-URL Reminder writes do not depend on Native Extension
-availability. Core create/change with a non-null URL is the documented hybrid
-exception: EventKit metadata can commit before the guarded native step that
-reconciles the visible URL attachment, so unavailable native support returns a
-partial rather than full success.
-Unused-tag cleanup, raw attachment export, attachment repair, backup/Snapshot
-operations, privacy-log purge, flag mutation, and native `show_reminder`
-handoff are withheld from the public Interface. Their obsolete lower-level CLI
-implementations were physically removed before the 0.4 release; skills and
-public MCP callers must never recreate or route to them.
-
-The repository also contains a reduced OpenMinis export under
-`minis/apple-reminders/`. It is not part of the installable macOS plugin and
-does not contain the private adapters.
-
-## What is preserved from real use
-
-The smaller Interface keeps the behaviors that were added after failures were
-found in actual use:
-
-- bounded EventKit reads and exact list/reminder identity, including duplicate
-  list names across accounts;
-- create idempotency and guarded update, complete, reopen, move, and delete;
-- URL create/change as one hybrid operation: EventKit metadata, the visible
-  native URL attachment, and a final exact EventKit read;
-- native ReminderKit image attachment and section saves with CloudKit evidence;
-- snapshot-bound paged Recently Deleted discovery and exact recovery through
-  one-use `del1` References;
-- byte-verified cross-Reminder image copy without private-path disclosure;
-- snapshot-bound pagination that rejects changed membership or revisions;
-- exact-list section scope and fresh-version tag changes;
-- stale-write rejection and explicit unknown-outcome handling under
-  concurrency;
-- normalized Receipts that distinguish verified, pending, partial, unchanged,
-  and failed outcomes.
-
-This simplification changes the public shape, not those behavioral guarantees.
+Core reads and non-URL writes remain usable if a Native capability is missing.
+URL writes are hybrid and may report partial success. See the
+[capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
+for exact evidence and intentionally withheld operations.
 
 ## References and mutation results
 
-`read_reminder` returns one opaque, short-lived `rev1` Reference. Existing-item
-changes consume that Reference. Callers do not choose a backend or assemble
-EventKit `last_modified`, private `reminder_version`, store identity, and expiry
-fields themselves. A stale or already-consumed Reference returns a no-write
-concurrency result and requires a new exact read.
-
-Mutation Receipts use states such as:
-
-- `unchanged`: no mutation was necessary;
-- `verified`: the final operation passed its stated exact read-back;
-- `committed_verification_pending`: a write may have committed but final
-  verification is not yet available;
-- `partial_success`: only part of a composed operation was verified;
-- `failed_no_mutation`: the operation failed before a known mutation;
-- `failed_manual_repair_required`: a partial mutation could not be compensated
-  automatically.
-
-`verified` is limited to the evidence named in the Receipt. It does not mean
-that an item was visually observed on an iPhone, converged to every device, or
-reached every participant in a shared list.
+`read_reminder` returns one short-lived `rev1` Reference; a change consumes it,
+and stale reuse requires a fresh exact read. Receipts distinguish `unchanged`,
+`verified`, `committed_verification_pending`, `partial_success`,
+`failed_no_mutation`, and `failed_manual_repair_required`. Pending, partial, or
+manual-repair results must not be retried blindly. `verified` covers only the
+named read-back evidence, not convergence to every device or shared-list member.
 
 ## Architecture and trust boundary
 
-| Layer | Role | Boundary |
-|---|---|---|
-| Skills | Bounded reads, ambiguity handling, and reporting policy | Instructions only; they do not grant macOS permission |
-| Local MCP | Closed input schemas, routing, concise text, and validated structured results | Runs with the Codex host user's local process permissions |
-| Core Module | EventKit-backed list/reminder operations and opaque References | Public API behavior is still account-, permission-, and sync-dependent |
-| Native Extension Module | Sections, tags, and native image/URL attachments | Uses version-sensitive private interfaces and exact read-back gates |
-| Recovery Module | Snapshot-bound paged Recently Deleted reads and exact one-item recovery | macOS-only, private-framework, same-account, and 30-day retention boundary |
-| Diagnostics Module | Content-free targeted diagnosis | Does not prove write semantics, iCloud convergence, or device visibility |
-
-The MCP can make changes that sync through the user's Apple account and affect
-shared lists. A process exit code alone is never proof that a mutation reached
-Reminders or another device.
+Skills grant no macOS permission. The local MCP validates inputs and Receipts;
+version-sensitive Native and Recovery paths remain behind exact read-back gates.
 
 ## Diagnosis and troubleshooting
 
-Run normal bounded work first. Use `diagnose_reminders` only after a relevant
-permission, environment, build, schema, or native-capability failure. It
-defaults to a small content-free Core summary and can target the affected area.
-It does not read reminder titles, notes, list/section/tag names, attachment
-contents, journals, caches, or backup contents.
+Use `diagnose_reminders` only after a relevant failure. Its bounded default is
+content-free and can target the affected capability.
 
 Common cases:
 
-- **Unsupported Python runtime:** install Python 3.11 or newer in a standard
-  Homebrew or python.org location, then restart Codex. The launcher also accepts
-  a supported `python3` already present in the Codex process `PATH`; if only an
-  older interpreter is available, the plugin rejects the call before any
-  Reminder write.
+- **Unsupported Python:** install Python 3.11+ via Homebrew or python.org, then
+  restart Codex.
 - **Permission required:** allow the explicit `request_reminders_access` step,
   review the macOS prompt, then retry once.
 - **Reference stale or consumed:** call `read_reminder` again and retry with the
   new Reference. Do not replay the old token.
 - **Verification pending:** read the exact reminder before deciding whether to
   retry. Blind retry can duplicate a change whose first result was unknown.
-- **Native Extension unavailable:** run targeted diagnosis for the failed
-  capability. Continue using Core operations; do not infer that all Reminders
-  access is blocked.
-- **Native helper build failed:** run `diagnose_reminders` with
-  `scope=packaging`. If it reports a missing compiler, run
-  `xcode-select --install`, finish installation, restart Codex, and retry the
-  original operation.
-- **Missing private-framework path:** this is inconclusive on systems where dyld
-  can load a framework from the shared cache. A runtime probe and the operation's
-  read-back decide availability.
+- **Native/build failure:** run targeted diagnosis; for a missing compiler run
+  `xcode-select --install`, finish installation, and restart Codex. Core may
+  remain usable.
 - **Plugin changes are not visible:** start a new Codex task after install,
   upgrade, removal, or re-addition so tool discovery is refreshed.
-
-Repository developers can run the underlying compact Doctor directly for
-source troubleshooting:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 plugins/apple-reminders/scripts/reminders_doctor.py --compact
-```
-
-Add `--detail-level full` only for a specific warning or blocked capability.
 
 ## Upgrade
 
@@ -233,11 +140,10 @@ This changes only the Codex plugin installation; it does not delete Apple
 Reminders data. Start a new Codex task after upgrading. Read
 [CHANGELOG.md](CHANGELOG.md) before crossing a minor or major version.
 
-## Temporarily disable
+## Uninstall
 
-The current Codex plugin CLI has no separate disable command. To stop loading
-the plugin without changing Apple Reminders data, remove it and add it again
-when needed:
+The CLI has no separate disable command. Removing the plugin never deletes
+Reminders data; add it again later to re-enable it:
 
 ```bash
 codex plugin remove apple-reminders@oscar-v4-reminders
@@ -247,140 +153,15 @@ codex plugin add apple-reminders@oscar-v4-reminders
 
 Start a new Codex task after either command. Removal does not delete reminders
 or automatically erase plugin-created local support data.
+For a full uninstall, also run
+`codex plugin marketplace remove oscar-v4-reminders`. Review
+[PRIVACY.md](PRIVACY.md) before separately deleting local support data.
 
-## Uninstall
+## Internals and contribution
 
-```bash
-codex plugin remove apple-reminders@oscar-v4-reminders
-codex plugin marketplace remove oscar-v4-reminders
-```
-
-Review [PRIVACY.md](PRIVACY.md) before separately deleting local support data.
-Removing the plugin itself does not modify Apple Reminders.
-
-## Public and internal surfaces
-
-The public contract is `plugins/apple-reminders/schemas/mcp-tools.json`. Every public input is closed
-and bounded. Result shapes and Receipts are enforced centrally even though MCP
-`outputSchema` is intentionally not duplicated into `tools/list`; compact tool
-discovery remains below the release budget.
-
-`plugins/apple-reminders/scripts/reminders_adapter.py` is a lower-level implementation seam, not a
-second public API. It exposes only the 16 commands reached by the public
-Modules. The old direct write, Maintenance, backup, repair, cache, log-purge,
-flag, and UI-handoff routes were physically removed before 0.4, with no hidden
-command aliases or legacy-command shims. Retained Native commands still contain
-their documented schema-gated SQLite diagnostic branches; those are not a
-second Core-write surface. Public skills must not recreate or fall back to the
-removed routes.
-
-Durable mutation replay lives in `scripts/durable_idempotency.py`, a single
-deep internal Module shared by Core create and the retained Native adapter
-commands. Its v1 hashes, JSON bytes, lock lifetime, write-ahead fence, and
-privacy projection are compatibility rules rather than configurable policy.
-The Core backend is composed with that narrow function and does not load the
-full private adapter merely to obtain idempotency. Complete v1 results are
-re-sanitized under the same lock on the next keyed operation so primitive
-user-authored arrays from an older retry snapshot are neither replayed nor
-retained after a successful atomic scrub.
-
-EventKit response policy lives in `scripts/eventkit_protocol.py`. The native
-bridge, MCP server, and Core backend share its three pure functions for strict
-wire/projected-Receipt validation and bounded outcome-unknown Receipts.
-Server/Core no longer load the executable bridge module in-process merely to
-reuse protocol logic;
-subprocess provenance, request validation, helper compilation, and native
-execution remain at their existing seams.
-
-`scripts/bounded_process.py` drains every local helper's streams under byte
-limits, applies one deadline and strict UTF-8, terminates leftover process-group
-descendants, and reaps the direct leader. Domain callers retain JSON and Receipt
-meaning: only a typed pre-launch failure proves no dispatch; every post-launch
-mutation failure remains conservative.
-
-## Local validation
-
-These checks do not launch Reminders or read live reminder rows:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_plugin.py plugins/apple-reminders
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/validate_minis_export.py
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/audit_source_package.py plugins/apple-reminders \
-  --strict-worktree --verify-root-document-mirrors
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
-```
-
-Native source checks on macOS:
-
-```bash
-clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
-  -framework ImageIO \
-  -fsyntax-only plugins/apple-reminders/scripts/remkit_attach_image.m
-clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
-  -fsyntax-only plugins/apple-reminders/scripts/reminders_eventkit.m
-clang -x objective-c -fobjc-arc -framework Foundation \
-  -fsyntax-only plugins/apple-reminders/scripts/remkit_recover.m
-plutil -lint plugins/apple-reminders/scripts/eventkit_bridge_info.plist
-```
-
-The data-free performance benchmark measures MCP initialization/tool discovery,
-targeted diagnosis, EventKit request validation/helper build, package audit, and
-deterministic build time:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
-  --label local-baseline --samples 15 --warmups 3 \
-  --build-samples 5 --build-warmups 1 --output benchmark.json
-```
-
-Timing is end-to-end subprocess wall time and is not a cross-machine score.
-
-### Opt-in live validation
-
-Maintainers can run one destructive-but-disposable end-to-end smoke test after
-the data-free suite passes. From a repository checkout, first use
-`list_reminder_lists` to choose the exact `source.id` of a writable account. The
-maintainer harness is not included in the runtime ZIP. It creates one uniquely
-named synthetic list, exercises Core and Native Extension flows through the
-installable runtime's stdio MCP server, verifies list/create idempotent replay,
-a five-item bounded fetch, actual stale-revision rejection from parallel exact
-reads, URL and image visibility plus sync evidence, section placement,
-completion/reopen, and exact deletion. It finally deletes that exact list by
-matching both its name and AppleScript identity.
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/live_smoke.py \
-  --confirm-live-reminders \
-  --source-id '<exact-source-id>'
-```
-
-This command changes live Reminders data and must never run in CI. Its output is
-redacted to step, status, and latency. If exact cleanup cannot be proven, it
-prints only the reserved synthetic list name that must be inspected manually;
-do not retry blindly. Reminders may retain the deleted synthetic content in
-**Recently Deleted**; the harness deliberately does not empty that recoverable
-system area.
-
-## Deterministic source package
-
-The allowlisted release ZIP includes runtime files only. It excludes tests,
-contributor docs, workflows, OpenMinis files, screenshots, bytecode, databases,
-journals, caches, backups, and pre-existing archives.
-
-Production resolves only bundled backend paths. Each stdio connection owns a
-fresh `McpRuntime`; initialization, rate limits, and lazy Facades are not
-process-global. Tests inject an explicit `BackendPaths` value through that
-runtime or the source-only harness; environment variables do not override
-production backend paths.
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/build_source_package.py \
-  plugins/apple-reminders \
-  --output-directory dist
-```
-
-The builder normalizes ZIP metadata, audits members, checks version/filename
-agreement, and prints the archive path and SHA-256.
+The closed contract is `plugins/apple-reminders/schemas/mcp-tools.json`.
+See the [architecture guide](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/architecture.md)
+and [contribution checks](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
 
 ## Local files and privacy
 
@@ -389,23 +170,16 @@ Internal or development operations can create support data under:
 - `~/Library/Application Support/apple-reminders-codex/`
 - `~/Library/Caches/apple-reminders-codex/`
 
-These locations may contain sensitive identifiers, operation records, compiled
-helpers, idempotency metadata, or cache/backup artifacts left by an earlier
-development version. The 0.4 runtime no longer creates reminder metadata
-caches or backup archives. Broad backup restore, repair, and log-purge
-operations are not public tools;
-Recently Deleted recovery is exact and user-directed, never automatic. See
-[PRIVACY.md](PRIVACY.md#user-control) before inspecting,
-sharing, or removing support data.
+These folders may contain sensitive identifiers, operation records, helpers,
+or legacy cache/backup artifacts. The 0.4 runtime no longer creates metadata
+caches or backup archives; Recently Deleted recovery is exact and user-directed.
+See [PRIVACY.md](PRIVACY.md#user-control) before inspecting or removing them.
 
 To remove local support data safely, first remove or stop the plugin, start a
 new Codex task, and confirm that no Reminders operation is running. In Finder,
-use **Go → Go to Folder…** to inspect each exact path above, then move only the
-`apple-reminders-codex` folder at those two locations to Trash. Do not remove a
-parent `Application Support` or `Caches` directory. This clears local caches,
-compiled helpers, journals, idempotency metadata, and any legacy cache or backup
-files that still exist; it does not undo Reminders or iCloud changes. Empty
-Trash only after deciding that any old recovery artifacts are no longer needed.
+use **Go → Go to Folder…** for each exact path, then move only its
+`apple-reminders-codex` folder to Trash—never a parent directory. This clears
+local support data but does not undo Reminders or iCloud changes.
 For a full uninstall, also revoke Reminders and Automation access in **System
 Settings → Privacy & Security**, and separately inspect any custom external
 legacy backup directory that you explicitly configured.

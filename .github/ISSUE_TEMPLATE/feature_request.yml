@@ -23,7 +23,7 @@ body:
     id: current-limit
     attributes:
       label: Why the current interface is insufficient
-      description: Explain why the existing 13 tools and five skills cannot express this goal safely.
+      description: Explain why the existing 15 tools and five skills cannot express this goal safely.
     validations:
       required: true
 
@@ -42,8 +42,8 @@ body:
       options:
         - Core
         - Native Extension
+        - Recovery
         - Diagnostics
-        - Optional Maintenance
         - Skill or documentation only
         - Not sure
     validations:
@@ -66,4 +66,3 @@ body:
           required: true
         - label: I searched existing issues for the same user goal.
           required: true
-

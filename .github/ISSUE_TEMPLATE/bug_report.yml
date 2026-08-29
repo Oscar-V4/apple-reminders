@@ -20,6 +20,7 @@ body:
         - Core reads or writes
         - Native sections or tags
         - Native image or URL attachments
+        - Recently Deleted or recovery
         - Diagnostics
         - Skills or documentation
         - Packaging or release artifact

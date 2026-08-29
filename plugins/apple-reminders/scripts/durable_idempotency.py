@@ -26,6 +26,10 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in _sys.path:
     _sys.path.insert(0, str(_SCRIPT_DIR))
 
+from eventkit_protocol import (  # noqa: E402
+    reminder_list_metadata_value_is_safe as _list_metadata_value_is_safe,
+    validate_ensure_list_receipt as _validate_ensure_list_receipt,
+)
 from receipt_contract import (  # noqa: E402
     AdapterError as _AdapterError,
     MutationNotStartedError as _MutationNotStartedError,
@@ -35,7 +39,7 @@ from receipt_contract import (  # noqa: E402
 )
 
 
-__all__ = ["execute_idempotent"]
+__all__ = ["execute_idempotent", "idempotency_key_hash"]
 
 
 _DEFAULT_STORAGE_DIR = (
@@ -70,11 +74,24 @@ def _stable_hash(value: Any) -> str:
     ).hexdigest()
 
 
+def idempotency_key_hash(operation: str, key: str) -> str:
+    return _stable_hash({"operation": operation, "key": key})
+
+
+def _is_stable_hash(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _result_snapshot(
     value: Any,
     *,
     key: str | None = None,
     retain_sequence_scalars: bool = False,
+    retain_list_metadata: bool = False,
 ) -> Any:
     """Keep retry-critical identifiers/status while excluding user content."""
 
@@ -119,15 +136,24 @@ def _result_snapshot(
                 or normalized.endswith("_ids")
                 or normalized.endswith("_pk")
                 or normalized.endswith("_count")
+                or (
+                    retain_list_metadata
+                    and _list_metadata_value_is_safe(normalized, item)
+                )
             )
             if keep:
                 result[str(item_key)] = _result_snapshot(
                     item,
                     key=str(item_key),
                     retain_sequence_scalars=normalized.endswith("_ids"),
+                    retain_list_metadata=retain_list_metadata,
                 )
             elif isinstance(item, (dict, list, tuple)):
-                nested = _result_snapshot(item, key=str(item_key))
+                nested = _result_snapshot(
+                    item,
+                    key=str(item_key),
+                    retain_list_metadata=retain_list_metadata,
+                )
                 preserve_empty_receipt_object = (
                     isinstance(item, dict)
                     and normalized
@@ -140,12 +166,17 @@ def _result_snapshot(
         result: list[Any] = []
         for item in value:
             if isinstance(item, dict):
-                nested = _result_snapshot(item, key=key)
+                nested = _result_snapshot(
+                    item,
+                    key=key,
+                    retain_list_metadata=retain_list_metadata,
+                )
             elif isinstance(item, (list, tuple)):
                 nested = _result_snapshot(
                     item,
                     key=key,
                     retain_sequence_scalars=retain_sequence_scalars,
+                    retain_list_metadata=retain_list_metadata,
                 )
             elif retain_sequence_scalars:
                 nested = item
@@ -199,17 +230,53 @@ def _result_replayable(value: Any) -> bool:
     return value.get("ok") is (status in _SUCCESS_RECEIPT_STATUSES)
 
 
+def _ensure_result_identity_valid(record: dict[str, Any]) -> bool:
+    value = record.get("result")
+    target = value.get("target") if isinstance(value, dict) else None
+    source_id = target.get("source_id") if isinstance(target, dict) else None
+    if not (
+        isinstance(source_id, str)
+        and source_id
+        and _stable_hash(source_id) == record.get("source_hash")
+    ):
+        return False
+    try:
+        _validate_ensure_list_receipt(
+            value,
+            source_id=source_id,
+            name=None,
+            rehydrate=True,
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
 def _record_unresolved(value: Any) -> bool:
     if not isinstance(value, dict):
+        return True
+    if not _is_stable_hash(value.get("input_hash")):
         return True
     state = value.get("state")
     stored_result = value.get("result")
     has_replayable_result = _result_replayable(stored_result)
     if state == "in_progress":
         return True
+    if state == "semantic_alias":
+        return not (
+            value.get("operation") == "eventkit_ensure_reminder_list"
+            and _is_stable_hash(value.get("input_hash"))
+            and has_replayable_result
+        )
     if state == "complete":
-        return not has_replayable_result or stored_result.get("status") in (
-            _NON_EVICTABLE_RESULT_STATUSES
+        return (
+            not has_replayable_result
+            or stored_result.get("status") in _NON_EVICTABLE_RESULT_STATUSES
+            or (
+                value.get("operation") == "eventkit_ensure_reminder_list"
+                and stored_result.get("status") in {"verified", "unchanged"}
+                and not _ensure_result_identity_valid(value)
+            )
         )
     if "state" not in value:
         # Legacy state-less v1 records are complete only when their final
@@ -236,7 +303,12 @@ def _sanitize_completed_results(
         record = dict(value)
         stored_result = record.get("result")
         if _result_replayable(stored_result):
-            safe_result = _result_snapshot(stored_result)
+            safe_result = _result_snapshot(
+                stored_result,
+                retain_list_metadata=(
+                    record.get("operation") == "eventkit_ensure_reminder_list"
+                ),
+            )
             if not _result_replayable(safe_result):
                 record.pop("result", None)
                 changed = True
@@ -259,6 +331,25 @@ def _privacy_scrub_warning(exc: OSError) -> dict[str, Any]:
         ),
         "detail": type(exc).__name__,
     }
+
+
+def _persist_scrub(
+    required: bool,
+    entries: dict[str, Any],
+    storage_dir: Path,
+    store_path: Path,
+) -> dict[str, Any] | None:
+    if not required:
+        return None
+    try:
+        _write_store(
+            {"version": 1, "entries": entries},
+            storage_dir=storage_dir,
+            store_path=store_path,
+        )
+    except OSError as exc:
+        return _privacy_scrub_warning(exc)
+    return None
 
 
 def _entry_created_at_epoch(value: Any) -> float:
@@ -336,6 +427,18 @@ def _prune_entries(
     return dict([*unresolved, *replayable[:remaining_slots]])
 
 
+def _make_room(entries: dict[str, Any]) -> None:
+    while len(entries) >= _MAX_ENTRIES:
+        replayable = [key for key, value in entries.items() if not _record_unresolved(value)]
+        if not replayable:
+            raise _MutationNotStartedError(
+                "The durable idempotency fence capacity is occupied by unresolved operations.",
+                code="unexpected_error",
+                reason_code="idempotency_capacity_exhausted",
+            )
+        entries.pop(min(replayable, key=lambda key: _entry_created_at_epoch(entries[key])))
+
+
 def _write_store(
     payload: dict[str, Any],
     *,
@@ -381,6 +484,7 @@ def _outcome_unknown_receipt(
 ) -> dict[str, Any]:
     receipt_operation = {
         "eventkit_create_reminder": "create_reminder",
+        "eventkit_ensure_reminder_list": "ensure_reminder_list",
         "copy_image_attachment": "copy_image",
     }.get(operation, operation)
     message = (
@@ -431,13 +535,20 @@ def execute_idempotent(
 
     if not key:
         return callback()
-
+    key_hash = idempotency_key_hash(operation, key)
     support = storage_dir if storage_dir is not None else _DEFAULT_STORAGE_DIR
     store_path = support / _STORE_NAME
     lock_path = support / _LOCK_NAME
     _ensure_private_dir(support)
-    key_hash = _stable_hash({"operation": operation, "key": key})
     input_hash = _stable_hash(input_payload)
+    source_id = input_payload.get("source_id")
+    identity_metadata = (
+        {"source_hash": _stable_hash(source_id)}
+        if operation == "eventkit_ensure_reminder_list"
+        and isinstance(source_id, str)
+        and source_id
+        else {}
+    )
     with lock_path.open("a+", encoding="utf-8") as lock:
         lock_path.chmod(0o600)
         _fcntl.flock(lock.fileno(), _fcntl.LOCK_EX)
@@ -449,27 +560,56 @@ def execute_idempotent(
             sanitized_entries,
             protected_keys=frozenset({key_hash}),
         )
-        if key_hash in entries:
-            record = entries[key_hash]
-            privacy_warning: dict[str, Any] | None = None
-            if privacy_scrub_required:
-                try:
-                    _write_store(
-                        {"version": 1, "entries": entries},
-                        storage_dir=support,
-                        store_path=store_path,
+        same_key = key_hash in entries
+        record = entries[key_hash] if same_key else None
+        if not same_key and operation == "eventkit_ensure_reminder_list":
+            record = next(
+                (
+                    item
+                    for item in entries.values()
+                    if isinstance(item, dict)
+                    and item.get("operation") == operation
+                    and _record_unresolved(item)
+                    and (
+                        item.get("input_hash") == input_hash
+                        or not _is_stable_hash(item.get("input_hash"))
                     )
-                except OSError as exc:
-                    privacy_warning = _privacy_scrub_warning(exc)
-            if record.get("input_hash") != input_hash:
+                ),
+                None,
+            )
+        if record is not None:
+            privacy_warning = (
+                _persist_scrub(privacy_scrub_required, entries, support, store_path)
+                if same_key
+                else None
+            )
+            stored_input_hash = record.get("input_hash")
+            if (
+                same_key
+                and (
+                    (
+                        not _is_stable_hash(stored_input_hash)
+                        and operation != "eventkit_ensure_reminder_list"
+                    )
+                    or (
+                        _is_stable_hash(stored_input_hash)
+                        and stored_input_hash != input_hash
+                    )
+                )
+            ):
                 raise _MutationNotStartedError(
                     "Idempotency key was already used with different input",
                     code="concurrent_modification",
+                    reason_code="idempotency_key_conflict",
                     operation=operation,
                 )
             stored_result = record.get("result")
             if (
-                (record.get("state") == "complete" or "state" not in record)
+                stored_input_hash == input_hash
+                and (
+                    record.get("state") in {"complete", "semantic_alias"}
+                    or "state" not in record
+                )
                 and _result_replayable(stored_result)
             ):
                 replay = dict(stored_result)
@@ -478,6 +618,43 @@ def execute_idempotent(
                 if not isinstance(operation_id, str) or not operation_id:
                     operation_id = _new_operation_id()
                 replay = _outcome_unknown_receipt(operation, operation_id)
+            if not same_key:
+                _make_room(entries)
+                alias_operation_id = replay.get("operation_id")
+                if not isinstance(alias_operation_id, str) or not alias_operation_id:
+                    alias_operation_id = _new_operation_id()
+                entries[key_hash] = {
+                    "operation": operation,
+                    "input_hash": input_hash,
+                    "created_at_epoch": _time.time(),
+                    "state": "semantic_alias",
+                    "operation_id": alias_operation_id,
+                    "result": _result_snapshot(
+                        replay,
+                        retain_list_metadata=(
+                            operation == "eventkit_ensure_reminder_list"
+                        ),
+                    ),
+                    **identity_metadata,
+                }
+                try:
+                    _write_store(
+                        {
+                            "version": 1,
+                            "entries": _prune_entries(
+                                entries,
+                                protected_keys=frozenset({key_hash}),
+                            ),
+                        },
+                        storage_dir=support,
+                        store_path=store_path,
+                    )
+                except OSError as exc:
+                    raise _MutationNotStartedError(
+                        "The semantic replay key could not be persisted.",
+                        code="unexpected_error",
+                        reason_code="idempotency_alias_write_failed",
+                    ) from exc
             if privacy_warning is not None:
                 warnings = replay.get("warnings")
                 if not isinstance(warnings, list):
@@ -488,23 +665,7 @@ def execute_idempotent(
             replay["idempotency_key_hash"] = key_hash
             return replay
 
-        while len(entries) >= _MAX_ENTRIES:
-            replayable_keys = [
-                entry_key
-                for entry_key, entry in entries.items()
-                if not _record_unresolved(entry)
-            ]
-            if not replayable_keys:
-                raise _MutationNotStartedError(
-                    "The durable idempotency fence capacity is occupied by unresolved operations.",
-                    code="unexpected_error",
-                    reason_code="idempotency_capacity_exhausted",
-                )
-            oldest_key = min(
-                replayable_keys,
-                key=lambda item: _entry_created_at_epoch(entries[item]),
-            )
-            entries.pop(oldest_key)
+        _make_room(entries)
 
         created_at_epoch = _time.time()
         fence_operation_id = _new_operation_id()
@@ -514,6 +675,7 @@ def execute_idempotent(
             "created_at_epoch": created_at_epoch,
             "state": "in_progress",
             "operation_id": fence_operation_id,
+            **identity_metadata,
         }
         try:
             _write_store(
@@ -556,13 +718,18 @@ def execute_idempotent(
                 ) from cleanup_exc
             raise
 
+        result.pop("replayed", None)
         entries[key_hash] = {
             "operation": operation,
             "input_hash": input_hash,
             "created_at_epoch": created_at_epoch,
             "state": "complete",
             "operation_id": fence_operation_id,
-            "result": _result_snapshot(result),
+            "result": _result_snapshot(
+                result,
+                retain_list_metadata=(operation == "eventkit_ensure_reminder_list"),
+            ),
+            **identity_metadata,
         }
         try:
             _write_store(
@@ -587,5 +754,6 @@ def execute_idempotent(
                     "detail": type(exc).__name__,
                 }
             )
+        result["replayed"] = False
         result["idempotency_key_hash"] = key_hash
         return result

@@ -107,6 +107,16 @@ class PluginValidationTests(unittest.TestCase):
             ["Interactive", "Read", "Write"],
         )
 
+    def test_issue_templates_match_the_current_public_product_boundaries(self) -> None:
+        templates = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
+        feature = (templates / "feature_request.yml").read_text(encoding="utf-8")
+        bug = (templates / "bug_report.yml").read_text(encoding="utf-8")
+
+        self.assertIn("existing 15 tools and five skills", feature)
+        self.assertIn("        - Recovery", feature)
+        self.assertNotIn("Optional Maintenance", feature)
+        self.assertIn("Recently Deleted or recovery", bug)
+
     def test_substantive_mcp_requires_manifest_declaration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

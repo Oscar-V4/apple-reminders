@@ -27,9 +27,11 @@ from receipt_contract import (
     validated_receipt_mutation_state,
 )
 from eventkit_protocol import (
+    validate_ensure_list_receipt,
     validate_mutation_receipt as validate_eventkit_mutation_receipt,
     validate_response as validate_eventkit_response,
 )
+from durable_idempotency import idempotency_key_hash
 
 if __package__:  # Package import in tests; script-local import in the stdio server.
     from .v2_core import EventKitReply, MutationState
@@ -83,6 +85,10 @@ class CoreBackend:
         "move_reminder": "move_reminder_to_list",
         "delete_reminder": "delete_reminder",
     }
+    _DURABLE_OPERATION_NAMES = {
+        "create_reminder": "eventkit_create_reminder",
+        "ensure_reminder_list": "eventkit_ensure_reminder_list",
+    }
 
     def __init__(
         self,
@@ -116,6 +122,14 @@ class CoreBackend:
                 operation,
                 supplied,
             )
+            durable_operation = self._DURABLE_OPERATION_NAMES.get(tool_name)
+            key = supplied.get("idempotency_key")
+            if durable_operation is not None and isinstance(key, str) and key:
+                payload["idempotency_key_hash"] = idempotency_key_hash(
+                    durable_operation,
+                    key,
+                )
+                payload.setdefault("replayed", False)
         else:
             transport = self._bridge_call(operation, supplied)
             payload = transport.payload
@@ -700,6 +714,41 @@ class CoreBackend:
         )
         return payload
 
+    @staticmethod
+    def _validate_ensure_list_identity(
+        payload: dict[str, Any],
+        arguments: dict[str, Any],
+        *,
+        rehydrate: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            return validate_ensure_list_receipt(
+                payload,
+                source_id=arguments.get("source_id"),
+                name=arguments.get("name"),
+                rehydrate=rehydrate,
+            )
+        except RuntimeError as exc:
+            raise _EventKitReceiptFailure(str(exc)) from exc
+
+    @staticmethod
+    def _merge_warning(payload: dict[str, Any], *, code: str, message: str) -> None:
+        raw = payload.get("warnings")
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw if isinstance(raw, list) else []:
+            item_code = item.get("code") if isinstance(item, Mapping) else None
+            if isinstance(item_code, str) and item_code not in seen:
+                items.append(dict(item))
+                seen.add(item_code)
+        if code not in seen:
+            items.append({"code": code, "message": message[:2000]})
+        priority = {code, "idempotency_privacy_scrub_failed"}
+        payload["warnings"] = sorted(
+            items,
+            key=lambda item: item.get("code") not in priority,
+        )[:20]
+
     def _invoke_mutation(
         self,
         tool_name: str,
@@ -716,9 +765,7 @@ class CoreBackend:
             payload = transport.payload
             is_error = transport.is_error
             if is_error:
-                transport_not_started = (
-                    transport.proves_not_started and payload.get("ok") is False
-                )
+                transport_not_started = transport.proves_not_started
                 contract_proved_no_write = (
                     payload.get("status") == "failed_no_mutation"
                     and payload.get("ok") is False
@@ -734,28 +781,37 @@ class CoreBackend:
                     else:
                         error_state = "not_mutated"
                 proven_no_write = (
-                    tool_name == "create_reminder"
+                    tool_name in self._DURABLE_OPERATION_NAMES
                     and (transport_not_started or contract_proved_no_write)
                 )
                 if proven_no_write and error_state != "not_mutated":
                     proven_no_write = False
                 if proven_no_write:
                     error = payload.get("error")
-                    if not isinstance(error, dict):
+                    if not transport_not_started and not isinstance(error, dict):
                         proven_no_write = False
                 if proven_no_write:
                     public_payload = copy.deepcopy(payload)
                     if transport_not_started:
-                        public_payload.setdefault("schema_version", 1)
-                        public_payload["operation"] = operation
-                        public_payload["status"] = "failed_no_mutation"
-                        public_payload["ok"] = False
-                    # The trusted EventKit boundary proved that no mutation
-                    # occurred.  Translate that proof into the adapter's
-                    # callback exception contract so execute_idempotent can
-                    # remove its write-ahead fence and permit an exact retry.
-                    # Preserve the bounded bridge payload after fence cleanup;
-                    # launcher provenance is stripped before public MCP output.
+                        error = payload.get("error")
+                        if (
+                            not isinstance(error, dict)
+                            or not isinstance(error.get("code"), str)
+                            or not isinstance(error.get("message"), str)
+                        ):
+                            error = {
+                                "code": "unexpected_error",
+                                "reason_code": "invalid_prelaunch_failure_payload",
+                                "message": "The EventKit bridge did not start.",
+                                "retryable": True,
+                            }
+                        public_payload = {
+                            "schema_version": 1,
+                            "operation": operation,
+                            "status": "failed_no_mutation",
+                            "ok": False,
+                            "error": copy.deepcopy(error),
+                        }
                     raise MutationNotStartedError(
                         str(error["message"]),
                         code=str(error["code"]),
@@ -768,6 +824,8 @@ class CoreBackend:
                 validate_eventkit_response(payload, operation)
             except RuntimeError as exc:
                 raise _EventKitReceiptFailure(str(exc)) from exc
+            if tool_name == "ensure_reminder_list":
+                payload = self._validate_ensure_list_identity(payload, bridge_arguments)
             raw_state = validated_receipt_mutation_state(payload)
             visible_url = (
                 bridge_arguments.get("url")
@@ -790,32 +848,39 @@ class CoreBackend:
             )
             return payload
 
+        payload: dict[str, Any] = {}
         try:
-            if tool_name == "create_reminder":
+            durable_operation = self._DURABLE_OPERATION_NAMES.get(tool_name)
+            if durable_operation is not None:
                 request = {
                     "schema_version": 1,
                     "operation": operation,
                     **bridge_arguments,
                 }
                 payload = self._idempotency_call(
-                    operation="eventkit_create_reminder",
+                    operation=durable_operation,
                     key=idempotency_key,
                     input_payload=request,
                     callback=execute_once,
                 )
+                if tool_name == "ensure_reminder_list":
+                    payload = self._validate_ensure_list_identity(
+                        payload,
+                        bridge_arguments,
+                        rehydrate=payload.get("replayed") is True,
+                    )
                 if (
-                    payload.get("replayed") is True
+                    tool_name == "create_reminder"
+                    and payload.get("replayed") is True
                     and payload.get("status") == "committed_verification_pending"
                 ):
-                    payload["warnings"] = [
-                        {
-                            "code": "sync_pending",
-                            "message": (
-                                "This replayed creation receipt is still awaiting "
-                                "verification."
-                            ),
-                        }
-                    ]
+                    self._merge_warning(
+                        payload,
+                        code="verification_pending",
+                        message=(
+                            "This replayed creation receipt is still awaiting verification."
+                        ),
+                    )
                     pending_error = payload.get("error")
                     if not isinstance(pending_error, dict):
                         pending_error = {}
@@ -829,14 +894,16 @@ class CoreBackend:
         except _EventKitBridgeFailure as exc:
             return exc.payload, True, exc.mutation_state
         except _EventKitReceiptFailure as exc:
-            return (
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "invalid_eventkit_receipt",
-                        "message": str(exc),
-                    },
+            failure = {
+                "ok": False,
+                "replayed": payload.get("replayed") is True,
+                "error": {
+                    "code": "invalid_eventkit_receipt",
+                    "message": str(exc),
                 },
+            }
+            return (
+                failure,
                 True,
                 "unknown",
             )
@@ -849,20 +916,33 @@ class CoreBackend:
             eventkit_payload = getattr(exc, "public_payload", None)
             if isinstance(eventkit_payload, dict):
                 return copy.deepcopy(eventkit_payload), True, error_state
+            error = {
+                "code": exc.code,
+                "message": str(exc),
+                "details": exc.details,
+            }
+            reason_code = exc.details.get("reason_code")
+            if isinstance(reason_code, str) and reason_code:
+                error["reason_code"] = reason_code
+            failure = {
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": operation,
+                "error": error,
+            }
             return (
-                {
-                    "ok": False,
-                    "status": "failed_no_mutation",
-                    "operation": operation,
-                    "error": {
-                        "code": exc.code,
-                        "message": str(exc),
-                        "details": exc.details,
-                    },
-                },
+                failure,
                 True,
                 error_state,
             )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unexpected_error",
+                    "message": "The durable EventKit operation failed unexpectedly.",
+                },
+            }, True, "unknown"
         if executed_state is None:
             try:
                 validate_eventkit_mutation_receipt(payload, operation)

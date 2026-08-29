@@ -168,10 +168,11 @@ even though optional MCP `outputSchema` descriptors are omitted from
     typed `MutationNotStartedError` that the existing receipt boundary proves
     happened before mutation atomically clears its fence; arbitrary error
     detail flags cannot do so, while partial or outcome-unknown
-    errors keep the fence and block redispatch. Core create translates only a
-    contract-validated EventKit `failed_no_mutation` result or a parent-owned
-    `TransportResult.proves_not_started` fact into that cleanup contract. Missing paths and
-    request-size rejection are parent-proven; a generic process `OSError`,
+    errors keep the fence and block redispatch. Core create and exact list
+    ensure translate only a contract-validated EventKit `failed_no_mutation`
+    result or a parent-owned `TransportResult.proves_not_started` fact into
+    that cleanup contract. Missing paths and request-size rejection are
+    parent-proven; a generic process `OSError`,
     timeout, oversized output, malformed output, or child-supplied provenance
     cannot authorize fence removal.
     `recover_deleted_reminder`, `attach_image`, `copy_image_attachment`, and
@@ -187,6 +188,18 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `copy_image_attachment` remains the CLI and v1 durable-operation namespace,
     while its adapter Receipt operation is `copy_image` and its public action is
     `change_reminder_attachment.copy_image`.
+    `ensure_reminder_list` uses one durable lock across the exact source/name
+    read and possible create. Same-key calls across runtime graphs dispatch
+    once; a fresh key performs a current exact read after acquiring that lock.
+    A different key reuses no completed result, but an unresolved same-input
+    fence blocks redispatch and persists a content-free input binding. The raw
+    key and list name are not persisted. These non-mutating aliases remain
+    evictable. A same-key successful
+    replay reconstructs display fields only from the current hash-matched
+    request plus the stored exact list ID; missing identity or any uncertain
+    outcome stays fenced without redispatch. EventKit protocol owns the shared
+    List/Source vocabulary and identity predicate used by live validation,
+    durable retention, and public projection.
 28. Each stdio connection owns a fresh `McpRuntime`. Initialization, rate-limit
     history, injected backend paths, and lazy Core/Native/Recovery/Diagnostics
     Facades cannot leak between runtime instances. Tool discovery remains lazy,

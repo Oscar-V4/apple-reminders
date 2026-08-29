@@ -259,6 +259,11 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     after={
                         "reminder_id": "R-1",
                         "source_attachment_ids": ["A-1", "A-2"],
+                        "type": "Private user text",
+                        "allows_content_modifications": "Private user text",
+                        "subscribed": "Private user text",
+                        "immutable": "Private user text",
+                        "is_delegate": "Private user text",
                         "recurrence_rules": [
                             {
                                 "frequency": "monthly",
@@ -1198,6 +1203,10 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     raised.exception.details["reason_code"],
                     "idempotency_capacity_exhausted",
                 )
+                self.assertEqual(
+                    len(read_store(storage_dir)["entries"]),
+                    MAX_ENTRIES,
+                )
                 self.assertTrue(replay["replayed"])
                 self.assertEqual(
                     replay["status"],
@@ -1270,10 +1279,132 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                     raised.exception.details["reason_code"],
                     "idempotency_capacity_exhausted",
                 )
-                self.assertEqual(
-                    len(read_store(storage_dir)["entries"]),
-                    MAX_ENTRIES,
+
+    def test_unresolved_ensure_aliases_do_not_exhaust_fence_capacity(self) -> None:
+        operation = "eventkit_ensure_reminder_list"
+        input_payload = {"source_id": "SOURCE-1", "name": "Work"}
+        pending = build_operation_receipt(
+            status="committed_verification_pending",
+            operation="ensure_reminder_list",
+            operation_id=FIXED_RECEIPT_OPERATION_ID,
+            backend="eventkit_public_sdk",
+            target={"source_id": "SOURCE-1"},
+            verification={
+                "state": "pending",
+                "write_performed": None,
+                "final_read": False,
+            },
+            recovery={
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+        )
+        callback = mock.Mock(return_value=pending)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_dir = Path(temp_dir) / "support"
+            first = durable_idempotency.execute_idempotent(
+                operation=operation,
+                key="original",
+                input_payload=input_payload,
+                callback=callback,
+                storage_dir=storage_dir,
+            )
+            for index in range(MAX_ENTRIES + 5):
+                replay = durable_idempotency.execute_idempotent(
+                    operation=operation,
+                    key=f"alias-{index}",
+                    input_payload=input_payload,
+                    callback=callback,
+                    storage_dir=storage_dir,
                 )
+            entries = read_store(storage_dir)["entries"]
+
+        callback.assert_called_once_with()
+        self.assertEqual(first["status"], "committed_verification_pending")
+        self.assertEqual(replay["status"], "committed_verification_pending")
+        self.assertEqual(len(entries), MAX_ENTRIES)
+        original_hash = stable_hash({"operation": operation, "key": "original"})
+        self.assertIn(original_hash, entries)
+        self.assertEqual(entries[original_hash]["state"], "complete")
+        self.assertTrue(
+            any(item.get("state") == "semantic_alias" for item in entries.values())
+        )
+
+    def test_age_pruning_never_turns_unresolved_receipts_into_redispatch(self) -> None:
+        operation = "eventkit_create_reminder"
+        old_key = "old-unresolved-request"
+        old_input = {"title": "Potentially committed"}
+        old_key_hash = stable_hash({"operation": operation, "key": old_key})
+        old_input_hash = stable_hash(old_input)
+        old_time = 100.0
+        future = old_time + (RETENTION_DAYS + 1) * 86400
+
+        for status in (
+            "committed_verification_pending",
+            "partial_success",
+            "failed_manual_repair_required",
+        ):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                receipt = build_operation_receipt(
+                    status=status,
+                    operation="create_reminder",
+                    operation_id=FIXED_RECEIPT_OPERATION_ID,
+                    backend="synthetic",
+                    target={"id": "R-OLD"},
+                    verification={
+                        "state": "pending",
+                        "write_performed": None,
+                        "final_read": False,
+                    },
+                    recovery={
+                        "semantics": "read_before_retry",
+                        "automatic_retry_safe": False,
+                    },
+                )
+                seed_store(
+                    storage_dir,
+                    {
+                        "version": 1,
+                        "entries": {
+                            old_key_hash: {
+                                "operation": operation,
+                                "input_hash": old_input_hash,
+                                "created_at_epoch": old_time,
+                                "state": "complete",
+                                "operation_id": FIXED_RECEIPT_OPERATION_ID,
+                                "result": receipt,
+                            }
+                        },
+                    },
+                )
+                old_callback = mock.Mock(return_value=verified_receipt())
+
+                with mock.patch.object(
+                    durable_idempotency._time,
+                    "time",
+                    return_value=future,
+                ):
+                    durable_idempotency.execute_idempotent(
+                        operation=operation,
+                        key="new-request",
+                        input_payload={"title": "New"},
+                        callback=verified_receipt,
+                        storage_dir=storage_dir,
+                    )
+                    replay = durable_idempotency.execute_idempotent(
+                        operation=operation,
+                        key=old_key,
+                        input_payload=old_input,
+                        callback=old_callback,
+                        storage_dir=storage_dir,
+                    )
+
+                old_callback.assert_not_called()
+                self.assertEqual(replay["status"], status)
+                self.assertEqual(replay["operation_id"], FIXED_RECEIPT_OPERATION_ID)
+                self.assertIn(old_key_hash, read_store(storage_dir)["entries"])
 
     def test_age_pruning_never_turns_unresolved_receipts_into_redispatch(self) -> None:
         operation = "eventkit_create_reminder"

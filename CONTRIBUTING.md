@@ -42,6 +42,39 @@ CI must use synthetic fixtures and static validation. Do not add a CI step that
 opens a user's Reminders database, launches Reminders, prompts for permission,
 loads a private framework, or performs a write.
 
+## Performance and opt-in live validation
+
+The data-free benchmark measures MCP discovery, diagnosis, EventKit helper
+validation/build, source audit, and deterministic packaging. Timings are local
+end-to-end subprocess wall time, not cross-machine scores:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_plugin.py \
+  --label local-baseline --samples 15 --warmups 3 \
+  --build-samples 5 --build-warmups 1 --output benchmark.json
+```
+
+Only after every data-free check passes, a maintainer may run the disposable
+live harness. First read `list_reminder_lists` and copy the exact writable
+`source.id`, then run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/live_smoke.py \
+  --confirm-live-reminders --source-id '<exact-source-id>'
+```
+
+For source-only Doctor output, run
+`PYTHONDONTWRITEBYTECODE=1 python3 plugins/apple-reminders/scripts/reminders_doctor.py --compact`;
+add `--detail-level full` only for one specific warning or blocked capability.
+
+This command writes to the maintainer's real Reminders store and must never run
+in CI. It creates a uniquely named synthetic list, exercises public Core and
+Native flows through the installable stdio server, and deletes that exact list
+at the end. Output is limited to step, status, and latency. If cleanup cannot be
+proved, do not retry blindly: inspect only the printed reserved list name.
+Deleted synthetic content may remain in **Recently Deleted**; the harness must
+not empty that recoverable system area.
+
 Mock backend substitution is source-test-only. Construct
 `mcp.server.BackendPaths(adapter=..., eventkit_bridge=..., doctor=...)` and pass
 it to `mcp.server.main(backend_paths=...)` through the source-only test harness.

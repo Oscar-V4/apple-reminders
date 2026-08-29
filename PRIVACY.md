@@ -66,12 +66,13 @@ files produced by earlier versions should not be assumed to have the same
 format.
 
 The idempotency store is designed to retain only hashed request identity,
-operation identifiers/status, counts, and bounded verification proof. It does
-not retain raw titles, notes, URLs, recurrence values, or raw user-authored
-primitive arrays.
-Redispatch-safe records age out after 30 days. Unresolved fences do not age out
-because deleting one could authorize a duplicate write; they remain private
-local metadata until the outcome is resolved or the store is removed.
+operation identifiers/status, exact target identifiers, counts, capability
+flags/types, warning codes, and bounded verification proof. It does not retain
+raw titles, notes, URLs, recurrence values, warning prose, or raw user-authored
+primitive arrays. Redispatch-safe records age out after 30 days. Unresolved
+fences do not age out because deleting one could authorize a duplicate write;
+they remain private local metadata until the outcome is resolved or the store
+is removed.
 The next keyed operation re-sanitizes complete modern and legacy v1 results
 under the process lock and atomically rewrites them when needed. If that scrub
 cannot be persisted, an existing-key replay remains redacted in memory, carries
