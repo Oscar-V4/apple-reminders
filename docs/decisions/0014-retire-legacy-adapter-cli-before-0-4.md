@@ -1,5 +1,22 @@
 # Retire the legacy adapter CLI before the 0.4 release
 
+## Status
+
+Accepted. Implemented by the deletion-focused follow-up stacked on the 0.4
+workflow-hardening head.
+
+The resulting deterministic archive is about 1.16 MiB, so the package hard
+ceiling returns from the temporary 1.28 MiB allowance to 1.20 MiB. The recovered
+space is retained as a growth guard rather than immediately spent on another
+abstraction; exact bytes and SHA-256 remain build artifacts rather than an ADR
+invariant.
+
+Implementation removed all 20 obsolete parser routes, 64 command-owned
+top-level functions, the 245-line recovery-backup module, and their dedicated
+tests. Every retained adapter function and class remains structurally identical
+to the stabilized hardening head; only `build_parser` changed among surviving
+functions.
+
 ADR 0009 retained direct adapter writes only through the 0.2 series and called
 for a separate removal review at 0.3. The repository is now 0.4.0, the public
 MCP surface is closed at 15 tools, and `tests/test_legacy_cli_deprecation.py`
@@ -33,7 +50,7 @@ read_deleted_reminder
 recover_deleted_reminder
 ```
 
-Remove these obsolete commands before publishing 0.4:
+Remove these 20 obsolete commands before publishing 0.4:
 
 ```text
 doctor
@@ -63,28 +80,28 @@ a second write interface beside EventKit Core. Maintenance, backup, repair,
 log-purge, cache, and UI-handoff routes also enlarge the mutation, privacy, and
 support surface without serving a public Module.
 
-## Delivery boundary
+## Delivery boundary and implementation
 
-This deletion is a v0.4 release blocker, but it is not part of the current
-hardening patch. Removing roughly 2,850 function-body lines while changing MCP
-runtime ownership and dispatch evidence would make regressions hard to localize
-and the review boundary too broad. Deliver it as a deletion-focused follow-up
-PR based on the stabilized hardening head.
+This deletion was a v0.4 release blocker, but it was kept out of the workflow
+hardening patch. Removing thousands of command-owned lines while changing MCP
+runtime ownership and dispatch evidence would have made regressions hard to
+localize and the review boundary too broad. It was therefore delivered as a
+deletion-focused follow-up based on the stabilized hardening head.
 
-That PR must:
+The follow-up:
 
-- invert `tests/test_legacy_cli_deprecation.py` so the parser command set equals
+- inverts `tests/test_legacy_cli_deprecation.py` so the parser command set equals
   the 16-command allowlist and removed commands are rejected;
-- remove command-owned functions by symbol rather than deleting broad source
+- removes command-owned functions by symbol rather than deleting broad source
   ranges that contain shared receipt, database, attachment, or idempotency
   helpers;
-- remove the now-unreferenced `scripts/reminders_recovery.py` and its legacy
+- removes the now-unreferenced `scripts/reminders_recovery.py` and its legacy
   backup/repair policy tests;
-- shrink runtime and diagnostic command-schema contracts accordingly;
-- update the package allowlist and public/internal-surface documentation;
-- preserve the on-disk idempotency format and all public 15-tool results;
-- pass the complete suite, deterministic package audit, and live public MCP
-  smoke before 0.4 may be tagged.
+- shrinks runtime and diagnostic command-schema contracts accordingly;
+- updates the package allowlist and public/internal-surface documentation;
+- preserves the on-disk idempotency format and all public 15-tool results;
+- passes the complete suite, deterministic package audit, and live public MCP
+  smoke. Tagging remains a separate publication decision.
 
 ## Rejected alternatives
 

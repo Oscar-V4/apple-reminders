@@ -16,19 +16,19 @@ read returns one opaque `rev1` Reference; callers do not obtain private versions
 from an attachment command or submit `if_version` directly. The Module unwraps
 and revalidates the Reference immediately before the selected backend mutation.
 
-The direct `plugins/apple-reminders/scripts/reminders_adapter.py` CLI is a deprecated/internal seam for
-tests, migration compatibility, and carefully reviewed diagnostic research. Its
-Maintenance, broad backup restore, repair, log-purge, flag, and UI-handoff
-commands are not public capabilities and public skills must not fall back to
-them. Exact Recently Deleted recovery is exposed only through its guarded
-`del1` Recovery Module.
+The direct `plugins/apple-reminders/scripts/reminders_adapter.py` CLI is an
+internal implementation seam containing only the 16 commands reached by the
+public Modules. The former direct Core writes, Maintenance, backup, repair,
+cache, log-purge, and UI-handoff commands were physically removed before 0.4;
+there are no hidden aliases or compatibility routes. Exact Recently Deleted
+recovery is exposed only through its guarded `del1` Recovery Module.
 
 ## Public API findings
 
-AppleScript can inspect and change common Reminders fields, but it is app-state
-dependent and remains a narrow internal compatibility path. It is not the
-normal delete backend, and the native `show_reminder` handoff is withheld until
-exact UI selection can be observed.
+Historical experiments showed that AppleScript can inspect and change common
+Reminders fields, but it is app-state dependent. The packaged 0.4 runtime has
+no AppleScript mutation or native `show_reminder` path; normal Core writes and
+deletion use EventKit.
 
 EventKit is the default public-field path. Native fetch predicates are bounded
 by exact list IDs or the matching incomplete-due/completed-completion range;
@@ -112,9 +112,10 @@ These names are version-sensitive observations, not stable Apple API.
   byte identity plus decoded destination-type verification rather than
   requiring stale source and normalized destination UTI strings to match.
 
-The historical DB image backend and local-only attachment repair remain
-internal diagnostic/Maintenance paths. Attachment repair, its container backup,
-and automatic repair restoration are withheld from the public Interface.
+The historical DB image experiments remain evidence only. The local-only
+attachment repair command, its container backup helper, and automatic repair
+restoration were removed from the shipped adapter rather than retained as a
+hidden Maintenance surface.
 
 ## Recently Deleted recovery evidence
 
@@ -181,9 +182,9 @@ the exact assignment. Public add/remove is exposed through a closed
 `organize_reminder` action and a freshly revalidated Reference.
 
 Unused-label cleanup is separate from ordinary tag removal. Its historical
-digest, literal-scope, write-lock, zero-reference, backup, and read-back
-protections remain internal tests, but cleanup itself is withheld from the 0.3
-public Interface.
+digest and locking experiments remain documented, but the cleanup command and
+backup machinery were removed from the shipped adapter. Ordinary public tag
+removal still soft-deletes only the exact assignment.
 
 ## Historical private reminder creation
 
@@ -193,24 +194,17 @@ some reminders still displayed no title until the public Reminders object model
 rewrote the text. Timed and all-day date storage also differed.
 
 Those findings explain why normal reminder creation and primary-field editing
-now use EventKit. Deprecated direct DB/AppleScript write commands may remain as
-an internal migration seam, not as a public fallback.
+use EventKit. The deprecated direct DB/AppleScript create, update, completion,
+reopen, and delete commands were removed instead of becoming an internal
+fallback.
 
-## Disposable cache and recovery internals
+## Removed maintenance internals
 
-The adapter can maintain a rebuildable cache at:
-
-`~/Library/Caches/apple-reminders-codex/cache.json`
-
-It is not a source of truth. It contains bounded lightweight metadata and note
-length/hash rather than full notes or attachment payloads. Flag state may be
-observed internally, but public flag mutation is not promised. Cache commands
-and note-body source search remain internal implementation details.
-
-Internal experiments may also create journals, backups, or container archives
-under the plugin support directories. Backup, restore, attachment repair, and
-log purge are not public tools, and a live-store archive is not a verified
-restoration mechanism.
+The rebuildable cache, note-body source search, direct backup, attachment
+repair, and log-purge commands belonged to the retired 0.2 CLI surface. They and
+the standalone recovery-backup helper are no longer packaged. The durable
+content-free idempotency journal remains because it protects the retained
+mutation paths; it is not a general activity log or restoration mechanism.
 
 ## Adapter rules
 
@@ -226,5 +220,5 @@ restoration mechanism.
   mutation and consume it on a terminal or unknown post-dispatch outcome.
 - Treat ReminderKit/store writes as version-sensitive. CloudKit evidence is not
   direct iPhone observation or guaranteed convergence.
-- Keep deprecated CLI and withheld Maintenance routes internal; their presence
-  must not silently expand the public contract.
+- Keep the 16-command adapter allowlist exact; do not add hidden compatibility
+  routes or let an internal command silently expand the public contract.

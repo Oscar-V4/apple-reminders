@@ -34,8 +34,8 @@ through Apple services and can affect other devices or shared-list participants.
   source user shell startup files.
 - The MCP server invokes bundled local adapters; packaged runtime ignores
   backend path overrides and does not call a plugin-owned web service.
-- EventKit and AppleScript operations communicate with macOS system services or
-  the Reminders app.
+- EventKit and private ReminderKit operations communicate with macOS system
+  services or the Reminders app.
 - Apple Reminders and iCloud may transmit and sync data according to the user's
   Apple account and system settings.
 - URLs attached to reminders are user-provided data. The plugin should not
@@ -48,15 +48,15 @@ Depending on the commands used, operational files may be created under:
 - `~/Library/Application Support/apple-reminders-codex/`
   - redacted action journal and its rotation;
   - idempotency metadata and lock;
-  - version/schema capability records;
-  - optional backup archives.
+  - temporary or legacy version/schema capability records.
 - `~/Library/Caches/apple-reminders-codex/`
-  - disposable reminder metadata cache;
   - locally compiled EventKit/ReminderKit helpers and build locks.
 
-The cache can contain reminder identifiers, titles, list/section names, dates,
-status, counts, and other lightweight metadata. It intentionally omits full
-note bodies and image contents, but it is still private user data.
+The 0.4 runtime no longer creates a reminder metadata cache or backup archive.
+Earlier development versions may have left either artifact in these folders or
+in an explicitly selected output directory. A legacy metadata cache can contain
+reminder identifiers, titles, list/section names, dates, status, and counts;
+treat it as private user data even though it omitted full notes and image bytes.
 
 The action journal is designed to redact sensitive values into hashes, sizes,
 and counts, while retaining operation metadata and selected identifiers needed
@@ -65,21 +65,17 @@ be published. Current code applies bounded size and retention controls; old
 files produced by earlier versions should not be assumed to have the same
 format.
 
-Backups are the most sensitive artifact. A targeted SQLite backup can contain
-all reminder content in one store; a container archive can additionally cover
-multiple stores and attachment material. They remain local until the user
-moves or uploads them. Plugin-managed database backups retain at most five or
-100 MB, and plugin-managed container archives retain at most two or 300 MB;
-older strictly named plugin backups are removed after a new successful backup.
-An explicit user-selected output path is never auto-pruned. Container archives
-are only best-effort snapshots of a live store, while targeted databases use
-SQLite's online backup operation. Do not attach either form to bug reports or
-treat it as a guaranteed recovery point without independent verification.
+Legacy backups are the most sensitive artifact. A targeted SQLite backup can
+contain all reminder content in one store; a container archive can additionally
+cover multiple stores and attachment material. The current runtime neither
+creates nor prunes them, so a file left by an earlier build remains until the
+user removes it. Do not attach either form to bug reports or treat it as a
+guaranteed recovery point without independent verification.
 
 ## Public and Private macOS Interfaces
 
-The plugin prefers public EventKit or AppleScript behavior for supported
-reminder fields. Advanced features can use:
+The packaged runtime prefers public EventKit for supported reminder fields.
+Advanced features can use:
 
 - Apple's private ReminderKit framework for native image attachments, sections,
   and exact Recently Deleted recovery;
@@ -133,10 +129,10 @@ other data that could identify the user or their task history.
 - The public Interface does not expose log purge. After removing or stopping
   the plugin and confirming that no operation is running, users may remove only
   the plugin-owned support files described in this document.
-- Delete disposable caches, compiled helpers, capability records, idempotency
-  metadata, or explicit-path backups when they are no longer needed and no
-  operation is running. Plugin-managed backups also follow the bounded
-  retention policy described above.
+- Delete compiled helpers, capability records, idempotency metadata, legacy
+  metadata caches, or legacy/explicit-path backups when they are no longer
+  needed and no operation is running. The current runtime does not manage the
+  retention of backup files produced by older builds.
 - Revoke Reminders or Automation access in macOS settings to disable the
   associated public integration path.
 

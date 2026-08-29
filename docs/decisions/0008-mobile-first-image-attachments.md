@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted for the native image path. The audit/repair CLI consequences were
+superseded by ADR 0014 and physically removed before 0.4.
 
 ## Decision
 
@@ -20,20 +21,22 @@ compensation. A raw `ZMARKEDFORDELETION` update is not native-removal evidence.
 
 Testing showed that DB-only image attachment rows can render correctly in macOS Reminders while not appearing in iOS Reminders. The missing signal was CloudKit attachment state: local-only rows lacked server record data and synced cloud-state evidence.
 
-The private ReminderKit path creates native image attachments that Reminders syncs through CloudKit. It works without foreground UI gestures and satisfies the actual user-facing requirement: images must be visible on iPhone.
+The private ReminderKit path creates native image attachments that Reminders
+syncs through CloudKit. It works without foreground UI gestures and targets the
+actual user-facing requirement of cross-device visibility, while CloudKit
+evidence alone does not claim direct iPhone observation.
 
-## Consequences
+## Historical consequences and retained constraints
 
 - `attach_image` defaults to `--backend reminderkit`.
 - A helper success is accepted only when it uses the image-data transport,
   resolves to one newly created attachment id, preserves the content-derived
   UTI on read-back, and proves mobile-visible CloudKit evidence.
 - `attach_image --backend db` remains available only as a diagnostic fallback.
-- `audit_attachments` reports image rows that are likely Mac-local only.
-- `repair_attachments` can back up the Reminders container, reattach local-only
-  images through ReminderKit, and remove the old local-only attachment from the
-  exact Reminder through the same native save path.
-- Replacement, deletion, repair, and compensation close direct SQLite
+- The former `audit_attachments` and `repair_attachments` commands reported and
+  repaired likely Mac-local rows; ADR 0014 removed both commands and their
+  backup machinery from the shipped adapter.
+- Replacement, deletion, and compensation close direct SQLite
   connections before the ReminderKit save, then verify that the exact old
   attachment is detached from the exact Reminder. The native save may retain
   the old object and CloudKit state as a detached sync tombstone.
@@ -44,7 +47,6 @@ The private ReminderKit path creates native image attachments that Reminders syn
 - An unknown native removal outcome stops the workflow without compensation.
   Deleting the replacement at that point could leave zero images if removal of
   the old attachment actually committed before the result was lost.
-- Replacement and repair report partial failure and attempt compensating native
-  removal of the newly created attachment if removal of the old attachment
-  fails.
+- Retained replacement reports partial failure and attempts compensating native
+  removal of the newly created attachment if removal of the old attachment fails.
 - Plugin guidance must define success as mobile-visible attachment evidence, not Mac thumbnail rendering.

@@ -191,13 +191,12 @@ even though optional MCP `outputSchema` descriptors are omitted from
 Unused-tag cleanup, raw attachment export, attachment audit/repair, broad
 backup/Snapshot restore, log purge, flag mutation, and native `show_reminder`
 are not public promises.
-Their historical low-level behavior may remain covered by internal tests so
-future work does not accidentally corrupt data, but skills and public MCP tools
-must not expose or fall back to it.
+The obsolete CLI implementations for those operations were physically removed;
+skills and public MCP tools must not expose, alias, or fall back to them.
 
-The deprecated direct adapter CLI is not a 0.4 compatibility promise. Its
-physical removal is required before the 0.4 release and must be reviewed as a
-separate deletion-focused change.
+The adapter parser must expose exactly the 16 commands recorded in ADR 0014.
+Former direct Core writes and Maintenance commands must be rejected, with no
+compatibility shim or deprecated parser route.
 
 ## Diagnosis contract
 

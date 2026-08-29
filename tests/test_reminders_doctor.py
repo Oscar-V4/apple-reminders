@@ -37,7 +37,7 @@ def fake_runner(
 
 
 def fake_which(command: str) -> str | None:
-    return f"/usr/bin/{command}" if command in {"clang", "osascript"} else None
+    return f"/usr/bin/{command}" if command == "clang" else None
 
 
 class DoctorFixture:
@@ -225,20 +225,20 @@ class ContentFreeSchemaTests(unittest.TestCase):
 
     def test_missing_command_column_is_reported_by_name(self) -> None:
         requirements = reminders_doctor.COMMAND_SCHEMA_REQUIREMENTS[
-            "delete_reminder_db"
+            "delete_attachment_db"
         ]
         schema = {table: set(columns) for table, columns in requirements.items()}
-        schema["ZREMCDREMINDER"].remove("ZMARKEDFORDELETION")
+        schema["ZREMCDOBJECT"].remove("ZMARKEDFORDELETION")
 
         result = reminders_doctor.command_schema_capabilities(schema)[
-            "delete_reminder_db"
+            "delete_attachment_db"
         ]
 
         self.assertFalse(result["supported"])
         self.assertEqual(result["code"], "schema_mismatch")
         self.assertEqual(
             result["missing_columns"],
-            {"ZREMCDREMINDER": ["ZMARKEDFORDELETION"]},
+            {"ZREMCDOBJECT": ["ZMARKEDFORDELETION"]},
         )
 
     def test_store_report_uses_anonymous_refs_not_database_filenames(self) -> None:
@@ -330,15 +330,13 @@ class StaticDependencyTests(unittest.TestCase):
 
 
 class PermissionAndAccountTests(unittest.TestCase):
-    def test_automation_and_eventkit_are_not_invoked(self) -> None:
+    def test_eventkit_and_reminders_are_not_invoked(self) -> None:
         commands: list[list[str]] = []
 
         def runner(
             argv: list[str], *, timeout: float = 20.0
         ) -> subprocess.CompletedProcess[str]:
             commands.append(argv)
-            if argv[0].endswith("osascript"):
-                raise AssertionError("doctor must not invoke osascript")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -351,12 +349,12 @@ class PermissionAndAccountTests(unittest.TestCase):
             )
 
         self.assertTrue(commands)
-        self.assertTrue(all(not command[0].endswith("osascript") for command in commands))
         permissions = report["checks"]["permissions"]["details"]
-        self.assertEqual(permissions["automation"]["status"], "unknown")
+        self.assertNotIn("automation", permissions)
         self.assertEqual(permissions["reminders"]["status"], "unknown")
         self.assertFalse(permissions["tcc_prompt_attempted"])
         self.assertFalse(report["privacy"]["permission_prompt_attempted"])
+        self.assertNotIn("applescript_operations", report["capabilities"])
 
     def test_account_visibility_reports_counts_without_names_or_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -473,8 +471,25 @@ class ReportContractTests(unittest.TestCase):
         self.assertTrue(report["privacy"]["content_free"])
         self.assertFalse(report["privacy"]["write_attempted"])
         self.assertFalse(report["privacy"]["application_launched"])
-        self.assertIn("delete_reminder_db", report["capabilities"]["command_schema"])
-        self.assertIn("cleanup_tags", report["capabilities"]["command_schema"])
+        command_schema = report["capabilities"]["command_schema"]
+        self.assertIn("delete_attachment_db", command_schema)
+        self.assertIn("add_tag_db", command_schema)
+        self.assertTrue(
+            {
+                "audit_attachments",
+                "cache_rebuild",
+                "cleanup_tags",
+                "complete_reminder_db",
+                "create_list_db",
+                "create_reminder_db",
+                "delete_reminder_db",
+                "list_lists",
+                "repair_attachments",
+                "search_reminders",
+                "snapshot",
+                "update_reminder_db",
+            }.isdisjoint(command_schema)
+        )
         self.assertEqual(
             report["capabilities"]["reminderkit_image_attachments"],
             {

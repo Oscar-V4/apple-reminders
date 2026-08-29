@@ -64,7 +64,6 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
     Path("scripts/reminders_image_input.py"),
-    Path("scripts/reminders_recovery.py"),
     Path("scripts/reminders_service.py"),
     Path("scripts/reminders_contracts.py"),
     Path("scripts/reminders_doctor.py"),

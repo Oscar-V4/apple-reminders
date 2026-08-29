@@ -48,8 +48,8 @@ ordinary constructor arguments instead of mutable production state.
 The typed transport and independent Core/Native/Recovery mutation-state
 channels add a reviewed package cost, so the source ZIP budget moves from 1.25
 MiB to 1.28 MiB. This is not permission for unbounded growth; retiring the
-obsolete 0.2-era adapter CLI remains a v0.4 release blocker and will reduce the
-package substantially in a separately reviewable change.
+obsolete 0.2-era adapter CLI was kept as a separate v0.4 release blocker and
+implemented by the deletion-focused ADR 0014 follow-up.
 
 ## Rejected alternatives
 
