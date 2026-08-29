@@ -9,14 +9,13 @@ The cover deliberately uses no Apple or OpenAI logo, certification mark,
 directory badge, or endorsement claim. Its SHA-256 is:
 
 ```text
-466a20442d541c07377ddeacf659076ac45bc0606c5108f0c55388a13d0be5b2
+e288ba8b3a459aa998f3d9fbb5f143caaae30f4fa263b95c939d69c5d6101b1d
 ```
 
 Exact visible copy:
 
 ```text
 Apple Reminders for Codex
-Community-built · Local MCP · Open source
+Independent · Local MCP · Open source
 v0.4.0 pre-release
 ```
-

@@ -30,13 +30,13 @@ everywhere:
 | `<ZIP_URL>` | `https://github.com/Oscar-V4/apple-reminders/releases/download/v0.4.0/apple-reminders-0.4.0.zip` |
 | `<ZIP_SHA256>` | `a0f53ae4053053abe75541e68ae35b01f904ff4a013b99b14e686b95fa1355da` |
 | `<CI_URL>` | `https://github.com/Oscar-V4/apple-reminders/actions/runs/33257175249` |
-| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
-| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
-| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
+| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
+| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
+| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
 | `<DEMO_URL>` | Public 60–90 second demo |
-| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/main/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
+| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/ac5bae536a8c9864abcc226a9742723076624c2f/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
 | `<ISSUES_URL>` | `https://github.com/Oscar-V4/apple-reminders/issues/new/choose` |
-| `<MODEL_BUILD_NOTES>` | Codex desktop; WebGPT Agent Pro for an independent public PR review. Do not add a model-specific claim without a linkable record. |
+| `<MODEL_BUILD_NOTES>` | Maintainer attestation: Codex desktop plus a separately orchestrated WebGPT Agent Pro audit. Public PR #19 proves the finding/fix, not agent identity. Describe it as cross-agent AI review, not independent human review; do not add a model-specific claim without a linkable record. |
 
 ## Launch gates
 
@@ -67,23 +67,27 @@ everywhere:
 - [ ] Record and review `<DEMO_URL>` using only synthetic content. Crop or hide
   the Reminders sidebar, notifications, account names, menu-bar data, file
   paths, and any other personal information.
-- [x] Use one consistent public author name across GitHub, plugin metadata,
+- [ ] Use one consistent public author name across GitHub, plugin metadata,
   social profiles, and the Showcase draft. Confirm rights to the logo, cover,
   video, music, and screenshots.
-- [ ] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
+- [x] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
   report template for install, permission, Core, Native Extension, and privacy
-  reports.
+  reports. The public path resolves correctly and redirects signed-out reporters
+  to GitHub login with a return to the chooser.
 - [x] Read the final announcement aloud once. Remove “official,” “approved,”
   “certified,” “partner,” “production-ready,” or any unverified adoption or
   performance claim.
 
-The announcement gate is **not** green until the tagged release and its public
-evidence exist. In particular, submit the Developer Showcase form only after
-the tag and release are public.
+The release-evidence gate is green, but the full announcement gate still needs
+the synthetic demo and final channel checks. As of 2026-08-29, the official
+community “Submit a project” link resolves to the Showcase gallery and exposes
+no public submission form or control; the former standalone form returns 403.
+Do not guess or bypass a submission endpoint. Keep the packet ready and recheck
+the official route.
 
 ### After release and announcement
 
-- [ ] Re-run the exact tagged install from the public repository, not a branch,
+- [x] Re-run the exact tagged install from the public repository, not a branch,
   and compare the installed version and artifact checksum with the release.
 - [ ] Triage first-user reports promptly; turn confirmed failures into minimal
   reproductions, regression tests, fixes, and changelog entries.
@@ -92,9 +96,9 @@ the tag and release are public.
   account identifiers.
 - [ ] Keep the project post and the local-device MCP product-feedback post
   separate. The first recruits users; the second discusses a platform gap.
-- [ ] Submit the released project to the OpenAI Developer Showcase. Say
-  “submitted” only after submission and “featured” only if an OpenAI-hosted
-  page is actually published.
+- [ ] Recheck the official OpenAI community and Showcase pages. Submit only if
+  they expose a public submission action; say “submitted” only after it
+  succeeds and “featured” only if an OpenAI-hosted page is actually published.
 - [ ] Track durable evidence: external install reports, issues, fixes,
   discussions, forks, and contributions. Do not manufacture testimonials,
   stars, download counts, or endorsements.
@@ -130,7 +134,8 @@ the tag and release are public.
 > 선택 태그: `@OpenAIDevs`
 
 If the public history supports it, add one final sentence: “Codex를 사용해
-구현하고 독립 리뷰와 실제 Reminders 스모크 테스트로 점검했습니다.”
+구현하고 별도 AI 에이전트 감사와 실제 Reminders 스모크 테스트로
+점검했습니다.”
 Otherwise omit it.
 
 ### English
@@ -155,9 +160,10 @@ Otherwise omit it.
 > I am looking for Mac testers: `<ISSUES_URL>`. This is not an official or
 > endorsed OpenAI or Apple plugin. Optional tag: `@OpenAIDevs`
 
-If publicly supported, add: “Built with Codex and reviewed with automated,
-independent, and live Apple Reminders checks.” Do not name a model or a test
-count unless its linked evidence matches the tag.
+If publicly supported, add: “Built with Codex and checked through automated,
+cross-agent AI, and live Apple Reminders tests.” Do not imply independent human
+review, or name a model or test count unless its linked evidence matches the
+tag.
 
 ## 60–90 second disposable demo
 
@@ -185,9 +191,17 @@ card—do not stage a fake prompt.
 
 ## OpenAI Developer Showcase draft
 
-**Submission gate:** use this only after `<TAG>`, `<RELEASE_URL>`, the public
-setup instructions, and `<COVER_IMAGE_URL>` resolve without authentication.
-Submission does not mean acceptance or endorsement.
+**Route status (2026-08-29):** the official [OpenAI community
+page](https://developers.openai.com/community) advertises “Submit a project,”
+but its link currently resolves to the [Showcase
+gallery](https://developers.openai.com/showcase), where no public submission
+form or control is exposed. The former standalone form returns 403. Keep this
+draft ready, do not guess another endpoint, and recheck the official route.
+
+**Submission gate:** use this only if an official public submission action
+returns, and only after `<TAG>`, `<RELEASE_URL>`, the public setup instructions,
+and `<COVER_IMAGE_URL>` resolve without authentication. Submission would not
+mean acceptance or endorsement.
 
 - **Project title:** Apple Reminders for Codex
 - **Tagline:** Safer Apple Reminders workflows from Codex on macOS.
@@ -239,11 +253,14 @@ Submission does not mean acceptance or endorsement.
 
   Start a new Codex task, ask for a bounded Reminders read, and approve the
   explicit macOS Reminders permission request if needed. Requirements and
-  troubleshooting are in the [tagged README](../../README.md).
+  troubleshooting are in the [tagged
+  README](https://github.com/Oscar-V4/apple-reminders/blob/v0.4.0/README.md).
 
-Before submitting, re-open the current [Showcase
-form](https://openai.com/form/showcase-submission/) and check for changed fields
-or asset rules. Confirm that all claims are supported by the [release
+Before submitting, re-open the official [community
+page](https://developers.openai.com/community) and [Showcase
+gallery](https://developers.openai.com/showcase), confirm that they expose a
+real public submission action, and check its current fields and asset rules.
+Confirm that all claims are supported by the [release
 regression contract](../regression-contract.md), [public tool
 schema](../../plugins/apple-reminders/schemas/mcp-tools.json), release evidence,
 and rights-owned assets. Save the submitted text and date privately. Announce
@@ -369,9 +386,11 @@ Plugins Directory listing.
 
 ### Public assets
 
-- [ ] Repository social preview and `<COVER_IMAGE_URL>` use the released name,
-  legible community/local-MCP wording, the caption links the Codex result
-  boundary, and all artwork is rights-owned.
+- [x] `<COVER_IMAGE_URL>` uses the released name, legible
+  independent/local-MCP wording, no endorsement mark, and rights-owned source
+  artwork.
+- [ ] Set the repository social preview to `<COVER_IMAGE_URL>` and verify the
+  public Open Graph card no longer uses GitHub's default avatar/stats image.
 - [ ] `<DEMO_URL>` is captioned, readable without audio, 60–90 seconds, and
   contains no personal reminders, accounts, notifications, paths, or secrets.
 - [ ] One static screenshot shows the exact pinned install commands; one shows
@@ -399,9 +418,11 @@ Plugins Directory listing.
   [architecture](../architecture.md), [release
   contract](../regression-contract.md), [changelog](../../CHANGELOG.md), and
   user-facing policies are reachable from the release.
-- [x] Any “built/audited with Codex” claim links to a public build history or
-  review artifact. Any external-user claim links to a public issue,
-  contribution, or permissioned testimonial.
+- [x] Any “built/audited with Codex” claim distinguishes maintainer attestation
+  about agent identity from the public finding/fix artifact and does not imply
+  independent human review.
+  Any external-user claim links to a public issue, contribution, or
+  permissioned testimonial.
 
 ### Final human check
 
