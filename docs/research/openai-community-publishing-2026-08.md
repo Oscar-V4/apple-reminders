@@ -1,6 +1,6 @@
 # OpenAI community and publishing routes for Apple Reminders
 
-Research date: 2026-08-26 (Asia/Seoul)
+Research updated: 2026-08-29 (Asia/Seoul)
 
 This note separates three kinds of statements:
 
@@ -158,11 +158,11 @@ It describes local and repo marketplaces as authoring, testing, and team
 distribution sources separate from the universal directory. See [Package your
 plugin](https://developers.openai.com/plugins/build/plugins).
 
-Once `v0.3.0` exists, this repository's intended pinned install is therefore a
-valid community distribution route:
+The public `v0.4.0` pre-release now uses this confirmed community distribution
+route:
 
 ```sh
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.3.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -438,7 +438,8 @@ This section is recommendation, not an OpenAI hiring or endorsement policy.
 1. Finish clean-environment first-install evidence and publish it without user
    reminder content.
 2. Merge the release candidate, rebuild the deterministic artifact from the
-   merged commit, publish `v0.3.0`, and expose the checksum.
+   merged commit, publish `v0.4.0`, and expose the checksum. Completed on
+   2026-08-29; see the [content-free release evidence](../release-evidence/v0.4.0.md).
 3. Verify the exact tagged marketplace install on a Mac that did not use the
    development checkout.
 4. Make the README's first screen answer: what it does, macOS requirement,
