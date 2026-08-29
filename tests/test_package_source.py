@@ -534,6 +534,24 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(errors, [f"absolute user-home path found in {relative}"])
         self.assertNotIn(private_path, "\n".join(errors))
 
+    def test_local_environment_files_are_ignored_but_examples_are_reviewable(self) -> None:
+        for path in (".env", ".env.local", ".env.development"):
+            with self.subTest(path=path):
+                completed = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "--quiet", path],
+                    cwd=REPO_ROOT,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0)
+        for path in (".env.example", ".env.sample"):
+            with self.subTest(path=path):
+                completed = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "--quiet", path],
+                    cwd=REPO_ROOT,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 1)
+
     def test_name_only_worktree_scan_detects_local_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

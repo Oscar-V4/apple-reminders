@@ -19,6 +19,12 @@ venv/
 .coverage
 htmlcov/
 
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+!.env.sample
+
 # Native build products
 build/
 dist/
