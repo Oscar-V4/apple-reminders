@@ -26,6 +26,10 @@ from receipt_contract import (
     MutationNotStartedError,
     validated_receipt_mutation_state,
 )
+from eventkit_protocol import (
+    validate_mutation_receipt as validate_eventkit_mutation_receipt,
+    validate_response as validate_eventkit_response,
+)
 
 if __package__:  # Package import in tests; script-local import in the stdio server.
     from .v2_core import EventKitReply, MutationState
@@ -38,7 +42,6 @@ else:  # pragma: no cover - exercised by the script entry point
 BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
 AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
-ModuleLoader = Callable[[], Any]
 ReceiptValidator = Callable[..., str | None]
 
 
@@ -88,14 +91,12 @@ class CoreBackend:
         adapter_call: AdapterCall,
         build_adapter_argv: ArgvBuilder,
         idempotency_call: IdempotencyCall,
-        bridge_module: ModuleLoader,
         receipt_validator: ReceiptValidator,
     ) -> None:
         self._bridge_call = bridge_call
         self._adapter_call = adapter_call
         self._build_adapter_argv = build_adapter_argv
         self._idempotency_call = idempotency_call
-        self._bridge_module = bridge_module
         self._receipt_validator = receipt_validator
 
     def invoke(
@@ -707,7 +708,6 @@ class CoreBackend:
     ) -> tuple[dict[str, Any], bool, MutationState]:
         bridge_arguments = dict(arguments)
         idempotency_key = bridge_arguments.pop("idempotency_key", None)
-        bridge_contract = self._bridge_module()
         executed_state: MutationState | None = None
 
         def execute_once() -> dict[str, Any]:
@@ -716,21 +716,19 @@ class CoreBackend:
             payload = transport.payload
             is_error = transport.is_error
             if is_error:
-                validate_response = getattr(bridge_contract, "validate_response", None)
                 transport_not_started = (
                     transport.proves_not_started and payload.get("ok") is False
                 )
                 contract_proved_no_write = (
                     payload.get("status") == "failed_no_mutation"
                     and payload.get("ok") is False
-                    and callable(validate_response)
                 )
                 error_state: MutationState = "unknown"
                 if transport_not_started:
                     error_state = "not_mutated"
                 elif contract_proved_no_write:
                     try:
-                        validate_response(payload, operation)
+                        validate_eventkit_response(payload, operation)
                     except RuntimeError:
                         contract_proved_no_write = False
                     else:
@@ -767,7 +765,7 @@ class CoreBackend:
                     )
                 raise _EventKitBridgeFailure(payload, error_state)
             try:
-                bridge_contract.validate_mutation_receipt(payload, operation)
+                validate_eventkit_response(payload, operation)
             except RuntimeError as exc:
                 raise _EventKitReceiptFailure(str(exc)) from exc
             raw_state = validated_receipt_mutation_state(payload)
@@ -867,7 +865,7 @@ class CoreBackend:
             )
         if executed_state is None:
             try:
-                bridge_contract.validate_mutation_receipt(payload, operation)
+                validate_eventkit_mutation_receipt(payload, operation)
             except RuntimeError:
                 mutation_state: MutationState = "unknown"
             else:

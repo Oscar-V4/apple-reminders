@@ -157,13 +157,13 @@ def failed_no_mutation_evidence_error(payload: Any) -> str | None:
             return "failed_no_mutation verification must be an object"
         if verification.get("write_performed") is not False:
             return "failed_no_mutation verification must prove write_performed=false"
-        if verification.get("final_read") not in {None, False}:
+        if verification.get("final_read") not in (None, False):
             return "failed_no_mutation cannot claim a post-write final read"
-        if verification.get("state") not in {
+        if verification.get("state") not in (
             "not_performed",
             "not_needed",
             "read_back",
-        }:
+        ):
             return "failed_no_mutation verification state is not a no-write state"
         for field in (
             "saved",
@@ -258,7 +258,7 @@ def eventkit_mutation_receipt_error(
     if not isinstance(payload, dict):
         return "Mutation receipt must be an object"
     expected_operation = operation or payload.get("operation")
-    if expected_operation not in mutation_operations:
+    if not isinstance(expected_operation, str) or expected_operation not in mutation_operations:
         return "Mutation receipt operation is not supported"
     required = {
         "ok",
@@ -299,8 +299,11 @@ def eventkit_mutation_receipt_error(
         error = payload.get("error")
         if not isinstance(error, dict):
             return "Pending mutation receipt must include an error object"
-        if error.get("code") not in stable_error_codes or not isinstance(
-            error.get("message"), str
+        error_code = error.get("code")
+        if (
+            not isinstance(error_code, str)
+            or error_code not in stable_error_codes
+            or not isinstance(error.get("message"), str)
         ):
             return "Pending mutation receipt error must include a stable code and message"
     return None

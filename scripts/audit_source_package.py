@@ -59,6 +59,7 @@ PACKAGE_ROOT_FILES = {
     Path("schemas/mcp-tools.json"),
     Path("scripts/eventkit_bridge.py"),
     Path("scripts/eventkit_bridge_info.plist"),
+    Path("scripts/eventkit_protocol.py"),
     Path("scripts/eventkit_bridge_schema.json"),
     Path("scripts/launch_mcp.sh"),
     Path("scripts/durable_idempotency.py"),

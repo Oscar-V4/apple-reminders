@@ -284,6 +284,14 @@ re-sanitized under the same lock on the next keyed operation so primitive
 user-authored arrays from an older retry snapshot are neither replayed nor
 retained after a successful atomic scrub.
 
+EventKit response policy lives in `scripts/eventkit_protocol.py`. The native
+bridge, MCP server, and Core backend share its three pure functions for strict
+wire/projected-Receipt validation and bounded outcome-unknown Receipts.
+Server/Core no longer load the executable bridge module in-process merely to
+reuse protocol logic;
+subprocess provenance, request validation, helper compilation, and native
+execution remain at their existing seams.
+
 ## Local validation
 
 These checks do not launch Reminders or read live reminder rows:
