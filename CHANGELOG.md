@@ -129,7 +129,8 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   a crash or final-Receipt persistence failure blocks redispatch and returns
   verification-pending on replay. The current key survives wall-clock jumps,
   and unresolved fences cannot be evicted merely to make capacity for a new
-  write. A callback failure that affirmatively occurred before mutation clears
+  write or age into a second dispatch; retention expires only redispatch-safe
+  results. A callback failure that affirmatively occurred before mutation clears
   its fence for a safe retry; possible-commit failures retain it. Core create
   now carries contract-validated EventKit no-write results through that same
   cleanup path instead of leaving a permanent unresolved fence.

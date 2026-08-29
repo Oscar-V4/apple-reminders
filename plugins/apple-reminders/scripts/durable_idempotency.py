@@ -310,6 +310,7 @@ def _prune_entries(
         for key, value in entries.items()
         if (
             key in protected_keys
+            or _record_unresolved(value)
             or _entry_created_at_epoch(value) >= cutoff
         )
     }

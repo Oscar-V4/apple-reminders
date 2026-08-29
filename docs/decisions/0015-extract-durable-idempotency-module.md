@@ -50,8 +50,9 @@ legacy complete results without changing the store version:
 - every other callback failure retains the fence fail-closed;
 - final Receipt persistence failure returns the successful live result with a
   warning and leaves replay outcome unknown;
-- legacy state-less v1 records, 30-day retention, 500-entry capacity, current
-  key protection, and operation aliases do not change;
+- legacy state-less v1 records, 500-entry capacity, current-key protection, and
+  operation aliases do not change; retention expires only redispatch-safe
+  records, never unresolved fences;
 - complete modern and legacy results are re-sanitized while the existing lock
   is held, then atomically rewritten with every fence metadata field intact;
 - a failed existing-key scrub returns only the sanitized in-memory replay plus

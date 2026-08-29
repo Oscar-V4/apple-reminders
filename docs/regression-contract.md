@@ -162,8 +162,9 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `in_progress` fence before dispatch. An unreadable store or failed fence
     prevents dispatch; an incomplete fence on replay blocks the callback and
     returns outcome-unknown. The current key is protected from wall-clock
-    pruning, and unresolved fences are never capacity-evicted to admit a new
-    mutation; a full unresolved store fails closed before dispatch. An adapter
+    pruning. Unresolved fences are neither age-pruned nor capacity-evicted to
+    admit a new mutation; a full unresolved store fails closed before
+    dispatch. An adapter
     typed `MutationNotStartedError` that the existing receipt boundary proves
     happened before mutation atomically clears its fence; arbitrary error
     detail flags cannot do so, while partial or outcome-unknown
