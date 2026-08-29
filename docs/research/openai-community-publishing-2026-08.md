@@ -22,16 +22,18 @@ install commands. See [Package your
 plugin](https://developers.openai.com/plugins/build/plugins) and this
 repository's [marketplace manifest](../../.agents/plugins/marketplace.json).
 
-**Confirmed:** The [Showcase submission
-form](https://openai.com/form/showcase-submission/) is open. It explicitly
-accepts a polished product, creative experiment, or open-source demo built
-using OpenAI models; asks whether Codex was used; accepts a public GitHub
-repository instead of a hosted demo; and asks for the displayed author name,
-cover image, setup steps, and build story.
+**Unavailable / access-unverified:** The official [OpenAI community
+page](https://developers.openai.com/community) still advertises “Submit a
+project,” but on 2026-08-29 that link resolves to the [Showcase
+gallery](https://developers.openai.com/showcase), whose public page exposes no
+submission form or control. The former standalone
+`https://openai.com/form/showcase-submission/` route returns 403. Do not infer a
+replacement endpoint or claim that submissions are currently open.
 
-**Inference:** For a local-first project, Showcase is the strongest currently
-documented route to official OpenAI community visibility that does not require
-changing the product into a hosted service.
+**Inference:** A future Showcase submission remains a strong fit for a
+local-runtime project, but the currently usable official outreach routes are
+the Developer Forum and factual social sharing. Keep the Showcase packet ready
+and recheck the official community page.
 
 **Unavailable for the current architecture:** The local `stdio` MCP server
 cannot be submitted unchanged as the MCP component of a public universal
@@ -48,7 +50,8 @@ plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
 1. publish a tagged GitHub Release and repo marketplace;
 2. collect clean-install and real-user evidence;
-3. submit the released project to the OpenAI Developer Showcase;
+3. prepare the Developer Showcase packet and submit only if the official page
+   exposes a public submission action again;
 4. share the same evidence in the OpenAI Developer Forum and on social media;
 5. describe it as a **community-built, open-source Apple Reminders plugin for
    Codex**, not as an official or OpenAI-endorsed plugin.
@@ -190,12 +193,17 @@ listing.
 
 ## 3. Official OpenAI community routes
 
-### Developer Showcase — open now
+### Developer Showcase — gallery public; submission route unavailable
 
 **Confirmed:** The [OpenAI community
-page](https://developers.openai.com/community) directs builders to submit a
-project, demo, or workflow to the Developer Showcase. The [submission
-form](https://openai.com/form/showcase-submission/) specifically requests:
+page](https://developers.openai.com/community) directs builders to “Submit a
+project,” demo, or workflow to the Developer Showcase. On 2026-08-29 that link
+opens the [Showcase gallery](https://developers.openai.com/showcase), which
+contains community projects and a Codex filter but no publicly exposed submit
+form or control. The former standalone form returns 403.
+
+**Historical snapshot:** On 2026-08-26, the then-readable submission form asked
+for:
 
 - whether Codex and any other coding agent were used;
 - the models, APIs, capability, use cases, and technical stack (with `N/A`
@@ -206,8 +214,9 @@ form](https://openai.com/form/showcase-submission/) specifically requests:
 - title, tagline, project description, displayed author name, and a public
   cover image.
 
-The form says open-source demos are eligible, so a local macOS plugin does not
-need to be converted into a hosted SaaS merely to apply.
+That historical form said open-source demos were eligible, so this packet keeps
+the local macOS project framing. Its old fields are planning hints, not evidence
+that the same form or rules are currently available.
 
 The program agreement is equally important: submission grants OpenAI rights to
 test and promote the material, but OpenAI does not guarantee publication,
@@ -215,9 +224,9 @@ placement, visibility, ranking, or promotion. A submitter may not imply OpenAI
 created, certified, supported, or endorsed the project without a separate
 written agreement.
 
-**Inference:** Submit after the tagged release and clean-install proof are
-public. The Showcase is a better recognition route for this local-first project
-than distorting its architecture to satisfy hosted MCP submission.
+**Inference:** Do not guess a new form, automate around the 403, or say the
+project was submitted. Recheck the official community page periodically and
+use the prepared packet only if a real public submission action returns.
 
 ### Developer Forum — open now
 
@@ -290,7 +299,7 @@ Cookbook's uniqueness bar.
 **Confirmed:** OpenAI's community page features public builder posts and links
 to the official `@OpenAIDevs` X account, but no first-party source documents a
 tag, hashtag, or social post as a formal submission or a guarantee of being
-featured. The Showcase form is the documented submission mechanism.
+featured. No public Showcase submission control is currently exposed.
 
 **Inference:** Tagging `@OpenAIDevs` is reasonable outreach after release, but
 the post should link durable proof and say “built with Codex” or
@@ -447,16 +456,16 @@ This section is recommendation, not an OpenAI hiring or endorsement policy.
    support link.
 5. Record one short video using disposable reminders and lists.
 6. Pin the repository on the developer's GitHub profile and make the author name
-   consistent across the plugin manifest, GitHub profile, Showcase form, and
-   social profiles.
+   consistent across the plugin manifest, GitHub profile, any future Showcase
+   submission, and social profiles.
 
 ### Launch and official community outreach
 
 1. Publish the factual social post and tag `@OpenAIDevs` if desired.
 2. Post the release to the Developer Forum's Codex or Community category with a
    concrete request for testers.
-3. Submit the same released project to the OpenAI Developer Showcase; do not
-   announce it as featured unless accepted.
+3. Recheck the official Showcase route and submit only if a public action is
+   exposed; do not announce it as submitted or featured otherwise.
 4. Separately propose a reviewed local/device-bound MCP publication path in the
    forum, citing the public-HTTPS limitation and EventKit permission model.
 
