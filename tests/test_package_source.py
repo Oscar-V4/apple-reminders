@@ -519,6 +519,39 @@ class SourcePackagePolicyTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNotNone(audit_source_package.forbidden_path_reason(path))
 
+    def test_private_home_path_error_never_echoes_detected_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            relative = Path("README.md")
+            private_path = "/Users/fixture-user/private.txt"
+            (root / relative).write_text(
+                f"private source: {private_path}\n",
+                encoding="utf-8",
+            )
+            errors: list[str] = []
+            audit_source_package._validate_file(root, relative, errors)
+
+        self.assertEqual(errors, [f"absolute user-home path found in {relative}"])
+        self.assertNotIn(private_path, "\n".join(errors))
+
+    def test_local_environment_files_are_ignored_but_examples_are_reviewable(self) -> None:
+        for path in (".env", ".env.local", ".env.development"):
+            with self.subTest(path=path):
+                completed = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "--quiet", path],
+                    cwd=REPO_ROOT,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0)
+        for path in (".env.example", ".env.sample"):
+            with self.subTest(path=path):
+                completed = subprocess.run(
+                    ["git", "check-ignore", "--no-index", "--quiet", path],
+                    cwd=REPO_ROOT,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 1)
+
     def test_name_only_worktree_scan_detects_local_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
