@@ -23,9 +23,9 @@ import build_source_package  # noqa: E402
 
 
 # The deterministic allowlist is the primary content boundary. This hard ceiling
-# catches gross package growth while leaving room for reviewed runtime modules;
-# exact source/archive bytes remain visible in every benchmark result.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = 1_048_576
+# catches gross package growth while leaving room for the reviewed recovery
+# facade, backend, and native helper; exact bytes remain visible in benchmarks.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.28 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -34,6 +34,8 @@ PUBLIC_MCP_TOOL_NAMES = [
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
     "inspect_reminder_native",
     "ensure_reminder_list",
     "create_reminder_section",
@@ -117,7 +119,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "launcher did not select the later supported Python",
             )
             responses = [json.loads(line) for line in completed.stdout.splitlines()]
-            self.assertEqual(len(responses[1]["result"]["tools"]), 13)
+            self.assertEqual(len(responses[1]["result"]["tools"]), 15)
 
     def test_real_source_package_allowlist_passes(self) -> None:
         result = audit_source_package.audit_source(PLUGIN_ROOT)
@@ -180,7 +182,11 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 Path("mcp/v2_diagnostics.py"),
                 Path("mcp/v2_native.py"),
                 Path("mcp/v2_native_backend.py"),
+                Path("mcp/v2_recovery.py"),
+                Path("mcp/v2_recovery_backend.py"),
+                Path("mcp/v2_transport.py"),
                 Path("scripts/reminders_image_input.py"),
+                Path("scripts/remkit_recover.m"),
                 Path("scripts/reminders_service.py"),
             }.issubset(files)
         )
@@ -231,7 +237,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.3.1")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.4.0")
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -364,7 +370,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.28 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 
@@ -416,8 +422,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "module=importlib.util.module_from_spec(spec);"
                 "sys.modules[spec.name]=module;"
                 "spec.loader.exec_module(module);"
-                "print(json.dumps([str(module.adapter_path()),"
-                "str(module.eventkit_bridge_path()),str(module.doctor_path())]))"
+                "paths=module.DEFAULT_BACKEND_PATHS;"
+                "print(json.dumps([str(paths.adapter),str(paths.eventkit_bridge),"
+                "str(paths.doctor)]))"
             )
             completed = subprocess.run(
                 [sys.executable, "-c", probe, str(server)],

@@ -21,11 +21,13 @@ from reminders_service import (  # noqa: E402
     Guard,
     MoveToListAction,
     MutationOutcome,
+    MutationOutcomeRejected,
     MutationOutcomeUnknown,
     PatchAction,
     ReferenceRejected,
     SetCompletionAction,
     Snapshot,
+    reminder_matches_fields,
 )
 
 
@@ -147,6 +149,39 @@ class InMemoryAdapter:
 
 
 class CoreModuleTests(unittest.TestCase):
+    def test_field_matcher_accepts_equivalent_timezones_and_alarm_order(self) -> None:
+        expected = {
+            "due": {
+                "kind": "timed",
+                "date_time": "2026-08-28T09:00:00+09:00",
+                "time_zone": "Asia/Seoul",
+            },
+            "alarms": [
+                {"kind": "absolute", "date_time": "2026-08-28T00:00:00Z"},
+                {"kind": "relative", "offset_seconds": -900},
+            ],
+        }
+        actual = {
+            "due": {
+                "kind": "timed",
+                "date_time": "2026-08-28T00:00:00Z",
+                "time_zone": "Asia/Seoul",
+                "local_date_time": "2026-08-28T09:00:00",
+            },
+            "alarms": [
+                {"kind": "relative", "offset_seconds": -900, "read_only": False},
+                {"kind": "absolute", "date_time": "2026-08-28T09:00:00+09:00"},
+            ],
+        }
+
+        self.assertTrue(reminder_matches_fields(actual, expected))
+        self.assertTrue(
+            reminder_matches_fields(
+                {"alarms": [], "recurrence_rules": []},
+                {"alarms": None, "recurrence_rules": None},
+            )
+        )
+
     def test_adapter_exception_after_dispatch_consumes_the_reference(self) -> None:
         class ThrowingAdapter(InMemoryAdapter):
             def apply_action(
@@ -313,6 +348,39 @@ class CoreModuleTests(unittest.TestCase):
             {"kind": "patch", "patch": {"notes": "Use the fresh Guard"}},
         )
         self.assertEqual(follow_up.receipt["status"], "verified")
+
+    def test_change_rejects_a_canonical_final_read_that_misses_the_action(self) -> None:
+        class DriftingAdapter(InMemoryAdapter):
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                current = self._reminders[guard.reminder_id]
+                self._reminders[guard.reminder_id] = Snapshot(
+                    reminder={**dict(current.reminder), "title": "Conflicting title"},
+                    guard=current.guard,
+                )
+                return outcome
+
+        module = CoreModule(
+            DriftingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "patch", "patch": {"title": "Requested title"}},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+        with self.assertRaises(ReferenceRejected):
+            module.revalidate_reference(initial.reference)
 
     def test_closed_completion_and_list_move_actions_reach_the_adapter(self) -> None:
         cases = (
@@ -588,11 +656,15 @@ class CoreModuleTests(unittest.TestCase):
                 )
                 initial = module.read_exact("reminder-1")
 
-                with self.assertRaises(AdapterContractError):
+                with self.assertRaises(MutationOutcomeRejected) as raised:
                     module.change(
                         initial.reference,
                         {"kind": "patch", "patch": {"title": "Unsafe"}},
                     )
+                self.assertEqual(
+                    raised.exception.mutation_state,
+                    outcome.mutation_state,
+                )
 
                 with self.assertRaises(ReferenceRejected):
                     module.change(

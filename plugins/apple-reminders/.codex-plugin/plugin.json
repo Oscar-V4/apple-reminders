@@ -1,7 +1,7 @@
 {
   "name": "apple-reminders",
-  "version": "0.3.1",
-  "description": "Plan, capture, organize, and safely update Apple Reminders from Codex on macOS.",
+  "version": "0.4.0",
+  "description": "Plan, capture, organize, recover, and safely update Apple Reminders from Codex on macOS.",
   "author": {
     "name": "Sungsoo Kim (Oscar-V4)",
     "url": "https://github.com/Oscar-V4"
@@ -23,8 +23,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders",
-    "shortDescription": "Plan and safely update Apple Reminders from Codex",
-    "longDescription": "Review upcoming work, capture reminders, and safely organize or update Apple Reminders through a local MCP. There is no plugin-owned remote backend; tool results return to Codex. Advanced fields use version-sensitive macOS interfaces with explicit verification limits.",
+    "shortDescription": "Plan, recover, and safely update Apple Reminders",
+    "longDescription": "Review upcoming work, capture reminders, safely organize or update them, and recover one exact item from Recently Deleted through a local MCP. There is no plugin-owned remote backend; tool results return to Codex. Recovery and advanced fields use version-sensitive macOS interfaces with explicit verification limits.",
     "developerName": "Sungsoo Kim (Oscar-V4)",
     "category": "Productivity",
     "capabilities": [
@@ -38,7 +38,7 @@
     "defaultPrompt": [
       "Show my Apple Reminders due today and overdue",
       "Add a reminder to my Shopping list",
-      "Help me organize an Apple Reminder safely"
+      "Recover one exact recently deleted Apple Reminder safely"
     ],
     "brandColor": "#007AFF",
     "composerIcon": "./assets/icon.png",

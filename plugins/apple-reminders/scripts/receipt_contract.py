@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
-from typing import Any
+from typing import Any, Literal
+
+
+MutationState = Literal["not_mutated", "committed", "unknown"]
 
 
 SUCCESS_RECEIPT_STATUSES = frozenset(
@@ -28,6 +31,7 @@ STABLE_ERROR_CODES = frozenset(
         "ambiguous_target",
         "concurrent_modification",
         "invalid_input",
+        "not_found",
         "permission_denied",
         "schema_mismatch",
         "sync_pending",
@@ -39,6 +43,106 @@ STABLE_ERROR_CODES = frozenset(
 
 def receipt_status_is_success(status: Any) -> bool:
     return status in SUCCESS_RECEIPT_STATUSES
+
+
+def validated_receipt_mutation_state(payload: dict[str, Any]) -> MutationState:
+    status = payload.get("status")
+    if status == "failed_no_mutation":
+        return (
+            "not_mutated"
+            if failed_no_mutation_evidence_error(payload) is None
+            else "unknown"
+        )
+    verification = payload.get("verification")
+    write_performed = (
+        verification.get("write_performed")
+        if isinstance(verification, dict)
+        else None
+    )
+    evidence_fields = (
+        "write_performed",
+        "committed",
+        "commit_succeeded",
+        "may_have_mutated",
+        "partial_failure",
+    )
+    affirmative_write_evidence = any(
+        payload.get(field) is True
+        or (isinstance(verification, dict) and verification.get(field) is True)
+        for field in evidence_fields
+    )
+    if status == "unchanged":
+        return "unknown" if affirmative_write_evidence else "not_mutated"
+    if status == "verified":
+        return "unknown" if write_performed is False else "committed"
+    if status in {
+        "committed_verification_pending",
+        "partial_success",
+        "failed_manual_repair_required",
+    }:
+        if write_performed is True:
+            return "committed"
+    return "unknown"
+
+
+def failed_no_mutation_evidence_error(payload: Any) -> str | None:
+    """Reject a no-write label when the same payload carries commit evidence.
+
+    A shallow launcher failure may omit Receipt objects because it occurred
+    before a native helper returned.  Once a verification object is present,
+    however, it must affirmatively prove that no write occurred.  Callers must
+    never erase contradictory evidence while projecting a public Receipt.
+    """
+
+    if not isinstance(payload, dict) or payload.get("status") != "failed_no_mutation":
+        return None
+    if payload.get("ok") is not False:
+        return "failed_no_mutation must set ok=false"
+
+    after = payload.get("after")
+    if after is not None and (not isinstance(after, dict) or bool(after)):
+        return "failed_no_mutation must not include post-mutation state"
+    data = payload.get("data")
+    if data is not None and (not isinstance(data, dict) or bool(data)):
+        return "failed_no_mutation must not include mutation result data"
+
+    for field in (
+        "saved",
+        "mutation_attempted",
+        "may_have_mutated",
+        "partial_failure",
+        "committed",
+        "commit_succeeded",
+        "write_performed",
+    ):
+        if payload.get(field) is True:
+            return f"failed_no_mutation contradicts {field}=true"
+
+    verification = payload.get("verification")
+    if verification is not None:
+        if not isinstance(verification, dict):
+            return "failed_no_mutation verification must be an object"
+        if verification.get("write_performed") is not False:
+            return "failed_no_mutation verification must prove write_performed=false"
+        if verification.get("final_read") not in {None, False}:
+            return "failed_no_mutation cannot claim a post-write final read"
+        if verification.get("state") not in {
+            "not_performed",
+            "not_needed",
+            "read_back",
+        }:
+            return "failed_no_mutation verification state is not a no-write state"
+        for field in (
+            "saved",
+            "mutation_attempted",
+            "may_have_mutated",
+            "partial_failure",
+            "committed",
+            "commit_succeeded",
+        ):
+            if verification.get(field) is True:
+                return f"failed_no_mutation verification contradicts {field}=true"
+    return None
 
 
 def build_operation_receipt(
@@ -103,6 +207,9 @@ def adapter_receipt_error(
     for name in RECEIPT_OBJECT_FIELDS:
         if not isinstance(payload.get(name), dict):
             return f"an adapter mutation receipt requires object field {name}"
+    no_write_error = failed_no_mutation_evidence_error(payload)
+    if no_write_error:
+        return no_write_error
     return None
 
 

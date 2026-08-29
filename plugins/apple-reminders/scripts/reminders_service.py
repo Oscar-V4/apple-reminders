@@ -7,6 +7,7 @@ import copy
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Protocol
 
 
@@ -44,6 +45,44 @@ class MoveToListAction:
 
 CoreAction = PatchAction | SetCompletionAction | MoveToListAction
 MutationState = Literal["not_mutated", "committed", "unknown"]
+
+
+def mutation_state_after_unverified_projection(
+    state: MutationState,
+) -> MutationState:
+    return "committed" if state == "committed" else "unknown"
+
+
+def unverified_mutation_projection(state: MutationState) -> dict[str, Any]:
+    no_write = state == "not_mutated"
+    result: dict[str, Any] = {
+        "ok": not no_write,
+        "status": (
+            "failed_no_mutation"
+            if no_write
+            else "committed_verification_pending"
+        ),
+        "verification": {
+            "state": "not_needed" if no_write else "pending",
+            "write_performed": (
+                False if no_write else True if state == "committed" else None
+            ),
+            "final_read": False,
+            "matched": None,
+        },
+        "recovery": {
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        },
+    }
+    if not no_write:
+        result["warnings"] = [
+            {
+                "code": "verification_pending",
+                "message": "The mutation may have committed; read before retrying.",
+            }
+        ]
+    return result
 
 
 @dataclass(frozen=True)
@@ -94,6 +133,12 @@ class MutationOutcomeUnknown(RuntimeError):
     """The Adapter failed after dispatch, so commit state cannot be assumed."""
 
 
+class MutationOutcomeRejected(AdapterContractError):
+    def __init__(self, message: str, mutation_state: MutationState) -> None:
+        super().__init__(message)
+        self.mutation_state = mutation_state
+
+
 @dataclass(frozen=True)
 class ExactRead:
     reminder: dict[str, Any]
@@ -105,6 +150,7 @@ class ChangeResult:
     receipt: dict[str, Any]
     reference: str | None
     final_reminder: dict[str, Any] | None
+    mutation_state: MutationState
     reference_error: str | None = None
 
 
@@ -132,6 +178,80 @@ RECEIPT_STATUSES = frozenset(
     }
 )
 REFERENCE_ELIGIBLE_STATUSES = frozenset({"unchanged", "verified"})
+
+
+def _timestamp_matches(expected: str, actual: str) -> bool:
+    try:
+        expected_date = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+        actual_date = datetime.fromisoformat(actual.replace("Z", "+00:00"))
+    except ValueError:
+        return expected == actual
+    if expected_date.tzinfo is None or actual_date.tzinfo is None:
+        return expected == actual
+    return expected_date.astimezone(timezone.utc) == actual_date.astimezone(
+        timezone.utc
+    )
+
+
+def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
+    if field in {"alarms", "recurrence_rules"} and expected is None:
+        return actual is None or actual == [] or actual == ()
+    if isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping):
+            return False
+        return all(
+            key in actual
+            and _requested_value_matches(
+                value,
+                actual[key],
+                field=f"{field}.{key}",
+            )
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(expected) != len(actual):
+            return False
+        unmatched = list(actual)
+        for expected_item in expected:
+            for index, actual_item in enumerate(unmatched):
+                if _requested_value_matches(
+                    expected_item,
+                    actual_item,
+                    field=f"{field}[]",
+                ):
+                    unmatched.pop(index)
+                    break
+            else:
+                return False
+        return True
+    if (
+        field.endswith("date_time")
+        and isinstance(expected, str)
+        and isinstance(actual, str)
+    ):
+        return _timestamp_matches(expected, actual)
+    return actual == expected
+
+
+def reminder_matches_fields(
+    reminder: Mapping[str, Any],
+    expected_fields: Mapping[str, Any],
+) -> bool:
+    return all(
+        field in reminder
+        and _requested_value_matches(expected, reminder[field], field=field)
+        for field, expected in expected_fields.items()
+    )
+
+
+def reminder_matches_action(reminder: Mapping[str, Any], action: CoreAction) -> bool:
+    if isinstance(action, PatchAction):
+        return reminder_matches_fields(reminder, action.patch)
+    if isinstance(action, SetCompletionAction):
+        return reminder.get("completed") is action.completed
+    if isinstance(action, MoveToListAction):
+        return reminder.get("list_id") == action.list_id
+    return False
 
 
 class CoreModule:
@@ -272,18 +392,27 @@ class CoreModule:
             self._references.pop(reference, None)
         try:
             receipt = self._validated_receipt(outcome)
-        except AdapterContractError:
+        except AdapterContractError as exc:
             self._references.pop(reference, None)
-            raise
+            raise MutationOutcomeRejected(
+                str(exc),
+                outcome.mutation_state,
+            ) from exc
         if outcome.mutation_state == "unknown":
             return ChangeResult(
                 receipt=receipt,
                 reference=None,
                 final_reminder=None,
+                mutation_state=outcome.mutation_state,
                 reference_error="mutation_outcome_unknown",
             )
         if receipt["status"] not in REFERENCE_ELIGIBLE_STATUSES:
-            return ChangeResult(receipt=receipt, reference=None, final_reminder=None)
+            return ChangeResult(
+                receipt=receipt,
+                reference=None,
+                final_reminder=None,
+                mutation_state=outcome.mutation_state,
+            )
         try:
             final_snapshot = self._read_snapshot(grant.guard.reminder_id)
         except Exception:
@@ -291,7 +420,17 @@ class CoreModule:
                 receipt=receipt,
                 reference=None,
                 final_reminder=None,
+                mutation_state=outcome.mutation_state,
                 reference_error="final_read_failed",
+            )
+        if not reminder_matches_action(final_snapshot.reminder, action):
+            self._references.pop(reference, None)
+            return ChangeResult(
+                receipt=receipt,
+                reference=None,
+                final_reminder=None,
+                mutation_state=outcome.mutation_state,
+                reference_error="final_state_mismatch",
             )
         replacement = self._issue_reference(final_snapshot)
         self._references.pop(reference, None)
@@ -299,6 +438,7 @@ class CoreModule:
             receipt=receipt,
             reference=replacement,
             final_reminder=copy.deepcopy(dict(final_snapshot.reminder)),
+            mutation_state=outcome.mutation_state,
         )
 
     @staticmethod

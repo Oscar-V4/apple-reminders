@@ -1,0 +1,67 @@
+# Apple Reminders workflow capability matrix
+
+This matrix audits the current checked-out public interface as composed user journeys. The live source of truth for tool names and closed actions is `plugins/apple-reminders/schemas/mcp-tools.json`; this document records the safe workflow around that interface.
+
+## Evidence boundary
+
+- Repository validation proves schemas, contracts, skills, synthetic receipts, and packaging behavior. It does not by itself prove a macOS permission prompt, current Reminders UI order, iCloud convergence, shared-list delivery, or iPhone rendering.
+- A local UI observation proves only the visible state on that Mac at that time. Record the observation basis and exact Reminder IDs; never turn it into a generic platform guarantee.
+- Core Reminder operations use EventKit. Recently Deleted inspection and recovery use the local Reminders store plus private ReminderKit frameworks. That recovery surface is macOS-only, version-sensitive, and expected to fail closed when the compatible private framework or store schema is unavailable.
+- Recently Deleted eligibility is bounded by Apple's 30-day retention window. Expired or already-purged items are not recoverable through this interface.
+
+## Classification
+
+| Class | Meaning |
+| --- | --- |
+| **Supported** | The public interface has an exact selector, bounded contract, truthful receipt, and regression coverage. |
+| **Supported with platform boundary** | The workflow is public but depends on compatible local macOS private frameworks or local-only evidence. |
+| **Unsafe composition** | Individually valid calls become unsafe when ordered or scoped incorrectly. |
+| **Intentional boundary** | The capability is deliberately absent; the workflow must state the limit and fail closed. |
+
+## Capability and workflow matrix
+
+| Journey or capability | Classification | Current contract | Boundary or follow-up |
+| --- | --- | --- | --- |
+| Reminder create → exact read | **Supported** | `create_reminder` requires an exact `list_id` and idempotency key. A verified result contains final exact state and may issue a fresh `rev1`. | Local verification is not remote-device convergence. |
+| Exact read → change → read | **Supported** | `read_reminder` issues an opaque `rev1`; `change_reminder` supports one `patch`, `set_completion`, or `move_to_list` action. Omitted fields stay unchanged. | Re-read immediately before each mutation and stop on stale, pending, partial, or manual-repair results. |
+| Exact read → delete | **Supported** | `delete_reminder` requires a fresh `rev1` and verifies local EventKit absence. | Deletion alone does not prove the Reminders UI, retention duration, or later recoverability. |
+| Recently Deleted list → exact item | **Supported with platform boundary** | `inspect_recently_deleted {kind:"list"}` returns a bounded local page without writable references. Its opaque Recently Deleted cursor binds the identical account and limit plus the ordered deleted-item identity/revision snapshot; `kind:"item"` re-reads one exact ID and issues a short-lived opaque `del1`. | On `pagination_snapshot_stale`, discard all collected pages and restart without a cursor. Local macOS/private-framework and 30-day-retention boundary. A list result is not authority to recover an item. |
+| Exact deleted item → recover | **Supported with platform boundary** | `recover_deleted_reminder` consumes one fresh `del1`, exact destination `list_id`, and idempotency key. It preserves the Reminder identity, requires a compatible same-account destination, verifies attachments natively, and requires exact EventKit read-back for `verified`. | A `del1` is one-use and expires; inspect the exact item again after rejection. Never decode it or substitute a `rev1`. No automatic retry after an unknown outcome. |
+| UI-relative selection such as “top four” | **Supported only with an explicit evidence basis** | Literal UI-relative selection requires direct current-UI observation and exact row-to-ID resolution. If unavailable, show the proposed list/filter/status/sort and use an API snapshot only after the user explicitly approves that reinterpretation. | UI order and API order are different evidence. Stop when duplicate display values prevent exact UI-to-ID resolution. Snapshot-safe pagination still does not replace exact item revalidation before a write. |
+| Cross-reminder image copy | **Supported with platform boundary** | `change_reminder_attachment` action `copy_image` takes a fresh destination `reference`, fresh `source_reference`, exact active source image `attachment_id`, and idempotency key. Both references are consumed as one-use preconditions after dispatch even though the source is unchanged. Success requires exact destination read-back. | This is a guarded native copy, not image export, and depends on compatible local private interfaces. Both Reminders must be active and exact; source bytes must decode as bounded PNG/JPEG; recover a deleted source first and re-read both sides before each copy. |
+| “Consolidate, then delete sources” | **Unsafe composition unless dependency-first** | Clarify whether the user wants separate copied attachments on one Reminder (supported) or one composited bitmap (unsupported). Inspect exact sources and destination, copy and verify each agreed image, then delete exact sources one at a time only under separate deletion authority. | “Organize” alone does not authorize deletion. Recovery is an exact post-deletion operation, not a planning substitute for preserving dependencies. Stop before deletion when any transfer is unresolved. |
+| Broad cleanup | **Supported with operational bounds** | Discover summaries first, review/authorize the exact scope, then choose 25–40 candidates per chunk. Obtain each `rev1` just in time, write one item, read it back, and discard the reference before the next item. | The final chunk may be smaller. Halt the run on the first ambiguity, stale state, pending/partial/manual-repair receipt, or failure. Refresh summaries between verified chunks. |
+| Completed brief | **Supported** | `fetch_reminders` uses `status=completed` with explicit `completion_start` and `completion_end` no wider than 90 days. The renderer receives the same bounds and renders a separate Completed section. | Completed items are not mixed into active due buckets. |
+| Timed due and priority display | **Supported** | Timed due values preserve the local clock and IANA timezone. Human priority labels map Apple/EventKit 1–4 to high, 5 to medium, and 6–9 to low while retaining the numeric value. | `0` means no priority; bare `pN` labels are not user-facing semantics. |
+| Reminder List CRUD | **Supported subset / Intentional boundary** | Read lists and create-or-return one exact-name list in an exact account with `ensure_reminder_list`. | Rename, delete, color, and emblem writes are not public. |
+| Section CRUD | **Supported subset / Intentional boundary** | Inspect exact-list sections, create one section, and move an exact Reminder within its current list. | Section names are list-scoped. Rename and delete are not public. |
+| Tag CRUD | **Supported subset / Intentional boundary** | Inspect bounded labels and add/remove assignments on exact Reminders. | Global unused-label row deletion is not public. |
+| Attachment CRUD | **Supported subset / Intentional boundary** | Inspect metadata; attach, copy, replace, or delete exact image/URL attachments through closed actions. | Raw attachment export/download, bulk repair apply, and direct private-path access are not public. |
+| Dates, alarms, recurrence | **Supported subset / Intentional boundary** | Typed all-day/timed due values, explicit absolute or coordinate-backed location alarms, and one validated recurrence rule are public. | Due and alarm intent remain distinct. Relative and messaging alarms are not public. |
+| Pagination | **Supported with snapshot drift detection** | An opaque v3 cursor binds identical filters/sort/limit plus a cursor-contained SHA-256 fingerprint of the ordered Reminder IDs and revisions. Every next-page fetch recomputes it. | The digest is not a secret or a standalone result field. Membership or revision drift fails without mutation as `concurrent_modification` / `pagination_snapshot_stale`; restart from page one. The fingerprint is not a write precondition, so each mutation still requires a just-in-time exact read. |
+| Permission handling | **Supported** | On `permission_denied`, request Reminders access once and retry the original operation once. | Report a prompt only when it was directly observed. Stop after denial. |
+| Pending and partial receipts | **Supported safety boundary** | `committed_verification_pending`, `partial_success`, and `failed_manual_repair_required` preserve uncertainty and return a read-only resolution step. | Never replay a write automatically or continue a destructive chain. |
+| Sync and device claims | **Supported evidence boundary** | Report only the returned local/native/CloudKit evidence. | `mobile_visible_likely` is not direct iPhone confirmation or guaranteed iCloud convergence. |
+| Diagnostics and maintenance | **Intentional boundary** | `diagnose_reminders` is content-free and read-only. | Native flag mutation, raw SQLite writes, backup/Snapshot apply, bulk repair apply, log purge, and native `show_reminder` are not public operations. |
+| Minis/iOS surface | **Intentional boundary** | The portable Minis export supports its documented list/reminder subset. | It does not inherit macOS Native Extension, Recently Deleted, section, tag, or attachment capabilities. |
+
+## Representative workflow: top four, recover, and consolidate images
+
+1. Establish the selection basis. For literal UI-relative “top,” observe the current Reminders UI, resolve every visible row to one exact ID, and record the observation time. Stop on duplicate or ambiguous row-to-ID mapping. If UI observation is unavailable, stop and obtain explicit agreement before substituting one bounded API result with an exact list/filter, supported sort, `limit=4`, returned IDs, and truncation state. Never label one basis as the other.
+2. Clarify whether “one image” means multiple separate copied attachments on one destination Reminder or a newly composited bitmap; only the former is public. If the sources are already deleted, page the bounded Recently Deleted inventory with the identical account/limit, restarting from page one on snapshot drift. Inspect every chosen item again by exact ID immediately before recovery, match its `account_id` to the destination `source.id`, then recover one at a time with a fresh `del1` and unique idempotency key.
+3. Read every active source and the destination. Inspect the exact source image attachment IDs and destination attachment state.
+4. Copy images to the destination one at a time with `copy_image`, using fresh source and destination `rev1` references. Both input references are consumed after dispatch. Require a verified destination read-back after each copy, use the returned fresh destination reference for the next copy, and re-read the source before another copy.
+5. If deletion was separately and exactly authorized, re-read every source after all copies are verified, then delete exact sources one at a time. “Organize” is not deletion authority. Stop the whole chain on the first uncertain outcome.
+6. Report local UI evidence, API evidence, native recovery evidence, and device/sync evidence separately. A successful run on one Mac is product evidence for that tested environment, not a compatibility promise for every macOS release or account.
+
+The ordering is dependency-first: preserve and verify required data before any avoidable destructive step. When deletion already occurred, recovery is an exact guarded repair path rather than a reason to weaken that ordering.
+
+## Evidence index
+
+- `plugins/apple-reminders/schemas/mcp-tools.json`: public tools, closed actions, selectors, bounds, and reference formats.
+- `plugins/apple-reminders/mcp/v2_contract.py`: envelope, receipt, reference, and uncertainty validation.
+- `plugins/apple-reminders/mcp/v2_recovery.py`: opaque `del1` lifetime, one-use semantics, and public/private data boundary.
+- `plugins/apple-reminders/skills/*/SKILL.md`: agent-executed workflow policy.
+- `tests/test_workflow_hardening.py`: static drift checks for this matrix and the representative journey.
+- Apple documents automatic and manual Reminders list ordering, which is why an API sort cannot stand in for observed UI order: <https://support.apple.com/guide/reminders/sort-reminders-remn922d0b42/mac>.
+- Apple documents the user-facing 30-day Recently Deleted window for Reminders on Mac: <https://support.apple.com/guide/reminders/delete-reminders-remna83c9566/mac>.

@@ -1,4 +1,4 @@
-# Apple Reminders 0.3 Public Interface
+# Apple Reminders public interface
 
 Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers, and private store are implementation details; do not invoke their writes as fallbacks.
 
@@ -10,7 +10,7 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 - `read_reminder {reminder_id}`: return one exact Core projection and opaque `rev1` reference.
 - `create_reminder {list_id, title, idempotency_key, ...fields}`: create once and return final exact state plus a fresh reference when verified.
 - `change_reminder {reference, action}`: patch fields, set completion, or move to another list.
-- `delete_reminder {reference}`: delete through EventKit and require exact local-absence evidence.
+- `delete_reminder {reference}`: delete through EventKit and require exact local-absence evidence. That receipt does not itself prove UI state or future recoverability.
 - `ensure_reminder_list {source_id, name, idempotency_key}`: return an exact existing list or create it in that account. Color and emblem are not public fields.
 
 `change_reminder.action` is exactly one of:
@@ -23,24 +23,54 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 
 Omitted patch fields remain unchanged. `null` clears only fields whose input schema permits null; inspect the live tool schema instead of assuming clear behavior.
 
+## Selection and destructive composition
+
+- “Top,” “first,” and “visible” are evidence-relative. A literal UI-relative request requires direct observation of the current Reminders UI and exact row-to-ID resolution. If that is unavailable, stop and show the proposed `fetch_reminders` scope/sort; capture that bounded API snapshot only after the user explicitly accepts API order as a reinterpretation. Stop on duplicate UI-to-ID mapping. State which basis was used; API order is not current UI order.
+- A v3 cursor is reusable only with identical filters, sort, and limit. It privately binds the ordered Reminder IDs and revisions; a later membership/revision change fails the page read as `concurrent_modification` / `pagination_snapshot_stale`. Discard the partial paged set and restart without a cursor. Re-read every exact item immediately before mutation because the pagination fingerprint is not a write precondition.
+- Finish and verify every non-destructive dependency before source deletion. For attachment consolidation, copy each exact image to the destination and verify it there before obtaining fresh source references and deleting one source at a time.
+
+## Recently Deleted recovery
+
+- `inspect_recently_deleted {kind:"list", account_id?, limit?, cursor?}`: return a bounded local inventory. Its opaque Recently Deleted cursor binds the identical account and limit plus the ordered deleted-item identity/revision snapshot. On `pagination_snapshot_stale`, discard the partial inventory and restart without a cursor. List mode issues no recovery reference and no full attachment list.
+- `inspect_recently_deleted {kind:"item", reminder_id, attachment_limit?}`: re-read one exact deleted Reminder, verify available image backing bytes, capture private-store and native ReminderKit snapshot guards, return bounded attachment metadata, and issue one opaque `del1` recovery reference. Missing integrity evidence fails closed and issues no Reference.
+- `recover_deleted_reminder {reference, list_id, idempotency_key}`: consume a fresh `del1` and recover that exact Reminder into an exact compatible same-account list. `verified` requires a matched native pre-save guard, equal pre/native/post attachment counts, actual image-byte SHA-512 preservation, and an exact active EventKit read-back.
+
+`del1` is distinct from `rev1`: it is short-lived, one-use, opaque, and valid only for the deleted snapshot that issued it. Inspect the exact item again after an expired, consumed, or stale-token result. Do not automatically retry an unknown recovery outcome.
+
+The deleted item's `account_id` and a destination Reminder List's `source.id` identify the same account boundary used by recovery. Compare those exact values before choosing among duplicate list titles.
+
+This recovery surface is bounded by the local 30-day Recently Deleted retention window and depends on compatible private ReminderKit frameworks and local Reminders store schema. It is macOS-only and version-sensitive. A successful local UI observation or recovery run is evidence for that Mac and moment, not a generic platform, account, iCloud, or iPhone guarantee.
+
 ## Native Extension
 
 - `inspect_reminder_native`: use `kind=reminder` with a reference and requested `include` values; `kind=sections` with exact `list_id`; or `kind=tags` with an optional account/query bound.
 - `create_reminder_section {list_id, name}`: create or repair one exact-list section with native read-back evidence.
 - `organize_reminder {reference, action}`: `move_to_section`, `add_tag`, or `remove_tag`.
-- `change_reminder_attachment {reference, action}`: attach/replace an image or URL, or delete an exact attachment ID.
+- `change_reminder_attachment {reference, action}`: attach/copy/replace an image or URL, or delete an exact attachment ID.
 
 Attachment actions are:
 
 ```json
 {"kind":"attach_image","image_path":"/absolute/input.png","idempotency_key":"…"}
 {"kind":"attach_url","url":"https://example.com"}
+{"kind":"copy_image","source_reference":"rev1.…","attachment_id":"EXACT-SOURCE-IMAGE-ID","idempotency_key":"…"}
 {"kind":"replace_image","attachment_id":"…","image_path":"/absolute/input.jpg","idempotency_key":"…"}
 {"kind":"replace_url","attachment_id":"…","url":"https://example.com","idempotency_key":"…"}
 {"kind":"delete","attachment_id":"…"}
 ```
 
-Native mutation starts by revalidating the opaque Core reference, then captures its private concurrency value internally. Callers never choose between EventKit and private revisions.
+Native mutation starts by revalidating the opaque Core reference, then captures its private concurrency value internally. `copy_image` revalidates both active source and destination references, leaves the source unchanged, and verifies the exact destination after copying a private byte snapshot. Source bytes must decode as bounded PNG or JPEG; no HEIC or other-format conversion is implied. Both input references are consumed as one-use preconditions after dispatch; re-read the source before another copy and use the returned fresh destination reference. Callers never choose between EventKit and private revisions or receive a private attachment path.
+
+## Intended CRUD boundaries
+
+| Resource | Public operations | Intentional boundary |
+| --- | --- | --- |
+| Reminder | list/read/create/change/complete/move/delete; exact Recently Deleted recovery | no title-only mutation or bulk write without bounded review |
+| Reminder List | list and exact-account create-or-return | no rename, delete, color, or emblem write |
+| Section | exact-list inspect/create and Reminder move | no rename or delete; names are list-scoped |
+| Tag | bounded inspect and exact Reminder assignment add/remove | no global unused-label row deletion |
+| Attachment | inspect metadata; attach/copy/replace/delete closed actions | no raw export/download, private path disclosure, or bulk repair apply |
+| Due/alarm/recurrence | typed due, explicit supported alarms, one validated recurrence rule | no invented alarm, relative alarm, or messaging alarm |
 
 ## Diagnostics
 
@@ -57,6 +87,10 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 Only `unchanged` and `verified` may include a writable `rev1` reference. Never decode a reference or infer a Reminder ID from a rejected token.
 
-## Withheld from 0.3
+For Core URL A-to-B workflows, a later same-B retry that sees native B plus another URL returns `failed_no_mutation/ambiguous_visible_url_attachment` rather than hiding unresolved A+B state. It issues no fresh writable Reference: call `read_reminder`, inspect native attachments with the new Reference, and clean up only one exact user-intended attachment ID.
 
-Native flag mutation, exact UI selection, unused-label row deletion, attachment repair apply, backup/Snapshot apply, restore, and log purge are not public tools. A user request for one of these may receive a read-only diagnosis or proposal, but not an adapter/SQLite/AppleScript fallback write.
+Broad cleanup uses 25–40 candidates per authorized chunk, with the final remainder allowed to be smaller. References are just-in-time: read one exact item, perform its approved action, verify it, discard its reference, and stop the whole run on the first uncertainty before moving to another item or chunk.
+
+## Withheld
+
+Native flag mutation, MCP-level UI selection/order, unused-label row deletion, attachment export/download, attachment repair apply, backup/Snapshot apply, list/section rename or deletion, and log purge are not public tools. A user request for one of these may receive a read-only diagnosis or proposal, but not an adapter/SQLite/AppleScript/UI-automation fallback write.

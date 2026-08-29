@@ -60,6 +60,16 @@
         "Does not disable duplicate protection.",
         "Does not start a large write batch."
       ]
+    },
+    {
+      "id": 7,
+      "category": "should_not_activate",
+      "prompt": "최근 삭제된 치과 예약을 다시 살려줘.",
+      "expected_output": "Routes to exact Recently Deleted inspection and recovery so the original Reminder identity and attachments can be preserved instead of creating a replacement Reminder.",
+      "assertions": [
+        "Does not call create_reminder as a substitute for recovery.",
+        "Requires an exact deleted-item identity before mutation."
+      ]
     }
   ]
 }

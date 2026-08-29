@@ -21,7 +21,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -35,17 +35,27 @@ if str(MCP_DIR) not in sys.path:
 from receipt_contract import (  # noqa: E402
     adapter_receipt_error,
 )
-from v2_contract import (  # noqa: E402
-    MUTATION_TOOLS as V2_MUTATION_TOOLS,
-    PUBLIC_TOOLS as V2_PUBLIC_TOOLS,
-    PublicResultContractError,
-    validate_public_result,
-)
+if __package__:  # Package import in tests; script-local import in the launcher.
+    from .v2_contract import (  # noqa: E402
+        MUTATION_TOOLS as V2_MUTATION_TOOLS,
+        PUBLIC_TOOLS as V2_PUBLIC_TOOLS,
+        PublicResultContractError,
+        validate_public_result,
+    )
+    from .v2_transport import DispatchCertainty, TransportResult  # noqa: E402
+else:  # pragma: no cover - exercised by the stdio entry point
+    from v2_contract import (  # noqa: E402
+        MUTATION_TOOLS as V2_MUTATION_TOOLS,
+        PUBLIC_TOOLS as V2_PUBLIC_TOOLS,
+        PublicResultContractError,
+        validate_public_result,
+    )
+    from v2_transport import DispatchCertainty, TransportResult  # noqa: E402
 
 
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
-SERVER_VERSION = "0.3.1"
+SERVER_VERSION = "0.4.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     LATEST_PROTOCOL_VERSION,
@@ -71,7 +81,6 @@ DEFAULT_BACKEND_PATHS = BackendPaths(
     eventkit_bridge=DEFAULT_EVENTKIT_BRIDGE_PATH,
     doctor=DEFAULT_DOCTOR_PATH,
 )
-_ACTIVE_BACKEND_PATHS = DEFAULT_BACKEND_PATHS
 
 ADAPTER_TIMEOUT_SECONDS = 45
 EVENTKIT_BRIDGE_TIMEOUT_SECONDS = 80
@@ -143,6 +152,17 @@ ROUTES: dict[str, ToolRoute] = {
         options=(
             ("reminder_id", "--id"),
             ("image_path", "--image"),
+            ("if_version", "--if-version"),
+            ("idempotency_key", "--idempotency-key"),
+        ),
+    ),
+    "copy_image_attachment": ToolRoute(
+        command="copy_image_attachment",
+        options=(
+            ("source_reminder_id", "--source-id"),
+            ("reminder_id", "--id"),
+            ("attachment_id", "--attachment-id"),
+            ("if_source_version", "--if-source-version"),
             ("if_version", "--if-version"),
             ("idempotency_key", "--idempotency-key"),
         ),
@@ -220,73 +240,16 @@ def load_tools(path: Path = TOOLS_SCHEMA_PATH) -> list[dict[str, Any]]:
         names.add(name)
     if names != set(V2_PUBLIC_TOOLS):
         raise RuntimeError(
-            "Public v2 tool definitions do not match the 13-tool runtime surface"
+            "Public v2 tool definitions do not match the "
+            f"{len(V2_PUBLIC_TOOLS)}-tool runtime surface"
         )
     return tools
 
 
 TOOLS = load_tools()
 TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
-RECENT_CALLS: deque[float] = deque()
-SESSION_INITIALIZED = False
 _ADAPTER_MODULE: Any | None = None
 _EVENTKIT_BRIDGE_MODULE: Any | None = None
-_V2_CORE_FACADE: Any | None = None
-_V2_NATIVE_FACADE: Any | None = None
-_V2_DIAGNOSTICS_FACADE: Any | None = None
-_V2_CORE_TYPES_LOADED = False
-_V2_NATIVE_TYPES_LOADED = False
-_V2_DIAGNOSTICS_TYPES_LOADED = False
-
-
-def _ensure_v2_core_types() -> None:
-    """Load the Core Module only when a Core tool is first called."""
-
-    global _V2_CORE_TYPES_LOADED
-    if _V2_CORE_TYPES_LOADED:
-        return
-    from v2_core import (  # noqa: PLC0415
-        V2CoreFacade as _V2CoreFacade,
-    )
-    from v2_core_backend import CoreBackend as _CoreBackend  # noqa: PLC0415
-
-    globals().update(
-        {
-            "V2CoreFacade": _V2CoreFacade,
-            "CoreBackend": _CoreBackend,
-        }
-    )
-    _V2_CORE_TYPES_LOADED = True
-
-
-def _ensure_v2_native_types() -> None:
-    """Load the Native Extension Module only for a native tool call."""
-
-    global _V2_NATIVE_TYPES_LOADED
-    if _V2_NATIVE_TYPES_LOADED:
-        return
-    from v2_native import NativeFacade as _NativeFacade  # noqa: PLC0415
-    from v2_native_backend import NativeBackend as _NativeBackend  # noqa: PLC0415
-
-    globals().update(
-        {
-            "NativeFacade": _NativeFacade,
-            "NativeBackend": _NativeBackend,
-        }
-    )
-    _V2_NATIVE_TYPES_LOADED = True
-
-
-def _ensure_v2_diagnostics_types() -> None:
-    """Load the content-free Diagnostics Module only on demand."""
-
-    global _V2_DIAGNOSTICS_TYPES_LOADED
-    if _V2_DIAGNOSTICS_TYPES_LOADED:
-        return
-    from v2_diagnostics import DiagnosticsFacade as _DiagnosticsFacade  # noqa: PLC0415
-
-    globals()["DiagnosticsFacade"] = _DiagnosticsFacade
-    _V2_DIAGNOSTICS_TYPES_LOADED = True
 
 
 class ToolInputError(ValueError):
@@ -529,6 +492,7 @@ def build_adapter_argv(tool_name: str, arguments: dict[str, Any]) -> list[str]:
 
 
 PRIVATE_RESULT_KEYS = {
+    "__dispatch_phase",
     "db",
     "database",
     "database_path",
@@ -566,18 +530,6 @@ def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return walk(payload, "")
 
 
-def adapter_path() -> Path:
-    return _ACTIVE_BACKEND_PATHS.adapter
-
-
-def eventkit_bridge_path() -> Path:
-    return _ACTIVE_BACKEND_PATHS.eventkit_bridge
-
-
-def doctor_path() -> Path:
-    return _ACTIVE_BACKEND_PATHS.doctor
-
-
 def _load_local_module(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -608,18 +560,23 @@ def bundled_eventkit_bridge_module() -> Any:
     return _EVENTKIT_BRIDGE_MODULE
 
 
-def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
-    path = adapter_path()
+def invoke_adapter(
+    argv: list[str],
+    *,
+    backend_paths: BackendPaths = DEFAULT_BACKEND_PATHS,
+) -> TransportResult:
+    path = backend_paths.adapter
     if not path.is_file():
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "adapter_unavailable",
                     "message": "The bundled Reminders adapter is unavailable.",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
         )
     try:
         completed = subprocess.run(
@@ -632,45 +589,48 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "adapter_timeout",
                     "message": "The Reminders adapter timed out before returning a result.",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
     except OSError as exc:
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
-                    "code": "adapter_launch_failed",
-                    "message": f"The Reminders adapter could not start ({type(exc).__name__}).",
+                    "code": "adapter_process_failed",
+                    "message": f"The Reminders adapter failed before returning ({type(exc).__name__}).",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
 
     stdout = completed.stdout.strip()
     if len(stdout.encode("utf-8", errors="replace")) > MAX_ADAPTER_STDOUT_BYTES:
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "adapter_output_too_large",
                     "message": "The Reminders adapter result exceeded the MCP output bound.",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "invalid_adapter_response",
@@ -678,16 +638,32 @@ def invoke_adapter(argv: list[str]) -> tuple[dict[str, Any], bool]:
                     "exit_code": completed.returncode,
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
     if not isinstance(payload, dict):
-        payload = {"ok": completed.returncode == 0, "result": payload}
+        payload = {
+            "ok": completed.returncode == 0,
+            "result": payload,
+        }
+    else:
+        payload = dict(payload)
+        # Dispatch provenance belongs to this launcher, never to child JSON.
+        payload.pop("__dispatch_phase", None)
     is_error = payload.get("ok") is not True
-    return payload, is_error
+    return TransportResult(
+        payload=payload,
+        is_error=is_error,
+        dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+    )
 
 
-def invoke_doctor(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    path = doctor_path()
+def invoke_doctor(
+    arguments: dict[str, Any],
+    *,
+    backend_paths: BackendPaths = DEFAULT_BACKEND_PATHS,
+) -> tuple[dict[str, Any], bool]:
+    path = backend_paths.doctor
     if not path.is_file():
         return (
             {
@@ -778,18 +754,24 @@ def invoke_doctor(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return payload, False
 
 
-def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    path = eventkit_bridge_path()
+def invoke_eventkit_bridge(
+    operation: str,
+    arguments: dict[str, Any],
+    *,
+    backend_paths: BackendPaths = DEFAULT_BACKEND_PATHS,
+) -> TransportResult:
+    path = backend_paths.eventkit_bridge
     if not path.is_file():
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "eventkit_bridge_unavailable",
                     "message": "The bundled EventKit bridge is unavailable.",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
         )
     bridge_arguments = dict(arguments)
     # Account/calendar enumeration is bounded defensively after the bridge
@@ -804,7 +786,7 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
 
     def transport_failure(
         *, code: str, message: str, details: dict[str, Any] | None = None
-    ) -> tuple[dict[str, Any], bool]:
+    ) -> TransportResult:
         if operation in EVENTKIT_MUTATION_ROUTES.values():
             payload = bundled_eventkit_bridge_module().mutation_outcome_unknown_response(
                 request,
@@ -812,19 +794,28 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
                 message=message,
                 details=details,
             )
-            return payload, False
-        return {"ok": False, "error": {"code": code, "message": message}}, True
+            return TransportResult(
+                payload=payload,
+                is_error=False,
+                dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+            )
+        return TransportResult(
+            payload={"ok": False, "error": {"code": code, "message": message}},
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+        )
     encoded_request = json.dumps(request, ensure_ascii=False)
     if len(encoded_request.encode("utf-8")) > MAX_EVENTKIT_REQUEST_BYTES:
-        return (
-            {
+        return TransportResult(
+            payload={
                 "ok": False,
                 "error": {
                     "code": "eventkit_request_too_large",
                     "message": "The EventKit request exceeded the local bridge input bound.",
                 },
             },
-            True,
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
         )
     try:
         completed = subprocess.run(
@@ -844,15 +835,9 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             details={"timeout_seconds": EVENTKIT_BRIDGE_TIMEOUT_SECONDS},
         )
     except OSError as exc:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "eventkit_bridge_launch_failed",
-                    "message": f"The EventKit bridge could not start ({type(exc).__name__}).",
-                },
-            },
-            True,
+        return transport_failure(
+            code="eventkit_bridge_process_failed",
+            message=f"The EventKit bridge failed before returning ({type(exc).__name__}).",
         )
 
     stdout = completed.stdout.strip()
@@ -876,6 +861,9 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             message="The EventKit bridge response must be a JSON object.",
             details={"exit_code": completed.returncode},
         )
+    payload = dict(payload)
+    # Dispatch provenance belongs to this launcher, never to child JSON.
+    payload.pop("__dispatch_phase", None)
     try:
         bundled_eventkit_bridge_module().validate_response(payload, operation)
     except RuntimeError as exc:
@@ -885,72 +873,31 @@ def invoke_eventkit_bridge(operation: str, arguments: dict[str, Any]) -> tuple[d
             details={"exit_code": completed.returncode},
         )
     is_error = payload.get("ok") is not True
-    return payload, is_error
+    return TransportResult(
+        payload=payload,
+        is_error=is_error,
+        dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+    )
 
 
-def _v2_doctor_call(arguments: dict[str, Any]) -> dict[str, Any]:
-    payload, _ = invoke_doctor(arguments)
-    return payload
-
-
-def _v2_environment_fingerprint() -> str:
+def _v2_environment_fingerprint(
+    backend_paths: BackendPaths = DEFAULT_BACKEND_PATHS,
+) -> str:
     facts: list[str] = [
         sys.platform,
         f"{sys.version_info.major}.{sys.version_info.minor}",
     ]
-    for path in (adapter_path(), eventkit_bridge_path(), doctor_path()):
+    for path in (
+        backend_paths.adapter,
+        backend_paths.eventkit_bridge,
+        backend_paths.doctor,
+    ):
         try:
             stat = path.stat()
             facts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
         except OSError:
             facts.append(f"{path.name}:missing")
     return hashlib.sha256("\n".join(facts).encode("utf-8")).hexdigest()
-
-
-def _v2_core_facade() -> V2CoreFacade:
-    global _V2_CORE_FACADE
-    _ensure_v2_core_types()
-    if _V2_CORE_FACADE is None:
-        backend = CoreBackend(
-            bridge_call=invoke_eventkit_bridge,
-            adapter_call=invoke_adapter,
-            build_adapter_argv=build_adapter_argv,
-            adapter_module=bundled_adapter_module,
-            bridge_module=bundled_eventkit_bridge_module,
-            receipt_validator=validate_adapter_receipt,
-        )
-        _V2_CORE_FACADE = V2CoreFacade(backend)
-    return _V2_CORE_FACADE
-
-
-def _v2_native_facade() -> NativeFacade:
-    global _V2_NATIVE_FACADE
-    _ensure_v2_native_types()
-    if _V2_NATIVE_FACADE is None:
-        backend = NativeBackend(
-            bridge_call=invoke_eventkit_bridge,
-            adapter_call=invoke_adapter,
-            build_adapter_argv=build_adapter_argv,
-            receipt_validator=validate_adapter_receipt,
-        )
-        _V2_NATIVE_FACADE = NativeFacade(
-            adapter_call=backend.adapter_call,
-            references=_v2_core_facade().reference_port,
-            native_read=backend.read,
-            native_mutation=backend.mutate,
-        )
-    return _V2_NATIVE_FACADE
-
-
-def _v2_diagnostics_facade() -> DiagnosticsFacade:
-    global _V2_DIAGNOSTICS_FACADE
-    _ensure_v2_diagnostics_types()
-    if _V2_DIAGNOSTICS_FACADE is None:
-        _V2_DIAGNOSTICS_FACADE = DiagnosticsFacade(
-            doctor_call=_v2_doctor_call,
-            environment_fingerprint=_v2_environment_fingerprint,
-        )
-    return _V2_DIAGNOSTICS_FACADE
 
 
 def validate_adapter_receipt(
@@ -961,32 +908,316 @@ def validate_adapter_receipt(
     return adapter_receipt_error(payload, expected_operation=expected_operation)
 
 
-def rate_limit_allows_call() -> bool:
-    now = time.monotonic()
-    while RECENT_CALLS and now - RECENT_CALLS[0] >= 60:
-        RECENT_CALLS.popleft()
-    if len(RECENT_CALLS) >= MAX_CALLS_PER_MINUTE:
-        return False
-    RECENT_CALLS.append(now)
-    return True
+@dataclass(frozen=True)
+class ToolOutcome:
+    """One Facade result plus the independent mutation fact when available."""
+
+    payload: dict[str, Any]
+    mutation_state: str | None
+
+
+class _LocalToolDispatch:
+    """Own one runtime's lazy Facade graph and immutable backend paths."""
+
+    def __init__(
+        self,
+        backend_paths: BackendPaths,
+        *,
+        facade_overrides: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._backend_paths = backend_paths
+        overrides = dict(facade_overrides or {})
+        self._core = overrides.get("core")
+        self._native = overrides.get("native")
+        self._recovery = overrides.get("recovery")
+        self._diagnostics = overrides.get("diagnostics")
+
+    def _adapter_call(self, argv: list[str]) -> TransportResult:
+        return invoke_adapter(argv, backend_paths=self._backend_paths)
+
+    def _bridge_call(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+    ) -> TransportResult:
+        return invoke_eventkit_bridge(
+            operation,
+            arguments,
+            backend_paths=self._backend_paths,
+        )
+
+    def _doctor_call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload, _ = invoke_doctor(arguments, backend_paths=self._backend_paths)
+        return payload
+
+    def core_facade(self) -> Any:
+        if self._core is None:
+            if __package__:
+                from .v2_core import V2CoreFacade  # noqa: PLC0415
+                from .v2_core_backend import CoreBackend  # noqa: PLC0415
+            else:  # pragma: no cover - exercised by the stdio entry point
+                from v2_core import V2CoreFacade  # noqa: PLC0415
+                from v2_core_backend import CoreBackend  # noqa: PLC0415
+
+            backend = CoreBackend(
+                bridge_call=self._bridge_call,
+                adapter_call=self._adapter_call,
+                build_adapter_argv=build_adapter_argv,
+                adapter_module=bundled_adapter_module,
+                bridge_module=bundled_eventkit_bridge_module,
+                receipt_validator=validate_adapter_receipt,
+            )
+            self._core = V2CoreFacade(backend)
+        return self._core
+
+    def native_facade(self) -> Any:
+        if self._native is None:
+            if __package__:
+                from .v2_native import NativeFacade  # noqa: PLC0415
+                from .v2_native_backend import NativeBackend  # noqa: PLC0415
+            else:  # pragma: no cover - exercised by the stdio entry point
+                from v2_native import NativeFacade  # noqa: PLC0415
+                from v2_native_backend import NativeBackend  # noqa: PLC0415
+
+            backend = NativeBackend(
+                bridge_call=self._bridge_call,
+                adapter_call=self._adapter_call,
+                build_adapter_argv=build_adapter_argv,
+                receipt_validator=validate_adapter_receipt,
+            )
+            self._native = NativeFacade(
+                adapter_call=backend.adapter_call,
+                section_mutation=backend.create_section,
+                references=self.core_facade().reference_port,
+                native_read=backend.read,
+                native_mutation=backend.mutate,
+                native_copy_mutation=backend.copy_image,
+            )
+        return self._native
+
+    def recovery_facade(self) -> Any:
+        if self._recovery is None:
+            if __package__:
+                from .v2_recovery import RecoveryFacade  # noqa: PLC0415
+                from .v2_recovery_backend import RecoveryBackend  # noqa: PLC0415
+            else:  # pragma: no cover - exercised by the stdio entry point
+                from v2_recovery import RecoveryFacade  # noqa: PLC0415
+                from v2_recovery_backend import RecoveryBackend  # noqa: PLC0415
+
+            self._recovery = RecoveryFacade(
+                RecoveryBackend(
+                    adapter_call=self._adapter_call,
+                    bridge_call=self._bridge_call,
+                    receipt_validator=validate_adapter_receipt,
+                )
+            )
+        return self._recovery
+
+    def diagnostics_facade(self) -> Any:
+        if self._diagnostics is None:
+            if __package__:
+                from .v2_diagnostics import DiagnosticsFacade  # noqa: PLC0415
+            else:  # pragma: no cover - exercised by the stdio entry point
+                from v2_diagnostics import DiagnosticsFacade  # noqa: PLC0415
+
+            self._diagnostics = DiagnosticsFacade(
+                doctor_call=self._doctor_call,
+                environment_fingerprint=lambda: _v2_environment_fingerprint(
+                    self._backend_paths
+                ),
+            )
+        return self._diagnostics
+
+    def __call__(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+    ) -> ToolOutcome:
+        if name in _V2_CORE_TOOLS:
+            facade = self.core_facade()
+        elif name in _V2_NATIVE_TOOLS:
+            facade = self.native_facade()
+        elif name in _V2_RECOVERY_TOOLS:
+            facade = self.recovery_facade()
+        elif name in _V2_DIAGNOSTIC_TOOLS:
+            facade = self.diagnostics_facade()
+        else:
+            raise RuntimeError(f"Public tool has no Facade owner: {name}")
+
+        call_with_state = getattr(type(facade), "call_with_state", None)
+        if callable(call_with_state):
+            payload, mutation_state = call_with_state(facade, name, arguments)
+        else:
+            if name in V2_MUTATION_TOOLS:
+                raise RuntimeError(
+                    "A mutation Facade must return independent mutation state"
+                )
+            payload = facade.call(name, arguments)
+            mutation_state = None
+        if not isinstance(payload, dict):
+            raise RuntimeError("A public Facade must return an object")
+        if name in V2_MUTATION_TOOLS:
+            if mutation_state not in {"not_mutated", "committed", "unknown"}:
+                raise RuntimeError(
+                    "A mutation Facade returned invalid independent mutation state"
+                )
+        elif mutation_state is not None:
+            raise RuntimeError("A read Facade must not return mutation state")
+        return ToolOutcome(payload=payload, mutation_state=mutation_state)
+
+
+_SUMMARY_TARGET_FIELDS = frozenset(
+    {
+        "account_id",
+        "attachment_id",
+        "calendar_id",
+        "id",
+        "list_id",
+        "new_attachment_id",
+        "old_attachment_id",
+        "reminder_id",
+        "section_id",
+        "source_attachment_id",
+        "source_id",
+        "source_reminder_id",
+    }
+)
+_SUMMARY_READ_ONLY_TOOLS = V2_PUBLIC_TOOLS - V2_MUTATION_TOOLS
+
+
+def _content_free_target(value: Any) -> dict[str, Any]:
+    """Project only stable target identifiers into the human text summary."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(name): item
+        for name, item in value.items()
+        if name in _SUMMARY_TARGET_FIELDS
+        and (item is None or isinstance(item, (str, int, bool)))
+    }
+
+
+def _summary_write_state(
+    status: Any,
+    verification: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    if verification is None:
+        return False, "not_applicable"
+    write_performed = verification.get("write_performed")
+    if write_performed is False:
+        return False, "not_mutated"
+    if status == "verified" and write_performed is True:
+        return True, "committed_and_verified"
+    if status == "committed_verification_pending" and write_performed is True:
+        return True, "committed_unverified"
+    if status == "partial_success":
+        return True, "partial"
+    if status == "failed_manual_repair_required" and write_performed is True:
+        return True, "committed_manual_repair_required"
+    if status == "failed_manual_repair_required":
+        return True, "committed_or_unknown"
+    return True, "unknown"
+
+
+def _summary_evidence_scope(
+    verification: Mapping[str, Any] | None,
+) -> str:
+    if verification is None:
+        return "bounded_public_read"
+    if verification.get("write_performed") is False:
+        return "affirmed_no_write"
+    if (
+        verification.get("state") == "read_back"
+        and verification.get("final_read") is True
+        and verification.get("matched") is True
+    ):
+        return "matched_exact_final_read"
+    if verification.get("final_read") is True:
+        return "partial_or_unmatched_final_read"
+    return "no_final_read"
+
+
+def _summary_next_read_only_action(
+    payload: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate = payload.get("next_action")
+    if isinstance(candidate, Mapping) and candidate.get("tool") in _SUMMARY_READ_ONLY_TOOLS:
+        return {
+            "kind": candidate.get("kind"),
+            "tool": candidate.get("tool"),
+            "retry_original_once": False,
+        }
+
+    operation = str(payload.get("operation") or "")
+    if isinstance(target.get("reminder_id"), str):
+        tool = "read_reminder"
+    elif isinstance(target.get("list_id"), str):
+        tool = (
+            "inspect_reminder_native"
+            if "section" in operation
+            else "fetch_reminders"
+        )
+    elif isinstance(target.get("source_id"), str):
+        tool = "list_reminder_lists"
+    else:
+        tool = "diagnose_reminders"
+    return {"kind": "fresh_read", "tool": tool, "retry_original_once": False}
 
 
 def _tool_result_summary(payload: Mapping[str, Any]) -> str:
+    status = payload.get("status")
+    data = payload.get("data")
+    diagnostic_attention = (
+        isinstance(data, Mapping)
+        and data.get("overall") in {"blocked", "degraded"}
+    )
+    needs_attention = (
+        status not in {"verified", "unchanged"}
+        or payload.get("ok") is not True
+        or isinstance(payload.get("error"), Mapping)
+        or diagnostic_attention
+    )
+    verification_raw = payload.get("verification")
+    verification = (
+        verification_raw if isinstance(verification_raw, Mapping) else None
+    )
+    may_have_mutated, write_state = _summary_write_state(status, verification)
+    target = _content_free_target(payload.get("target"))
     summary: dict[str, Any] = {
+        "outcome": "attention_required" if needs_attention else str(status),
         "operation": payload.get("operation"),
         "status": payload.get("status"),
         "ok": payload.get("ok"),
+        "needs_attention": needs_attention,
+        "may_have_mutated": may_have_mutated,
+        "write_state": write_state,
+        "evidence_scope": _summary_evidence_scope(verification),
+        "next_read_only_action": (
+            _summary_next_read_only_action(payload, target)
+            if needs_attention
+            else None
+        ),
     }
-    data = payload.get("data")
+    if target:
+        summary["target"] = target
+    if verification is not None:
+        summary["verification"] = {
+            name: verification.get(name)
+            for name in ("state", "write_performed", "final_read", "matched")
+            if name in verification
+        }
     if isinstance(data, Mapping):
-        for name in ("returned", "truncated", "has_more"):
+        for name in ("returned", "truncated", "has_more", "overall", "scope"):
             if name in data:
                 summary[name] = data[name]
     error = payload.get("error")
     if isinstance(error, Mapping):
         summary["error"] = {
             "code": error.get("code"),
-            "message": str(error.get("message") or "")[:500],
+            "reason_code": error.get("reason_code"),
+            "retryable": error.get("retryable"),
         }
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
@@ -1028,6 +1259,9 @@ _V2_NATIVE_TOOLS = frozenset(
     }
 )
 _V2_DIAGNOSTIC_TOOLS = frozenset({"diagnose_reminders"})
+_V2_RECOVERY_TOOLS = frozenset(
+    {"inspect_recently_deleted", "recover_deleted_reminder"}
+)
 
 
 def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
@@ -1053,6 +1287,7 @@ def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
                 "attach_url",
                 "replace_image",
                 "replace_url",
+                "copy_image",
                 "delete",
             }
             else "change_reminder_attachment.attach_image"
@@ -1081,6 +1316,8 @@ def _v2_public_target(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]
         return {"source_id": arguments.get("source_id"), "list_id": None}
     if name == "create_reminder_section":
         return {"list_id": arguments.get("list_id"), "section_id": None}
+    if name == "recover_deleted_reminder":
+        return {"list_id": arguments.get("list_id")}
     return {}
 
 
@@ -1136,29 +1373,16 @@ def _v2_pre_dispatch_failure(
     )
 
 
-def _v2_mutation_state(payload: Mapping[str, Any]) -> str | None:
-    status = payload.get("status")
-    if status in {"unchanged", "failed_no_mutation"}:
-        return "not_mutated"
-    if status == "verified":
-        return "committed"
-    if status in {
-        "committed_verification_pending",
-        "partial_success",
-        "failed_manual_repair_required",
-    }:
-        return "unknown"
-    return None
-
-
 def _v2_contract_failure(
     name: str,
     arguments: Mapping[str, Any],
     *,
-    may_have_mutated: bool,
+    mutation_state: str | None,
     message: str,
 ) -> tuple[dict[str, Any], str | None]:
-    if name in V2_MUTATION_TOOLS and may_have_mutated:
+    if name in V2_MUTATION_TOOLS and mutation_state in {"committed", "unknown"}:
+        from reminders_service import unverified_mutation_projection  # noqa: PLC0415
+
         recovery_tool = {
             "create_reminder": "fetch_reminders",
             "ensure_reminder_list": "list_reminder_lists",
@@ -1181,29 +1405,13 @@ def _v2_contract_failure(
         return (
             {
                 "schema_version": 2,
-                "ok": True,
-                "status": "committed_verification_pending",
+                **unverified_mutation_projection(mutation_state),
                 "operation": _v2_public_operation(name, arguments),
                 "operation_id": str(uuid.uuid4()),
                 "backend": _v2_public_backend(name, arguments),
                 "target": _v2_public_target(name, arguments),
                 "before": None,
                 "after": None,
-                "verification": {
-                    "state": "pending",
-                    "write_performed": None,
-                    "final_read": False,
-                },
-                "recovery": {
-                    "semantics": "read_before_retry",
-                    "automatic_retry_safe": False,
-                },
-                "warnings": [
-                    {
-                        "code": "verification_pending",
-                        "message": "The local result contract failed after a possible write.",
-                    }
-                ],
                 "error": {
                     "code": "sync_pending",
                     "reason_code": "public_result_contract_failed",
@@ -1217,7 +1425,7 @@ def _v2_contract_failure(
                     "message": recovery_message,
                 },
             },
-            "unknown",
+            mutation_state,
         )
     return _v2_pre_dispatch_failure(
         name,
@@ -1229,7 +1437,62 @@ def _v2_contract_failure(
     )
 
 
-def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
+class McpRuntime:
+    """One initialized MCP connection with isolated mutable runtime state."""
+
+    def __init__(
+        self,
+        backend_paths: BackendPaths = DEFAULT_BACKEND_PATHS,
+        *,
+        dispatch: Callable[[str, Mapping[str, Any]], ToolOutcome] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        max_calls_per_minute: int = MAX_CALLS_PER_MINUTE,
+    ) -> None:
+        if max_calls_per_minute <= 0:
+            raise ValueError("max_calls_per_minute must be positive")
+        self._dispatch = dispatch or _LocalToolDispatch(backend_paths)
+        self._clock = clock
+        self._max_calls_per_minute = max_calls_per_minute
+        self._recent_calls: deque[float] = deque()
+        self._initialized = False
+
+    def _rate_limit_allows_call(self) -> bool:
+        now = self._clock()
+        while self._recent_calls and now - self._recent_calls[0] >= 60:
+            self._recent_calls.popleft()
+        if len(self._recent_calls) >= self._max_calls_per_minute:
+            return False
+        self._recent_calls.append(now)
+        return True
+
+    def call_tool(self, name: str, raw_arguments: Any) -> dict[str, Any]:
+        return _call_tool(
+            name,
+            raw_arguments,
+            dispatch=self._dispatch,
+            rate_limit_allows_call=self._rate_limit_allows_call,
+        )
+
+    def handle(self, message: Any) -> dict[str, Any] | None:
+        try:
+            return _handle_message(self, message)
+        except Exception as exc:
+            request_id = message.get("id") if isinstance(message, dict) else None
+            print(f"{SERVER_NAME}: {type(exc).__name__}", file=sys.stderr)
+            return jsonrpc_error(
+                request_id,
+                JSONRPC_INTERNAL_ERROR,
+                "Internal server error",
+            )
+
+
+def _call_tool(
+    name: str,
+    raw_arguments: Any,
+    *,
+    dispatch: Callable[[str, Mapping[str, Any]], ToolOutcome],
+    rate_limit_allows_call: Callable[[], bool],
+) -> dict[str, Any]:
     tool = TOOLS_BY_NAME[name]
     supplied_for_error = raw_arguments if isinstance(raw_arguments, dict) else {}
     try:
@@ -1273,25 +1536,18 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
             )
         else:
             try:
-                if name in _V2_CORE_TOOLS:
-                    facade = _v2_core_facade()
-                elif name in _V2_NATIVE_TOOLS:
-                    facade = _v2_native_facade()
-                elif name in _V2_DIAGNOSTIC_TOOLS:
-                    facade = _v2_diagnostics_facade()
-                else:
-                    raise RuntimeError(f"Public tool has no facade owner: {name}")
-                payload = facade.call(name, arguments)
-                mutation_state = (
-                    _v2_mutation_state(payload)
-                    if name in V2_MUTATION_TOOLS
-                    else None
-                )
+                outcome = dispatch(name, arguments)
+                if not isinstance(outcome, ToolOutcome):
+                    raise RuntimeError("Tool dispatch must return ToolOutcome")
+                payload = outcome.payload
+                mutation_state = outcome.mutation_state
             except Exception as exc:
                 payload, mutation_state = _v2_contract_failure(
                     name,
                     arguments,
-                    may_have_mutated=name in V2_MUTATION_TOOLS,
+                    mutation_state=(
+                        "unknown" if name in V2_MUTATION_TOOLS else None
+                    ),
                     message=f"The public facade failed ({type(exc).__name__}).",
                 )
 
@@ -1307,8 +1563,7 @@ def call_tool(name: str, raw_arguments: Any) -> dict[str, Any]:
         payload, mutation_state = _v2_contract_failure(
             name,
             arguments_for_contract,
-            may_have_mutated=exc.may_have_mutated
-            or mutation_state in {"committed", "unknown"},
+            mutation_state=mutation_state,
             message=str(exc),
         )
         payload = validate_public_result(name, payload, mutation_state)
@@ -1331,9 +1586,7 @@ def jsonrpc_error(
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
-def handle_message(message: Any) -> dict[str, Any] | None:
-    global SESSION_INITIALIZED
-
+def _handle_message(runtime: McpRuntime, message: Any) -> dict[str, Any] | None:
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return jsonrpc_error(None, JSONRPC_INVALID_REQUEST, "Invalid JSON-RPC request")
 
@@ -1380,7 +1633,7 @@ def handle_message(message: Any) -> dict[str, Any] | None:
                 "initialize clientInfo must be an object",
             )
         negotiated = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
-        SESSION_INITIALIZED = True
+        runtime._initialized = True
         return jsonrpc_result(
             request_id,
             {
@@ -1404,7 +1657,7 @@ def handle_message(message: Any) -> dict[str, Any] | None:
         return None
     if method == "ping":
         return jsonrpc_result(request_id, {})
-    if not SESSION_INITIALIZED:
+    if not runtime._initialized:
         return jsonrpc_error(
             request_id,
             JSONRPC_SERVER_NOT_INITIALIZED,
@@ -1422,7 +1675,10 @@ def handle_message(message: Any) -> dict[str, Any] | None:
         name = params.get("name")
         if not isinstance(name, str) or name not in TOOLS_BY_NAME:
             return jsonrpc_error(request_id, JSONRPC_INVALID_PARAMS, f"Unknown tool: {name or ''}")
-        return jsonrpc_result(request_id, call_tool(name, params.get("arguments", {})))
+        return jsonrpc_result(
+            request_id,
+            runtime.call_tool(name, params.get("arguments", {})),
+        )
 
     if request_id is None:
         return None
@@ -1434,55 +1690,40 @@ def send(message: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def main(*, backend_paths: BackendPaths | None = None) -> int:
-    global _ACTIVE_BACKEND_PATHS, _V2_CORE_FACADE, _V2_NATIVE_FACADE
-    global _V2_DIAGNOSTICS_FACADE
+def serve_stdio(
+    runtime: McpRuntime,
+    *,
+    stdin: Any = None,
+    send_message: Callable[[dict[str, Any]], None] = send,
+) -> int:
+    source = sys.stdin if stdin is None else stdin
+    for raw_line in source:
+        if len(raw_line.encode("utf-8", errors="replace")) > MAX_MCP_MESSAGE_BYTES:
+            send_message(
+                jsonrpc_error(
+                    None,
+                    JSONRPC_INVALID_REQUEST,
+                    "JSON-RPC message exceeds the size limit",
+                )
+            )
+            continue
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            send_message(jsonrpc_error(None, JSONRPC_PARSE_ERROR, "Parse error"))
+            continue
+        response = runtime.handle(message)
+        if response is not None:
+            send_message(response)
+    return 0
 
-    previous_backend_paths = _ACTIVE_BACKEND_PATHS
-    previous_core_facade = _V2_CORE_FACADE
-    previous_native_facade = _V2_NATIVE_FACADE
-    previous_diagnostics_facade = _V2_DIAGNOSTICS_FACADE
-    _ACTIVE_BACKEND_PATHS = backend_paths or DEFAULT_BACKEND_PATHS
-    _V2_CORE_FACADE = None
-    _V2_NATIVE_FACADE = None
-    _V2_DIAGNOSTICS_FACADE = None
-    try:
-        for raw_line in sys.stdin:
-            if len(raw_line.encode("utf-8", errors="replace")) > MAX_MCP_MESSAGE_BYTES:
-                send(
-                    jsonrpc_error(
-                        None,
-                        JSONRPC_INVALID_REQUEST,
-                        "JSON-RPC message exceeds the size limit",
-                    )
-                )
-                continue
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                send(jsonrpc_error(None, JSONRPC_PARSE_ERROR, "Parse error"))
-                continue
-            try:
-                response = handle_message(message)
-            except Exception as exc:  # keep protocol stdout valid even on an internal defect
-                request_id = message.get("id") if isinstance(message, dict) else None
-                print(f"{SERVER_NAME}: {type(exc).__name__}", file=sys.stderr)
-                response = jsonrpc_error(
-                    request_id,
-                    JSONRPC_INTERNAL_ERROR,
-                    "Internal server error",
-                )
-            if response is not None:
-                send(response)
-        return 0
-    finally:
-        _ACTIVE_BACKEND_PATHS = previous_backend_paths
-        _V2_CORE_FACADE = previous_core_facade
-        _V2_NATIVE_FACADE = previous_native_facade
-        _V2_DIAGNOSTICS_FACADE = previous_diagnostics_facade
+
+def main(*, backend_paths: BackendPaths | None = None) -> int:
+    runtime = McpRuntime(backend_paths or DEFAULT_BACKEND_PATHS)
+    return serve_stdio(runtime)
 
 
 if __name__ == "__main__":

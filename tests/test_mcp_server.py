@@ -27,6 +27,8 @@ PUBLIC_TOOLS = {
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
     "inspect_reminder_native",
     "ensure_reminder_list",
     "create_reminder_section",
@@ -50,7 +52,18 @@ NATIVE_TOOLS = {
     "organize_reminder",
     "change_reminder_attachment",
 }
+RECOVERY_TOOLS = {"inspect_recently_deleted", "recover_deleted_reminder"}
 DIAGNOSTIC_TOOLS = {"diagnose_reminders"}
+MUTATION_TOOLS = {
+    "create_reminder",
+    "change_reminder",
+    "delete_reminder",
+    "recover_deleted_reminder",
+    "ensure_reminder_list",
+    "create_reminder_section",
+    "organize_reminder",
+    "change_reminder_attachment",
+}
 REFERENCE_MUTATIONS = {
     "create_reminder",
     "change_reminder",
@@ -58,6 +71,7 @@ REFERENCE_MUTATIONS = {
     "change_reminder_attachment",
 }
 REFERENCE = "rev1." + "A" * 32
+DELETED_REFERENCE = "del1." + "D" * 32
 REMINDER_ID = "REMINDER-EXACT-1"
 
 TEST_BACKEND_ENVIRONMENTS = {
@@ -250,6 +264,7 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
         "create_reminder",
         "change_reminder",
         "delete_reminder",
+        "recover_deleted_reminder",
         "ensure_reminder_list",
         "create_reminder_section",
         "organize_reminder",
@@ -281,6 +296,19 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
                 "returned": 0,
                 "truncated": False,
             }
+        elif name == "inspect_recently_deleted":
+            data = {
+                "kind": "list",
+                "items": [],
+                "returned": 0,
+                "limit": 20,
+                "total_matched": 0,
+                "truncated": False,
+                "has_more": False,
+                "next_cursor": None,
+                "pagination_exhausted": False,
+                "retention_days": 30,
+            }
         return {
             "schema_version": 2,
             "ok": True,
@@ -303,6 +331,26 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
     after: dict[str, Any] = {}
     if name in REFERENCE_MUTATIONS:
         after = {"reminder_id": REMINDER_ID, "reference": REFERENCE}
+    verification = {
+        "state": "read_back",
+        "write_performed": True,
+        "final_read": True,
+        "matched": True,
+    }
+    if name == "recover_deleted_reminder":
+        verification.update(
+            {
+                "pre_save_guard_matched": True,
+                "destination_list_matched": True,
+                "attachments_active": True,
+                "attachments_preserved": True,
+                "attachment_bytes_verified": True,
+                "attachment_counts_match": True,
+                "before_attachment_count": 1,
+                "native_attachment_count": 1,
+                "after_attachment_count": 1,
+            }
+        )
     return {
         "schema_version": 2,
         "ok": True,
@@ -313,12 +361,7 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
         "target": {},
         "before": {},
         "after": after,
-        "verification": {
-            "state": "read_back",
-            "write_performed": True,
-            "final_read": True,
-            "matched": True,
-        },
+        "verification": verification,
         "recovery": {
             "semantics": "verified_final_read",
             "automatic_retry_safe": False,
@@ -334,6 +377,14 @@ class RecordingFacade:
         copied = copy.deepcopy(dict(arguments))
         self.calls.append((name, copied))
         return valid_public_result(name, copied)
+
+    def call_with_state(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        payload = self.call(name, arguments)
+        return payload, ("committed" if name in MUTATION_TOOLS else None)
 
 
 VALID_ARGUMENTS: dict[str, dict[str, Any]] = {
@@ -351,6 +402,12 @@ VALID_ARGUMENTS: dict[str, dict[str, Any]] = {
         "action": {"kind": "patch", "patch": {"title": "Changed"}},
     },
     "delete_reminder": {"reference": REFERENCE},
+    "inspect_recently_deleted": {"kind": "list"},
+    "recover_deleted_reminder": {
+        "reference": DELETED_REFERENCE,
+        "list_id": "LIST-1",
+        "idempotency_key": "recover-key-0001",
+    },
     "inspect_reminder_native": {
         "kind": "sections",
         "list_id": "LIST-1",
@@ -391,7 +448,7 @@ class McpPackagingTests(unittest.TestCase):
         names = [tool["name"] for tool in tools]
 
         self.assertEqual(payload["schemaVersion"], 2)
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 15)
         self.assertEqual(set(names), PUBLIC_TOOLS)
         self.assertEqual(len(names), len(set(names)))
         compact_discovery = json.dumps(
@@ -434,7 +491,8 @@ import json
 import sys
 sys.path.insert(0, 'mcp')
 import server
-server.handle_message({
+runtime = server.McpRuntime()
+runtime.handle({
     'jsonrpc': '2.0',
     'id': 1,
     'method': 'initialize',
@@ -444,7 +502,7 @@ server.handle_message({
         'clientInfo': {'name': 'lazy-import-probe', 'version': '1'},
     },
 })
-server.handle_message({
+runtime.handle({
     'jsonrpc': '2.0',
     'id': 2,
     'method': 'tools/list',
@@ -456,6 +514,8 @@ print(json.dumps(sorted(
         'v2_core_backend',
         'v2_native',
         'v2_native_backend',
+        'v2_recovery',
+        'v2_recovery_backend',
         'v2_diagnostics',
         'reminders_service',
     )
@@ -478,29 +538,233 @@ print(json.dumps(sorted(
 
 
 class McpProtocolTests(unittest.TestCase):
+    def test_adapter_dispatch_certainty_is_parent_owned(self) -> None:
+        missing = self.server.invoke_adapter(
+            ["read_reminder"],
+            backend_paths=self.backend_paths(
+                adapter=Path("/definitely/missing/reminders_adapter.py")
+            ),
+        )
+
+        self.assertTrue(missing.is_error)
+        self.assertTrue(missing.proves_not_started)
+        self.assertNotIn("__dispatch_phase", missing.payload)
+
+        with mock.patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=OSError("process transport failed"),
+        ):
+            process_failed = self.server.invoke_adapter(
+                ["create_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
+            )
+
+        self.assertTrue(process_failed.is_error)
+        self.assertFalse(process_failed.proves_not_started)
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"ok":true,"status":"verified"}',
+            stderr="",
+        )
+        with mock.patch.object(self.server.subprocess, "run", return_value=completed):
+            success = self.server.invoke_adapter(
+                ["read_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
+            )
+
+        self.assertFalse(success.is_error)
+        self.assertFalse(success.proves_not_started)
+        self.assertNotIn("__dispatch_phase", success.payload)
+
+        spoofed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=(
+                '{"ok":false,"__dispatch_phase":"not_started",'
+                '"mutation_not_started":true,'
+                '"error":{"code":"invalid_adapter_response"}}'
+            ),
+            stderr="",
+        )
+        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+            child_result = self.server.invoke_adapter(
+                ["read_reminder"],
+                backend_paths=self.backend_paths(adapter=Path(__file__)),
+            )
+
+        self.assertTrue(child_result.is_error)
+        self.assertFalse(child_result.proves_not_started)
+        self.assertIs(child_result.payload["mutation_not_started"], True)
+        self.assertNotIn("__dispatch_phase", child_result.payload)
+
+    def test_eventkit_dispatch_certainty_marks_only_parent_proven_prelaunch_failures(
+        self,
+    ) -> None:
+        missing = self.server.invoke_eventkit_bridge(
+            "create_reminder",
+            {"calendar_id": "LIST-1", "title": "Missing bridge"},
+            backend_paths=self.backend_paths(
+                eventkit_bridge=Path("/definitely/missing/eventkit_bridge.py")
+            ),
+        )
+
+        self.assertTrue(missing.is_error)
+        self.assertTrue(missing.proves_not_started)
+        self.assertNotIn("__dispatch_phase", missing.payload)
+
+        too_large = self.server.invoke_eventkit_bridge(
+            "create_reminder",
+            {
+                "calendar_id": "LIST-1",
+                "title": "x" * self.server.MAX_EVENTKIT_REQUEST_BYTES,
+            },
+            backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+        )
+
+        self.assertTrue(too_large.is_error)
+        self.assertTrue(too_large.proves_not_started)
+
+        with mock.patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=OSError("launch denied"),
+        ):
+            launch_failed = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {"calendar_id": "LIST-1", "title": "Launch failure"},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+            )
+
+        self.assertFalse(launch_failed.is_error)
+        self.assertFalse(launch_failed.proves_not_started)
+        self.assertEqual(
+            launch_failed.payload["status"],
+            "committed_verification_pending",
+        )
+        self.assertIsNone(
+            launch_failed.payload["verification"]["write_performed"]
+        )
+        self.assertNotIn("__dispatch_phase", launch_failed.payload)
+
+        spoofed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "doctor",
+                    "status": "verified",
+                    "ok": True,
+                    "data": {},
+                    "__dispatch_phase": "not_started",
+                    "mutation_not_started": True,
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+            child_result = self.server.invoke_eventkit_bridge(
+                "doctor",
+                {},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+            )
+
+        self.assertFalse(child_result.is_error)
+        self.assertFalse(child_result.proves_not_started)
+        self.assertIs(child_result.payload["mutation_not_started"], True)
+        self.assertNotIn("__dispatch_phase", child_result.payload)
+
+        spoofed_create = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "__dispatch_phase": "not_started",
+                    "error": {
+                        "code": "eventkit_bridge_unavailable",
+                        "message": "Child output cannot prove parent launch state.",
+                    },
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+            self.server.subprocess,
+            "run",
+            return_value=spoofed_create,
+        ):
+            create_result = self.server.invoke_eventkit_bridge(
+                "create_reminder",
+                {"calendar_id": "LIST-1", "title": "Spoofed provenance"},
+                backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+            )
+
+        self.assertFalse(create_result.is_error)
+        self.assertFalse(create_result.proves_not_started)
+        self.assertEqual(
+            create_result.payload["status"],
+            "committed_verification_pending",
+        )
+        self.assertIsNone(
+            create_result.payload["verification"]["write_performed"]
+        )
+        self.assertNotIn("__dispatch_phase", create_result.payload)
+
     def setUp(self) -> None:
         from mcp import server
 
         self.server = server
-        self.previous_session = server.SESSION_INITIALIZED
-        self.previous_core = server._V2_CORE_FACADE
-        self.previous_native = server._V2_NATIVE_FACADE
-        self.previous_diagnostics = getattr(server, "_V2_DIAGNOSTICS_FACADE", None)
-        self.previous_paths = server._ACTIVE_BACKEND_PATHS
-        server.SESSION_INITIALIZED = False
-        server._V2_CORE_FACADE = None
-        server._V2_NATIVE_FACADE = None
-        server._V2_DIAGNOSTICS_FACADE = None
-        server._ACTIVE_BACKEND_PATHS = server.DEFAULT_BACKEND_PATHS
-        server.RECENT_CALLS.clear()
+        self.use_runtime()
 
-    def tearDown(self) -> None:
-        self.server.SESSION_INITIALIZED = self.previous_session
-        self.server._V2_CORE_FACADE = self.previous_core
-        self.server._V2_NATIVE_FACADE = self.previous_native
-        self.server._V2_DIAGNOSTICS_FACADE = self.previous_diagnostics
-        self.server._ACTIVE_BACKEND_PATHS = self.previous_paths
-        self.server.RECENT_CALLS.clear()
+    def backend_paths(
+        self,
+        *,
+        adapter: Path | None = None,
+        eventkit_bridge: Path | None = None,
+        doctor: Path | None = None,
+    ) -> Any:
+        defaults = self.server.DEFAULT_BACKEND_PATHS
+        return self.server.BackendPaths(
+            adapter=adapter or defaults.adapter,
+            eventkit_bridge=eventkit_bridge or defaults.eventkit_bridge,
+            doctor=doctor or defaults.doctor,
+        )
+
+    def use_runtime(
+        self,
+        *,
+        core: Any | None = None,
+        native: Any | None = None,
+        recovery: Any | None = None,
+        diagnostics: Any | None = None,
+        clock: Any | None = None,
+        max_calls_per_minute: int | None = None,
+    ) -> Any:
+        overrides = {
+            name: facade
+            for name, facade in {
+                "core": core,
+                "native": native,
+                "recovery": recovery,
+                "diagnostics": diagnostics,
+            }.items()
+            if facade is not None
+        }
+        self.dispatch = self.server._LocalToolDispatch(
+            self.server.DEFAULT_BACKEND_PATHS,
+            facade_overrides=overrides,
+        )
+        options: dict[str, Any] = {"dispatch": self.dispatch}
+        if clock is not None:
+            options["clock"] = clock
+        if max_calls_per_minute is not None:
+            options["max_calls_per_minute"] = max_calls_per_minute
+        self.runtime = self.server.McpRuntime(**options)
+        return self.runtime
 
     def test_initialize_tool_list_and_ping_over_stdio(self) -> None:
         responses = run_server(
@@ -530,18 +794,93 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(responses[2]["result"], {})
 
     def test_tools_are_unavailable_before_initialize(self) -> None:
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         )
 
         self.assertEqual(response["error"]["code"], -32002)
 
+    def test_initialization_state_is_isolated_per_runtime(self) -> None:
+        first = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": RecordingFacade()},
+            )
+        )
+        second = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": RecordingFacade()},
+            )
+        )
+
+        initialized = first.handle(initialize())
+        second_list = second.handle(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+        self.assertIn("result", initialized)
+        self.assertEqual(second_list["error"]["code"], -32002)
+
+    def test_rate_limit_state_is_isolated_per_runtime(self) -> None:
+        def clock() -> float:
+            return 100.0
+
+        first_facade = RecordingFacade()
+        second_facade = RecordingFacade()
+        first = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": first_facade},
+            ),
+            clock=clock,
+            max_calls_per_minute=1,
+        )
+        second = self.server.McpRuntime(
+            dispatch=self.server._LocalToolDispatch(
+                self.server.DEFAULT_BACKEND_PATHS,
+                facade_overrides={"core": second_facade},
+            ),
+            clock=clock,
+            max_calls_per_minute=1,
+        )
+
+        first_result = first.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+        limited = first.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+        second_result = second.call_tool("read_reminder", {"reminder_id": REMINDER_ID})
+
+        self.assertFalse(first_result["isError"])
+        self.assertEqual(
+            limited["structuredContent"]["error"]["code"], "rate_limited"
+        )
+        self.assertFalse(second_result["isError"])
+        self.assertEqual(len(first_facade.calls), 1)
+        self.assertEqual(len(second_facade.calls), 1)
+
+    def test_lazy_facade_graph_is_owned_by_each_dispatch(self) -> None:
+        first = self.server._LocalToolDispatch(self.server.DEFAULT_BACKEND_PATHS)
+        second = self.server._LocalToolDispatch(self.server.DEFAULT_BACKEND_PATHS)
+
+        runtime = self.server.McpRuntime(dispatch=first)
+        runtime.handle(initialize())
+        runtime.handle(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+
+        self.assertIsNone(first._core)
+        self.assertIsNone(first._native)
+        self.assertIsNone(first._recovery)
+        self.assertIsNone(first._diagnostics)
+        first_core = first.core_facade()
+        self.assertIs(first._core, first_core)
+        self.assertIsNone(second._core)
+
     def test_notification_shaped_mutation_cannot_execute(self) -> None:
         facade = RecordingFacade()
-        self.server._V2_CORE_FACADE = facade
-        self.server.handle_message(initialize())
+        self.use_runtime(core=facade)
+        self.runtime.handle(initialize())
 
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {
                 "jsonrpc": "2.0",
                 "method": "tools/call",
@@ -556,9 +895,9 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(facade.calls, [])
 
     def test_unknown_tool_is_a_protocol_error(self) -> None:
-        self.server.handle_message(initialize())
+        self.runtime.handle(initialize())
 
-        response = self.server.handle_message(
+        response = self.runtime.handle(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -573,11 +912,10 @@ class McpProtocolTests(unittest.TestCase):
     def test_invalid_read_and_mutation_arguments_fail_before_facade_dispatch(self) -> None:
         core = RecordingFacade()
         native = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
-        self.server._V2_NATIVE_FACADE = native
+        self.use_runtime(core=core, native=native)
 
-        read_result = self.server.call_tool("read_reminder", {})
-        mutation_result = self.server.call_tool(
+        read_result = self.runtime.call_tool("read_reminder", {})
+        mutation_result = self.runtime.call_tool(
             "create_reminder", {"list_id": "LIST-1", "title": "Missing key"}
         )
 
@@ -612,10 +950,10 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_unsupported_python_fails_explicitly_before_facade_dispatch(self) -> None:
         core = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
+        self.use_runtime(core=core)
 
         with mock.patch.object(self.server.sys, "version_info", (3, 10, 14)):
-            result = self.server.call_tool(
+            result = self.runtime.call_tool(
                 "read_reminder",
                 {"reminder_id": REMINDER_ID},
             )
@@ -633,9 +971,9 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_change_patch_cannot_add_recurrence_while_clearing_due(self) -> None:
         core = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
+        self.use_runtime(core=core)
 
-        result = self.server.call_tool(
+        result = self.runtime.call_tool(
             "change_reminder",
             {
                 "reference": REFERENCE,
@@ -656,17 +994,23 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_input")
         self.assertEqual(core.calls, [])
 
-    def test_all_13_tools_dispatch_to_their_v2_facades(self) -> None:
+    def test_all_15_tools_dispatch_to_their_v2_facades(self) -> None:
         core = RecordingFacade()
         native = RecordingFacade()
+        recovery = RecordingFacade()
         diagnostics = RecordingFacade()
-        self.server._V2_CORE_FACADE = core
-        self.server._V2_NATIVE_FACADE = native
-        self.server._V2_DIAGNOSTICS_FACADE = diagnostics
+        self.use_runtime(
+            core=core,
+            native=native,
+            recovery=recovery,
+            diagnostics=diagnostics,
+        )
 
         for name in sorted(PUBLIC_TOOLS):
             with self.subTest(tool=name):
-                result = self.server.call_tool(name, copy.deepcopy(VALID_ARGUMENTS[name]))
+                result = self.runtime.call_tool(
+                    name, copy.deepcopy(VALID_ARGUMENTS[name])
+                )
                 self.assertFalse(result["isError"], result)
                 payload = result["structuredContent"]
                 self.assertEqual(payload["schema_version"], 2)
@@ -685,8 +1029,15 @@ class McpProtocolTests(unittest.TestCase):
             DIAGNOSTIC_TOOLS,
         )
         self.assertEqual(
-            len(core.calls) + len(native.calls) + len(diagnostics.calls),
-            13,
+            {name for name, _ in recovery.calls},
+            RECOVERY_TOOLS,
+        )
+        self.assertEqual(
+            len(core.calls)
+            + len(native.calls)
+            + len(recovery.calls)
+            + len(diagnostics.calls),
+            15,
         )
 
     def test_post_dispatch_contract_fallback_uses_exact_safe_recovery(self) -> None:
@@ -695,16 +1046,15 @@ class McpProtocolTests(unittest.TestCase):
             ("ensure_reminder_list", "list_reminder_lists"),
             ("create_reminder_section", "inspect_reminder_native"),
             ("delete_reminder", "read_reminder"),
+            ("recover_deleted_reminder", "read_reminder"),
         )
         for name, recovery_tool in cases:
             facade = mock.Mock()
             facade.call.side_effect = RuntimeError("lost public facade result")
-            self.server._V2_CORE_FACADE = facade
-            self.server._V2_NATIVE_FACADE = facade
-            self.server.RECENT_CALLS.clear()
+            self.use_runtime(core=facade, native=facade, recovery=facade)
 
             with self.subTest(tool=name):
-                result = self.server.call_tool(
+                result = self.runtime.call_tool(
                     name, copy.deepcopy(VALID_ARGUMENTS[name])
                 )
                 payload = result["structuredContent"]
@@ -717,6 +1067,150 @@ class McpProtocolTests(unittest.TestCase):
                 self.assertFalse(
                     payload["next_action"]["retry_original_once"]
                 )
+                summary = json.loads(result["content"][0]["text"])
+                self.assertEqual(summary["outcome"], "attention_required")
+                self.assertTrue(summary["needs_attention"])
+                self.assertTrue(summary["may_have_mutated"])
+                self.assertEqual(summary["write_state"], "unknown")
+                self.assertEqual(summary["evidence_scope"], "no_final_read")
+                self.assertEqual(
+                    summary["next_read_only_action"]["tool"], recovery_tool
+                )
+
+    def test_recovery_without_attachment_proof_uses_safe_contract_fallback(self) -> None:
+        facade = mock.Mock()
+        unsafe = valid_public_result(
+            "recover_deleted_reminder",
+            VALID_ARGUMENTS["recover_deleted_reminder"],
+        )
+        unsafe["verification"]["attachments_preserved"] = False
+        facade.call.return_value = unsafe
+        self.use_runtime(recovery=facade)
+
+        result = self.runtime.call_tool(
+            "recover_deleted_reminder",
+            copy.deepcopy(VALID_ARGUMENTS["recover_deleted_reminder"]),
+        )
+
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(
+            payload["error"]["reason_code"], "public_result_contract_failed"
+        )
+        self.assertEqual(payload["next_action"]["tool"], "read_reminder")
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertTrue(summary["needs_attention"])
+        self.assertEqual(
+            summary["next_read_only_action"]["tool"], "read_reminder"
+        )
+
+    def test_recovery_preserves_independent_mutation_state_across_facade_boundary(
+        self,
+    ) -> None:
+        arguments = copy.deepcopy(VALID_ARGUMENTS["recover_deleted_reminder"])
+        false_no_write, _ = self.server._v2_pre_dispatch_failure(
+            "recover_deleted_reminder",
+            arguments,
+            code="unexpected_error",
+            reason_code="fault_injected_no_mutation_claim",
+            message="Fault-injected receipt conflicts with the mutation fact.",
+            retryable=False,
+        )
+
+        class ConflictingStateFacade:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                self.calls += 1
+                self.name = name
+                self.supplied = copy.deepcopy(dict(supplied))
+                return copy.deepcopy(false_no_write), "committed"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("server discarded the independent mutation state")
+
+        facade = ConflictingStateFacade()
+        self.use_runtime(recovery=facade)
+
+        result = self.runtime.call_tool("recover_deleted_reminder", arguments)
+
+        payload = result["structuredContent"]
+        self.assertEqual(facade.calls, 1)
+        self.assertEqual(facade.name, "recover_deleted_reminder")
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(
+            payload["error"]["reason_code"], "public_result_contract_failed"
+        )
+        self.assertTrue(payload["verification"]["write_performed"])
+        self.assertEqual(payload["next_action"]["tool"], "read_reminder")
+        self.assertNotIn("mutation_state", payload)
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertEqual(summary["write_state"], "committed_unverified")
+
+    def test_invalid_independent_mutation_state_fails_closed(self) -> None:
+        arguments = copy.deepcopy(VALID_ARGUMENTS["create_reminder"])
+
+        class InvalidStateFacade:
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                return valid_public_result(name, supplied), "commited"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("mutation dispatch must use call_with_state")
+
+        self.use_runtime(core=InvalidStateFacade())
+
+        result = self.runtime.call_tool("create_reminder", arguments)
+
+        payload = result["structuredContent"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertIsNone(payload["verification"]["write_performed"])
+        self.assertEqual(
+            payload["error"]["reason_code"],
+            "public_result_contract_failed",
+        )
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertEqual(summary["write_state"], "unknown")
+
+    def test_read_facade_cannot_smuggle_mutation_state(self) -> None:
+        class InvalidReadStateFacade:
+            def call_with_state(
+                self,
+                name: str,
+                supplied: Mapping[str, Any],
+            ) -> tuple[dict[str, Any], str]:
+                return valid_public_result(name, supplied), "committed"
+
+            def call(self, name: str, supplied: Mapping[str, Any]) -> dict[str, Any]:
+                raise AssertionError("read dispatch must use call_with_state")
+
+        self.use_runtime(core=InvalidReadStateFacade())
+
+        result = self.runtime.call_tool(
+            "read_reminder",
+            {"reminder_id": REMINDER_ID},
+        )
+
+        payload = result["structuredContent"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertEqual(
+            payload["error"]["reason_code"],
+            "public_result_contract_failed",
+        )
 
     def test_valid_long_notes_cross_the_public_result_boundary_unchanged(self) -> None:
         notes = "n" * 70_000
@@ -735,9 +1229,9 @@ class McpProtocolTests(unittest.TestCase):
                 }
             },
         }
-        self.server._V2_CORE_FACADE = facade
+        self.use_runtime(core=facade)
 
-        result = self.server.call_tool(
+        result = self.runtime.call_tool(
             "read_reminder",
             {"reminder_id": REMINDER_ID},
         )
@@ -765,10 +1259,206 @@ class McpProtocolTests(unittest.TestCase):
         text = result["content"][0]["text"]
 
         self.assertEqual(result["structuredContent"], payload)
-        self.assertLess(len(text), 200)
+        self.assertLess(len(text), 512)
         self.assertNotIn("private reminder title", text)
         self.assertNotEqual(text, json.dumps(payload, ensure_ascii=False))
-        self.assertEqual(json.loads(text)["returned"], 1)
+        summary = json.loads(text)
+        self.assertEqual(summary["returned"], 1)
+        self.assertEqual(summary["outcome"], "verified")
+        self.assertFalse(summary["needs_attention"])
+        self.assertFalse(summary["may_have_mutated"])
+        self.assertEqual(summary["write_state"], "not_applicable")
+        self.assertEqual(summary["evidence_scope"], "bounded_public_read")
+        self.assertIsNone(summary["next_read_only_action"])
+
+    def test_text_summary_reports_exact_verified_write_evidence(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "ok": True,
+            "status": "verified",
+            "operation": "organize_reminder.add_tag",
+            "target": {
+                "reminder_id": REMINDER_ID,
+                "section_id": "SECTION-1",
+                "tag": "private tag",
+            },
+            "verification": {
+                "state": "read_back",
+                "write_performed": True,
+                "final_read": True,
+                "matched": True,
+            },
+        }
+
+        summary = json.loads(
+            self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+        )
+
+        self.assertEqual(summary["outcome"], "verified")
+        self.assertFalse(summary["needs_attention"])
+        self.assertTrue(summary["may_have_mutated"])
+        self.assertEqual(summary["write_state"], "committed_and_verified")
+        self.assertEqual(summary["evidence_scope"], "matched_exact_final_read")
+        self.assertEqual(
+            summary["target"],
+            {"reminder_id": REMINDER_ID, "section_id": "SECTION-1"},
+        )
+        self.assertNotIn("private tag", json.dumps(summary))
+        self.assertIsNone(summary["next_read_only_action"])
+
+    def test_text_summary_marks_pending_partial_stale_and_failure_for_attention(self) -> None:
+        cases = (
+            (
+                "pending_unknown_write",
+                "committed_verification_pending",
+                True,
+                "unknown",
+                None,
+                False,
+                "sync_pending",
+            ),
+            (
+                "pending_known_write",
+                "committed_verification_pending",
+                True,
+                "committed_unverified",
+                True,
+                False,
+                "sync_pending",
+            ),
+            (
+                "partial",
+                "partial_success",
+                True,
+                "partial",
+                True,
+                True,
+                "sync_pending",
+            ),
+            (
+                "stale",
+                "failed_no_mutation",
+                False,
+                "not_mutated",
+                False,
+                False,
+                "concurrent_modification",
+            ),
+            (
+                "manual_repair",
+                "failed_manual_repair_required",
+                True,
+                "committed_manual_repair_required",
+                True,
+                False,
+                "unexpected_error",
+            ),
+        )
+        for (
+            case_name,
+            status,
+            may_mutate,
+            write_state,
+            write_performed,
+            final_read,
+            error_code,
+        ) in cases:
+            payload = {
+                "schema_version": 2,
+                "ok": status in {"committed_verification_pending", "partial_success"},
+                "status": status,
+                "operation": "change_reminder.patch",
+                "target": {"reminder_id": REMINDER_ID},
+                "verification": {
+                    "state": "partial" if final_read else "pending",
+                    "write_performed": write_performed,
+                    "final_read": final_read,
+                    "matched": False if final_read else None,
+                },
+                "error": {
+                    "code": error_code,
+                    "reason_code": "fixture_reason",
+                    "message": "private failure detail",
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "fresh_read",
+                    "tool": "read_reminder",
+                    "retry_original_once": False,
+                    "message": "read before retry",
+                },
+            }
+
+            with self.subTest(case=case_name):
+                summary = json.loads(
+                    self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+                )
+                self.assertEqual(summary["outcome"], "attention_required")
+                self.assertTrue(summary["needs_attention"])
+                self.assertIs(summary["may_have_mutated"], may_mutate)
+                self.assertEqual(summary["write_state"], write_state)
+                self.assertEqual(summary["target"], {"reminder_id": REMINDER_ID})
+                self.assertEqual(
+                    summary["next_read_only_action"],
+                    {
+                        "kind": "fresh_read",
+                        "tool": "read_reminder",
+                        "retry_original_once": False,
+                    },
+                )
+                self.assertNotIn("private failure detail", json.dumps(summary))
+
+    def test_stale_page_summary_recommends_restarting_the_same_read_without_cursor(self) -> None:
+        for operation in ("fetch_reminders", "inspect_recently_deleted"):
+            payload = {
+                "schema_version": 2,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": operation,
+                "error": {
+                    "code": "concurrent_modification",
+                    "reason_code": "pagination_snapshot_stale",
+                    "message": "The ordered page snapshot changed.",
+                    "retryable": False,
+                },
+                "next_action": {
+                    "kind": "fresh_read",
+                    "tool": operation,
+                    "retry_original_once": False,
+                    "message": f"Restart {operation} without a cursor.",
+                },
+            }
+
+            summary = json.loads(
+                self.server.tool_result(payload, is_error=True)["content"][0]["text"]
+            )
+
+            self.assertEqual(
+                summary["next_read_only_action"],
+                {
+                    "kind": "fresh_read",
+                    "tool": operation,
+                    "retry_original_once": False,
+                },
+            )
+
+    def test_text_summary_marks_blocked_diagnosis_for_attention(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "ok": True,
+            "status": "verified",
+            "operation": "diagnose_reminders",
+            "data": {"overall": "blocked", "scope": "access"},
+        }
+
+        summary = json.loads(
+            self.server.tool_result(payload, is_error=False)["content"][0]["text"]
+        )
+
+        self.assertEqual(summary["outcome"], "attention_required")
+        self.assertTrue(summary["needs_attention"])
+        self.assertEqual(summary["overall"], "blocked")
+        self.assertEqual(summary["next_read_only_action"]["tool"], "diagnose_reminders")
 
     def test_explicit_test_backend_injection_serves_list_and_doctor_over_stdio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -881,16 +1571,18 @@ class McpProtocolTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, legacy, clear=False):
+            runtime = self.server.McpRuntime()
+            paths = runtime._dispatch._backend_paths
             self.assertEqual(
-                self.server.adapter_path(),
+                paths.adapter,
                 self.server.DEFAULT_ADAPTER_PATH,
             )
             self.assertEqual(
-                self.server.eventkit_bridge_path(),
+                paths.eventkit_bridge,
                 self.server.DEFAULT_EVENTKIT_BRIDGE_PATH,
             )
             self.assertEqual(
-                self.server.doctor_path(),
+                paths.doctor,
                 self.server.DEFAULT_DOCTOR_PATH,
             )
 

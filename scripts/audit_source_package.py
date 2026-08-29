@@ -53,6 +53,9 @@ PACKAGE_ROOT_FILES = {
     Path("mcp/v2_diagnostics.py"),
     Path("mcp/v2_native.py"),
     Path("mcp/v2_native_backend.py"),
+    Path("mcp/v2_recovery.py"),
+    Path("mcp/v2_recovery_backend.py"),
+    Path("mcp/v2_transport.py"),
     Path("schemas/mcp-tools.json"),
     Path("scripts/eventkit_bridge.py"),
     Path("scripts/eventkit_bridge_info.plist"),
@@ -67,6 +70,7 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/reminders_doctor.py"),
     Path("scripts/reminders_eventkit.m"),
     Path("scripts/remkit_attach_image.m"),
+    Path("scripts/remkit_recover.m"),
     Path("scripts/remkit_sections.m"),
 }
 ALLOWED_SKILL_FILES = {

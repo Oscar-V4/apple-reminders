@@ -1,4 +1,4 @@
-# Apple Reminders 0.3 public-beta launch kit
+# Apple Reminders 0.4 public-beta launch kit
 
 This kit prepares a truthful public launch; it is not evidence that the release
 has happened. Replace every angle-bracket placeholder, delete any unsupported
@@ -22,7 +22,7 @@ everywhere:
 
 | Placeholder | Final value |
 | --- | --- |
-| `<TAG>` | `v0.3.1`; verify against the published tag |
+| `<TAG>` | Target `v0.4.0`; fill only after the reviewed commit is tagged |
 | `<RELEASE_URL>` | Public GitHub Release URL |
 | `<COMMIT_SHA>` | Commit referenced by the tag |
 | `<ZIP_URL>` | Release artifact URL |
@@ -50,7 +50,7 @@ everywhere:
 - [ ] On an isolated Codex home that does not use the development checkout, run
   the README's exact tagged marketplace add/install commands and save a
   redacted report at `<CLEAN_INSTALL_EVIDENCE_URL>`.
-- [ ] Verify MCP initialization, the expected 13-tool Interface, targeted
+- [ ] Verify MCP initialization, the expected 15-tool Interface, targeted
   diagnosis, and a first Core read from the installed artifact. Record the
   actual Python selected by the launcher.
 - [ ] Run the opt-in live smoke against one uniquely named synthetic list,
@@ -210,7 +210,7 @@ Submission does not mean acceptance or endorsement.
   > Reminders data available to their local Mac. Routine operations prefer
   > EventKit. Sections, tags, and native attachments are isolated behind
   > explicit capability and read-back checks. The public beta deliberately
-  > exposes a bounded 13-tool Interface and withholds broad maintenance and
+  > exposes a bounded 15-tool Interface and withholds broad maintenance and
   > backup operations. It documents permission, local-data, private-interface,
   > concurrency, and verification limits instead of claiming that a process
   > exit proves an Apple-device sync. The plugin-owned MCP has no remote
@@ -242,7 +242,7 @@ Submission does not mean acceptance or endorsement.
 Before submitting, re-open the current [Showcase
 form](https://openai.com/form/showcase-submission/) and check for changed fields
 or asset rules. Confirm that all claims are supported by the [release
-specification](../public-beta-0.3.md), [public tool
+regression contract](../regression-contract.md), [public tool
 schema](../../plugins/apple-reminders/schemas/mcp-tools.json), release evidence,
 and rights-owned assets. Save the submitted text and date privately. Announce
 “submitted” only after the form succeeds; link a Showcase page only if OpenAI
@@ -270,7 +270,7 @@ Outline:
    boundary](../../PRIVACY.md).
 6. Briefly explain guarded writes: opaque references, idempotency, stale-write
    rejection, and exact read-back Receipts. Link the [release
-   specification](../public-beta-0.3.md), not a marketing superlative.
+   contract](../regression-contract.md), not a marketing superlative.
 7. Ask for a small, concrete test matrix: Intel/Apple silicon if available,
    macOS versions within the documented range, Homebrew/python.org Python, and
    Core versus Native Extension outcomes.
@@ -315,10 +315,10 @@ version; shorten them for a resume while retaining the repository URL.
 
 ### Korean
 
-- Apple Reminders의 실제 사용 실패 사례를 13개 도구의 제한된 Codex
+- Apple Reminders의 실제 사용 실패 사례를 15개 도구의 제한된 Codex
   플러그인 인터페이스로 재설계하고, EventKit 우선 Core와 버전 민감 Native
   Extension을 분리해 오픈소스 공개 베타로 배포함. [인터페이스
-  명세](../public-beta-0.3.md#public-interface) · `<RELEASE_URL>`
+  명세](../regression-contract.md#public-tool-surface) · `<RELEASE_URL>`
 - 불투명 revision 참조, 생성 idempotency, stale-write 차단, 최종 exact
   read-back Receipt를 구현해 동시성과 부분 성공을 단순 성공으로 오인하지
   않도록 함. [회귀 계약](../regression-contract.md) · [README 동작
@@ -329,16 +329,17 @@ version; shorten them for a resume while retaining the repository URL.
 - 합성 목록만 사용하는 실제 Apple Reminders 스모크 테스트로 생성 재시도,
   제한 조회, stale revision, URL·이미지·섹션, 완료·재개·삭제와 exact cleanup을
   검증함. `<LIVE_SMOKE_EVIDENCE_URL>`
-- 백업·복구·대량 유지보수·UI handoff를 0.3 공개 인터페이스에서 의도적으로
-  제외하고, 권한·로컬 데이터·private interface·검증 한계를 문서화함.
-  [설계 판단](../public-beta-0.3.md#diagnostics-and-withheld-maintenance) ·
+- 광범위 백업 복원·대량 유지보수·UI handoff를 0.4 공개 인터페이스에서
+  의도적으로 제외하고, exact Recently Deleted 복구와의 경계 및
+  권한·로컬 데이터·private interface·검증 한계를 문서화함.
+  [설계 판단](../regression-contract.md#deliberately-withheld-behavior) ·
   [privacy](../../PRIVACY.md)
 
 ### English
 
-- Designed and released a bounded 13-tool Codex plugin for Apple Reminders,
+- Designed and released a bounded 15-tool Codex plugin for Apple Reminders,
   separating EventKit-first Core operations from version-sensitive native
-  extensions. [Interface specification](../public-beta-0.3.md#public-interface)
+  extensions. [Interface specification](../regression-contract.md#public-tool-surface)
   · `<RELEASE_URL>`
 - Implemented opaque revision references, create idempotency, stale-write
   rejection, and exact read-back Receipts so concurrency and partial outcomes
@@ -354,7 +355,7 @@ version; shorten them for a resume while retaining the repository URL.
 - Reduced release risk by withholding broad maintenance, backup/restore, and
   unverifiable UI-handoff operations while documenting permission, local-data,
   private-interface, and verification boundaries. [Release
-  decision](../public-beta-0.3.md#diagnostics-and-withheld-maintenance) ·
+  decision](../regression-contract.md#deliberately-withheld-behavior) ·
   [privacy policy](../../PRIVACY.md)
 
 Do not add download, user, star, performance, acceptance, or feature-placement
@@ -394,7 +395,7 @@ Plugins Directory listing.
   speed score.
 - [ ] The [public schema](../../plugins/apple-reminders/schemas/mcp-tools.json),
   [architecture](../architecture.md), [release
-  specification](../public-beta-0.3.md), [changelog](../../CHANGELOG.md), and
+  contract](../regression-contract.md), [changelog](../../CHANGELOG.md), and
   user-facing policies are reachable from the release.
 - [ ] Any “built/audited with Codex” claim links to a public build history or
   review artifact. Any external-user claim links to a public issue,

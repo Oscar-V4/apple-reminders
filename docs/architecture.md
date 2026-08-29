@@ -7,7 +7,7 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The 0.3 public beta has one static 13-tool Interface:
+The 0.4 Interface has one static 15-tool surface:
 
 ### Core
 
@@ -27,6 +27,11 @@ The 0.3 public beta has one static 13-tool Interface:
 - `organize_reminder`
 - `change_reminder_attachment`
 
+### Recovery
+
+- `inspect_recently_deleted`
+- `recover_deleted_reminder`
+
 ### Diagnostics
 
 - `diagnose_reminders`
@@ -34,10 +39,11 @@ The 0.3 public beta has one static 13-tool Interface:
 The schema at `plugins/apple-reminders/schemas/mcp-tools.json` is the public tool contract. Inputs are
 closed and bounded. Results remain versioned and centrally validated, but MCP
 `outputSchema` is not duplicated into discovery because it is optional and made
-the compact 13-tool payload disproportionately large.
+the compact tool payload disproportionately large.
 
-Unused-tag cleanup, attachment repair, backup/Snapshot, restore, privacy-log
-purge, flag mutation, and native UI `show_reminder` are not public 0.3 tools.
+Unused-tag cleanup, raw attachment export, attachment repair, broad
+backup/Snapshot restore, privacy-log purge, flag mutation, and native UI
+`show_reminder` are not public tools.
 Lower-level implementations can remain internal without becoming an implied
 user-facing promise.
 
@@ -49,6 +55,11 @@ user-facing promise.
 2. **Local MCP boundary**
    - Provides JSON-RPC/stdio transport, tool input validation, dispatch, result
      sanitization, concise text summaries, and centralized result validation.
+   - Constructs one `McpRuntime` per stdio session. Initialization, rate-limit
+     history, immutable backend paths, and lazy Facade instances are not
+     process-global mutable state.
+   - Carries subprocess launch evidence in a typed `TransportResult`; child
+     JSON cannot claim that dispatch never started.
    - Production resolves only bundled backend paths.
 3. **Core Module**
    - Uses EventKit for access, lists, bounded reminder fetches, exact reads,
@@ -61,14 +72,20 @@ user-facing promise.
    - Uses private ReminderKit/store-backed adapters only for Reminders-specific
      section, tag, image, and native URL attachment behavior.
    - Keeps Core usable when a private capability is unavailable.
-5. **Diagnostics Module**
+5. **Recovery Module**
+   - Lists Recently Deleted items without write authority and issues a
+     short-lived `del1` only after an exact deleted-item read.
+   - Recovers one same-account item through ReminderKit and requires native
+     attachment preservation plus final EventKit read-back.
+6. **Diagnostics Module**
    - Runs one content-free diagnosis after a relevant failure and reports only
      the requested area.
    - Static private-framework path absence is inconclusive when dyld can load
      from the shared cache.
-6. **Internal adapter and helpers**
-   - Retain version-sensitive implementation commands, compatibility seams,
-     cache/recovery research, and tests.
+7. **Internal adapter and helpers**
+   - Retain only implementation commands required by the public Modules. The
+     obsolete 0.2-era direct Core write, maintenance, cache, backup, and repair
+     CLI is scheduled for physical removal before the 0.4 release.
    - Are not a second public API and are not a fallback for skills.
 
 There is no equivalent hosted Codex connector for the user's local native
@@ -103,8 +120,8 @@ skill -> bounded Core/Native tool -> Module -> selected backend
 
 Normal operation is background-first:
 
-- bounded reads use semantic scope, numeric limits, and filter-bound opaque
-  cursors;
+- bounded reads use semantic scope, numeric limits, and snapshot-bound opaque
+  cursors that reject changed ordered membership or revisions;
 - exact writes use a current Reference and preserve omitted fields;
 - every terminal success names its final read-back evidence;
 - `committed_verification_pending` and `partial_success` remain visible instead
@@ -118,6 +135,10 @@ evidence is described as likely mobile visibility, never direct iPhone-screen
 observation. The image helper also decodes the source bytes to select the PNG
 or JPEG UTI, uses ReminderKit's image-data attachment path, and requires that
 UTI to survive database read-back; a filename extension is not format evidence.
+Cross-Reminder copy adds independent source and destination revalidation, a
+private byte snapshot, exact SHA-512/size/dimension comparison, and final native
+read-back without exposing the backing path. A stale source UTI may normalize
+to the type decoded from byte-identical data and is not treated as corruption.
 
 ## Diagnosis policy
 
@@ -138,9 +159,10 @@ Doctor. Production backend paths cannot be changed through environment
 variables.
 
 Source tests construct `BackendPaths(adapter=..., eventkit_bridge=...,
-doctor=...)` and inject it into `mcp.server.main(backend_paths=...)` through the
-source-only harness. This makes subprocess behavior deterministic without
-adding a production configuration surface.
+doctor=...)` and inject it into a fresh `McpRuntime` (or through the source-only
+stdio harness). This makes subprocess behavior deterministic without mutable
+module globals or a production configuration surface. Separate runtimes do not
+share initialization, rate-limit history, or lazy Facade instances.
 
 ## Behaviors the smaller Interface must preserve
 
@@ -153,6 +175,6 @@ adding a production configuration surface.
 - Normalized Receipts with verified, unchanged, pending, partial, and failed
   states.
 
-The adapter's backup, repair, cache, log-purge, flag, and UI-handoff code can be
-maintained for internal evidence without increasing public discovery or asking
-first-time users to understand recovery internals.
+Historical adapter backup, repair, cache, log-purge, direct Core-write, and
+UI-handoff routes are not part of the 0.4 runtime contract. Their removal is a
+release-blocking cleanup rather than a reason to expose or fall back to them.

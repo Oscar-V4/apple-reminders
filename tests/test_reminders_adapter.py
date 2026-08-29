@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -20,6 +21,24 @@ SPEC = importlib.util.spec_from_file_location("reminders_adapter", ADAPTER_PATH)
 assert SPEC and SPEC.loader
 reminders_adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reminders_adapter)
+
+
+def validated_image_fixture(
+    path: Path,
+    *,
+    width: int = 100,
+    height: int = 50,
+    image_format: str = "png",
+) -> object:
+    data = path.read_bytes()
+    return reminders_adapter.ValidatedImage(
+        path=path.resolve(),
+        format=image_format,
+        bytes=len(data),
+        width=width,
+        height=height,
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
 
 
 class ReminderTextDocumentTests(unittest.TestCase):
@@ -291,6 +310,1038 @@ class AppleScriptSyncTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class RecentlyDeletedRecoveryTests(unittest.TestCase):
+    REMINDER_ID = "11111111-1111-4111-8111-111111111111"
+    LIST_ID = "22222222-2222-4222-8222-222222222222"
+
+    @classmethod
+    def _args(cls, guard: dict[str, object]) -> argparse.Namespace:
+        return argparse.Namespace(
+            command="recover_deleted_reminder",
+            db=None,
+            id=cls.REMINDER_ID,
+            list_id=cls.LIST_ID,
+            if_store_identity=guard["store_identity"],
+            if_version=guard["private_version"],
+            if_deleted_at=guard["deleted_at"],
+            if_attachment_digest=guard["attachment_digest"],
+            if_native_guard_digest=guard.get("native_guard_digest", "c" * 64),
+        )
+
+    def test_deleted_inventory_pages_over_one_snapshot_bound_order(self) -> None:
+        rows = [
+            {
+                "Z_PK": 2,
+                "ZCKIDENTIFIER": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "Z_OPT": 8,
+                "ZLASTMODIFIEDDATE": 200.0,
+            },
+            {
+                "Z_PK": 1,
+                "ZCKIDENTIFIER": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "Z_OPT": 7,
+                "ZLASTMODIFIEDDATE": 100.0,
+            },
+        ]
+        connection = mock.Mock()
+        snapshot_result = mock.Mock()
+        snapshot_result.fetchall.return_value = rows
+        page_result = mock.Mock()
+        page_result.fetchall.return_value = [rows[1]]
+        connection.execute.side_effect = [mock.Mock(), snapshot_result, page_result]
+
+        def public_snapshot(_connection, row):
+            return ({"id": row["ZCKIDENTIFIER"]}, {"private": "not public"})
+
+        args = argparse.Namespace(db=None, account_id=None, limit=1, offset=1)
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                return_value=connection,
+            ),
+            mock.patch.object(reminders_adapter, "require_command_capability"),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_reminder_snapshot",
+                side_effect=public_snapshot,
+            ),
+            mock.patch.object(reminders_adapter, "json_out") as emit,
+        ):
+            result = reminders_adapter.cmd_list_deleted_reminders(args)
+
+        self.assertEqual(result, 0)
+        payload = emit.call_args.args[0]
+        self.assertEqual(
+            payload["deleted_reminders"],
+            [{"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}],
+        )
+        self.assertEqual(payload["total_matched"], 2)
+        self.assertFalse(payload["has_more"])
+        self.assertIsNone(payload["next_offset"])
+        self.assertRegex(payload["snapshot_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("private", repr(payload))
+        self.assertEqual(connection.execute.call_args_list[0].args[0], "begin")
+        snapshot_query = connection.execute.call_args_list[1].args[0]
+        page_query = connection.execute.call_args_list[2].args[0]
+        self.assertNotIn("select r.*", snapshot_query.casefold())
+        self.assertIn(
+            "select r.z_pk,r.zckidentifier,r.z_opt,r.zlastmodifieddate",
+            " ".join(snapshot_query.casefold().split()),
+        )
+        self.assertIn("select r.*", page_query.casefold())
+        self.assertEqual(connection.execute.call_args_list[2].args[1], [1])
+
+    def test_deleted_inventory_rejects_page_revision_drift(self) -> None:
+        snapshot_row = {
+            "Z_PK": 1,
+            "ZCKIDENTIFIER": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "Z_OPT": 7,
+            "ZLASTMODIFIEDDATE": 100.0,
+        }
+        changed_row = {**snapshot_row, "Z_OPT": 8}
+        connection = mock.Mock()
+        snapshot_result = mock.Mock()
+        snapshot_result.fetchall.return_value = [snapshot_row]
+        page_result = mock.Mock()
+        page_result.fetchall.return_value = [changed_row]
+        connection.execute.side_effect = [mock.Mock(), snapshot_result, page_result]
+        args = argparse.Namespace(db=None, account_id=None, limit=1, offset=0)
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                return_value=connection,
+            ),
+            mock.patch.object(reminders_adapter, "require_command_capability"),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.cmd_list_deleted_reminders(args)
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "pagination_snapshot_stale",
+        )
+        connection.close.assert_called_once_with()
+
+    def test_deleted_item_absence_preserves_typed_not_found(self) -> None:
+        connection = mock.Mock()
+        connection.execute.return_value.fetchone.return_value = None
+
+        with self.assertRaises(reminders_adapter.AdapterError) as raised:
+            reminders_adapter.find_deleted_reminder(connection, self.REMINDER_ID)
+
+        self.assertEqual(raised.exception.code, "not_found")
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "deleted_reminder_not_recoverable",
+        )
+
+    def test_helper_crash_without_receipt_preserves_possible_write(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["remkit_recover"],
+            returncode=-11,
+            stdout="",
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                return_value=Path("/tmp/remkit_recover"),
+            ),
+            mock.patch.object(
+                reminders_adapter.subprocess,
+                "run",
+                return_value=completed,
+            ),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_recovery(
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+                "c" * 64,
+            )
+
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
+        self.assertTrue(raised.exception.details["partial_failure"])
+
+    def test_native_guard_read_is_bounded_and_never_dispatches_a_write(self) -> None:
+        payload = json.dumps(
+            {
+                "ok": True,
+                "operation": "read_recovery_guard",
+                "mutation_attempted": False,
+                "reminder_id": self.REMINDER_ID,
+                "native_guard_digest": "c" * 64,
+            }
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                return_value=Path("/tmp/remkit_recover"),
+            ),
+            mock.patch.object(
+                reminders_adapter.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=payload, stderr=""
+                ),
+            ) as run,
+        ):
+            digest = reminders_adapter.invoke_reminderkit_recovery_guard(
+                self.REMINDER_ID
+            )
+
+        self.assertEqual(digest, "c" * 64)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/tmp/remkit_recover", "guard", self.REMINDER_ID],
+        )
+
+    def test_native_guard_mismatch_is_known_no_write_concurrency(self) -> None:
+        payload = json.dumps(
+            {
+                "ok": False,
+                "error": "concurrent_modification",
+                "mutation_attempted": False,
+            }
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                return_value=Path("/tmp/remkit_recover"),
+            ),
+            mock.patch.object(
+                reminders_adapter.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 2, stdout=payload, stderr=""
+                ),
+            ),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_recovery(
+                self.REMINDER_ID,
+                self.LIST_ID,
+                "c" * 64,
+            )
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        self.assertFalse(raised.exception.details["partial_failure"])
+        self.assertFalse(raised.exception.details["mutation_outcome_unknown"])
+
+    def test_unknown_native_outcome_becomes_a_cacheable_pending_receipt(self) -> None:
+        connection = mock.Mock()
+        row = {"ZACCOUNT": 7}
+        destination = {"ZACCOUNT": 7}
+        before = {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "deleted_at": "2026-08-28T00:00:00+09:00",
+            "attachment_count": 1,
+        }
+        guard = {
+            "store_identity": "a" * 64,
+            "private_version": 3,
+            "deleted_at": before["deleted_at"],
+            "attachment_digest": "b" * 64,
+        }
+        args = argparse.Namespace(
+            db=None,
+            id=before["id"],
+            list_id="22222222-2222-4222-8222-222222222222",
+            if_store_identity=guard["store_identity"],
+            if_version=guard["private_version"],
+            if_deleted_at=guard["deleted_at"],
+            if_attachment_digest=guard["attachment_digest"],
+            if_native_guard_digest="c" * 64,
+        )
+        failure = reminders_adapter.AdapterError(
+            "helper crashed",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter, "resolve_database", return_value=Path("/tmp/store.sqlite")
+            ),
+            mock.patch.object(
+                reminders_adapter, "connect_read_only", return_value=connection
+            ),
+            mock.patch.object(
+                reminders_adapter, "find_deleted_reminder", return_value=row
+            ),
+            mock.patch.object(reminders_adapter, "find_list", return_value=destination),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_reminder_snapshot",
+                return_value=(before, guard),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_store_identity",
+                return_value=guard["store_identity"],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "invoke_reminderkit_recovery",
+                side_effect=failure,
+            ),
+        ):
+            receipt = reminders_adapter.recover_deleted_reminder_once(args)
+
+        self.assertEqual(receipt["status"], "committed_verification_pending")
+        self.assertIsNone(receipt["verification"]["write_performed"])
+        self.assertFalse(receipt["recovery"]["automatic_retry_safe"])
+        self.assertFalse(receipt["error"]["retryable"])
+
+    def test_helper_relies_on_save_request_sync_and_never_calls_nil_completion(self) -> None:
+        source = (
+            reminders_adapter.SCRIPT_DIR / "remkit_recover.m"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("setSyncToCloudKit:", source)
+        self.assertIn("NativeGuardDigest", source)
+        self.assertIn("pre_save_guard_matched", source)
+        self.assertIn("concurrent_modification", source)
+        self.assertNotIn("triggerCloudKitOnlySyncWithReason:", source)
+        staged = source.index("undeleteReminderWithID:usingUndo:")
+        immediate_guard = source.index("preSaveDeletedReminder")
+        saved = source.index("saveSynchronouslyWithError:", immediate_guard)
+        self.assertLess(staged, immediate_guard)
+        self.assertLess(immediate_guard, saved)
+
+    def test_post_save_destination_read_failure_is_pending_not_no_mutation(self) -> None:
+        digest = reminders_adapter.deleted_attachment_digest([])
+        guard = {
+            "store_identity": "a" * 64,
+            "private_version": 3,
+            "deleted_at": "2026-08-28T00:00:00+09:00",
+            "attachment_digest": digest,
+        }
+        before = {
+            "id": self.REMINDER_ID,
+            "deleted_at": guard["deleted_at"],
+            "attachment_count": 0,
+        }
+        preflight = mock.Mock()
+        active_read = mock.Mock()
+        destination_read = mock.Mock()
+        active_read.execute.return_value.fetchone.return_value = {
+            "Z_PK": 9,
+            "ZCKIDENTIFIER": self.REMINDER_ID,
+            "ZLIST": 7,
+        }
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                side_effect=[preflight, active_read, destination_read],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_deleted_reminder",
+                return_value={"ZACCOUNT": 1},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_list",
+                side_effect=[
+                    {"ZACCOUNT": 1, "Z_PK": 7},
+                    reminders_adapter.AdapterError("List disappeared after save"),
+                ],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_reminder_snapshot",
+                return_value=(before, guard),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_store_identity",
+                return_value=guard["store_identity"],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "invoke_reminderkit_recovery",
+                return_value={
+                    "ok": True,
+                    "saved": True,
+                    "pre_save_guard_matched": True,
+                    "attachment_count": 0,
+                },
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_attachment_rows",
+                return_value=[],
+            ),
+        ):
+            receipt = reminders_adapter.recover_deleted_reminder_once(
+                self._args(guard)
+            )
+
+        self.assertEqual(receipt["status"], "committed_verification_pending")
+        self.assertTrue(receipt["verification"]["write_performed"])
+        self.assertFalse(receipt["verification"]["final_read"])
+        self.assertEqual(
+            receipt["error"]["reason_code"],
+            "recovery_post_write_verification_failed",
+        )
+
+    def test_native_attachment_count_mismatch_cannot_verify(self) -> None:
+        attachment = {
+            "Z_PK": 10,
+            "Z_ENT": reminders_adapter.URL_ATTACHMENT_ENT,
+            "ZCKIDENTIFIER": "33333333-3333-4333-8333-333333333333",
+            "ZREMINDER2": 9,
+            "Z_FOK_REMINDER1": 0,
+            "ZFILENAME": None,
+            "ZSHA512SUM": None,
+            "ZUTI": "public.url",
+            "ZFILESIZE": None,
+            "ZWIDTH": None,
+            "ZHEIGHT": None,
+            "ZURL": "https://example.invalid/recovery-count",
+            "ZHOSTURL": "https://example.invalid",
+            "ZMARKEDFORDELETION": 0,
+        }
+        digest = reminders_adapter.deleted_attachment_digest([attachment])
+        guard = {
+            "store_identity": "a" * 64,
+            "private_version": 3,
+            "deleted_at": "2026-08-28T00:00:00+09:00",
+            "attachment_digest": digest,
+        }
+        before = {
+            "id": self.REMINDER_ID,
+            "deleted_at": guard["deleted_at"],
+            "attachment_count": 1,
+        }
+        preflight = mock.Mock()
+        active_read = mock.Mock()
+        destination_read = mock.Mock()
+        active_read.execute.return_value.fetchone.return_value = {
+            "Z_PK": 9,
+            "ZCKIDENTIFIER": self.REMINDER_ID,
+            "ZLIST": 7,
+        }
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "resolve_database",
+                return_value=Path("/tmp/store.sqlite"),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "connect_read_only",
+                side_effect=[preflight, active_read, destination_read],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_deleted_reminder",
+                return_value={"ZACCOUNT": 1},
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "find_list",
+                side_effect=[
+                    {"ZACCOUNT": 1, "Z_PK": 7},
+                    {"ZACCOUNT": 1, "Z_PK": 7},
+                ],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_reminder_snapshot",
+                return_value=(before, guard),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_store_identity",
+                return_value=guard["store_identity"],
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "invoke_reminderkit_recovery",
+                return_value={
+                    "ok": True,
+                    "saved": True,
+                    "pre_save_guard_matched": True,
+                    "attachment_count": 0,
+                },
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "deleted_attachment_rows",
+                return_value=[attachment],
+            ),
+        ):
+            receipt = reminders_adapter.recover_deleted_reminder_once(
+                self._args(guard)
+            )
+
+        self.assertEqual(receipt["status"], "partial_success")
+        self.assertFalse(receipt["verification"]["matched"])
+        self.assertFalse(receipt["verification"]["attachment_counts_match"])
+        self.assertEqual(receipt["verification"]["before_attachment_count"], 1)
+        self.assertEqual(receipt["verification"]["native_attachment_count"], 0)
+        self.assertEqual(receipt["verification"]["after_attachment_count"], 1)
+
+    def test_deleted_attachment_digest_rejects_corrupt_backing_bytes(self) -> None:
+        expected_bytes = b"expected deleted image bytes"
+        expected_sha512 = reminders_adapter.hashlib.sha512(
+            expected_bytes
+        ).hexdigest()
+        attachment = {
+            "Z_PK": 10,
+            "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT,
+            "ZCKIDENTIFIER": "33333333-3333-4333-8333-333333333333",
+            "ZREMINDER2": 9,
+            "Z_FOK_REMINDER1": 0,
+            "ZFILENAME": "deleted.png",
+            "ZSHA512SUM": expected_sha512,
+            "ZUTI": "public.png",
+            "ZFILESIZE": len(expected_bytes),
+            "ZWIDTH": 2,
+            "ZHEIGHT": 3,
+            "ZURL": None,
+            "ZHOSTURL": None,
+            "ZMARKEDFORDELETION": 0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            files = Path(temp_dir) / "Files"
+            attachments = files / "Account-SYNTHETIC" / "Attachments"
+            attachments.mkdir(parents=True)
+            backing = attachments / f"{expected_sha512}.png"
+            backing.write_bytes(expected_bytes)
+            with mock.patch.object(reminders_adapter, "FILES", files):
+                verified_digest = reminders_adapter.deleted_attachment_digest(
+                    [attachment],
+                    verify_image_bytes=True,
+                )
+                backing.write_bytes(b"corrupt bytes")
+                with self.assertRaises(reminders_adapter.AdapterError) as raised:
+                    reminders_adapter.deleted_attachment_digest(
+                        [attachment],
+                        verify_image_bytes=True,
+                    )
+
+        self.assertRegex(verified_digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "deleted_image_bytes_mismatch",
+        )
+
+
+class CrossReminderImageCopyTests(unittest.TestCase):
+    SOURCE_ID = "11111111-1111-4111-8111-111111111111"
+    DESTINATION_ID = "22222222-2222-4222-8222-222222222222"
+    SOURCE_ATTACHMENT_ID = "33333333-3333-4333-8333-333333333333"
+    NEW_ATTACHMENT_ID = "44444444-4444-4444-8444-444444444444"
+
+    @staticmethod
+    def _args() -> argparse.Namespace:
+        return argparse.Namespace(
+            db=None,
+            source_id=CrossReminderImageCopyTests.SOURCE_ID,
+            id=CrossReminderImageCopyTests.DESTINATION_ID,
+            attachment_id=CrossReminderImageCopyTests.SOURCE_ATTACHMENT_ID,
+            if_source_version=7,
+            if_version=12,
+            idempotency_key="copy-image-adapter",
+        )
+
+    def test_copy_uses_private_stable_snapshot_and_never_returns_its_path(self) -> None:
+        source = {
+            "Z_PK": 1,
+            "Z_OPT": 7,
+            "ZCKIDENTIFIER": self.SOURCE_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        destination = {
+            "Z_PK": 2,
+            "Z_OPT": 12,
+            "ZCKIDENTIFIER": self.DESTINATION_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        selected = {"Z_PK": 10, "ZCKIDENTIFIER": self.SOURCE_ATTACHMENT_ID}
+        source_bytes = b"private-reminders-png-bytes"
+        source_payload = {
+            "id": self.SOURCE_ATTACHMENT_ID,
+            "type": "image",
+            "uti": "public.png",
+            "filename": "source.png",
+            "sha512": reminders_adapter.hashlib.sha512(source_bytes).hexdigest(),
+            "file_size": len(source_bytes),
+            "width": 10,
+            "height": 10,
+            "marked_for_deletion": False,
+        }
+        new_attachment = {
+            "id": self.NEW_ATTACHMENT_ID,
+            "type": "image",
+            # ReminderKit may normalize stale source metadata to the format
+            # decoded from the exact same bytes.
+            "uti": "public.jpeg",
+            "filename": "source.png",
+            "sha512": source_payload["sha512"],
+            "file_size": len(source_bytes),
+            "width": 10,
+            "height": 10,
+            "sync": {"mobile_visible_likely": True},
+        }
+        connection = mock.Mock()
+        attached_paths: list[Path] = []
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            source_path = temp_root / "source.png"
+            source_path.write_bytes(source_bytes)
+
+            def validate(path: Path) -> mock.Mock:
+                value = Path(path)
+                return mock.Mock(
+                    path=value,
+                    format="png",
+                    sha256=reminders_adapter.hashlib.sha256(value.read_bytes()).hexdigest(),
+                )
+
+            def attach(
+                con: object,
+                reminder: dict[str, object],
+                image_path: Path,
+            ) -> dict[str, object]:
+                attached_paths.append(Path(image_path))
+                self.assertNotEqual(Path(image_path), source_path)
+                self.assertTrue(Path(image_path).is_file())
+                self.assertEqual(Path(image_path).read_bytes(), source_bytes)
+                return {
+                    "attachment": new_attachment,
+                    "sync": {"mobile_visible_likely": True},
+                    "_row": {"private": "must be removed"},
+                }
+
+            with (
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_database",
+                    return_value=temp_root / "store.sqlite",
+                ),
+                mock.patch.object(reminders_adapter, "connect", return_value=connection),
+                mock.patch.object(
+                    reminders_adapter,
+                    "require_command_capability",
+                    return_value={"supported": True},
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "find_reminder",
+                    side_effect=[source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_attachment_selection",
+                    side_effect=[
+                        (selected, [source_payload], None),
+                        (selected, [source_payload], None),
+                        (selected, [source_payload], None),
+                    ],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attachment_payload",
+                    return_value=source_payload,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "exact_source_image_path",
+                    return_value=source_path,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "validate_image_input",
+                    side_effect=validate,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "reread_reminder",
+                    side_effect=[source, destination, source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attach_image_reminderkit_record",
+                    side_effect=attach,
+                ),
+                mock.patch.object(reminders_adapter, "log_action", return_value=None),
+                mock.patch.object(reminders_adapter, "CACHE_DIR", temp_root / "cache"),
+            ):
+                receipt = reminders_adapter.copy_image_attachment_once(self._args())
+
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(
+            receipt["target"],
+            {
+                "source_reminder_id": self.SOURCE_ID,
+                "reminder_id": self.DESTINATION_ID,
+                "source_attachment_id": self.SOURCE_ATTACHMENT_ID,
+                "attachment_id": self.NEW_ATTACHMENT_ID,
+            },
+        )
+        self.assertTrue(receipt["verification"]["source_unchanged"])
+        self.assertTrue(receipt["verification"]["source_bytes_matched"])
+        self.assertEqual(len(attached_paths), 1)
+        self.assertFalse(attached_paths[0].exists())
+        self.assertNotIn(str(source_path), json.dumps(receipt))
+        self.assertNotIn("copy-image.", json.dumps(receipt))
+
+    def test_destination_digest_mismatch_cannot_return_verified(self) -> None:
+        source = {
+            "Z_PK": 1,
+            "Z_OPT": 7,
+            "ZCKIDENTIFIER": self.SOURCE_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        destination = {
+            "Z_PK": 2,
+            "Z_OPT": 12,
+            "ZCKIDENTIFIER": self.DESTINATION_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        selected = {"Z_PK": 10, "ZCKIDENTIFIER": self.SOURCE_ATTACHMENT_ID}
+        source_bytes = b"private-reminders-png-bytes"
+        source_payload = {
+            "id": self.SOURCE_ATTACHMENT_ID,
+            "type": "image",
+            "uti": "public.png",
+            "filename": "source.png",
+            "sha512": reminders_adapter.hashlib.sha512(source_bytes).hexdigest(),
+            "file_size": len(source_bytes),
+            "width": 10,
+            "height": 10,
+            "marked_for_deletion": False,
+        }
+        mismatched_attachment = {
+            **source_payload,
+            "id": self.NEW_ATTACHMENT_ID,
+            "sha512": "f" * 128,
+            "sync": {"mobile_visible_likely": True},
+        }
+        connection = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            source_path = temp_root / "source.png"
+            source_path.write_bytes(source_bytes)
+
+            def validate(path: Path) -> mock.Mock:
+                value = Path(path)
+                return mock.Mock(
+                    path=value,
+                    format="png",
+                    sha256=reminders_adapter.hashlib.sha256(value.read_bytes()).hexdigest(),
+                )
+
+            with (
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_database",
+                    return_value=temp_root / "store.sqlite",
+                ),
+                mock.patch.object(reminders_adapter, "connect", return_value=connection),
+                mock.patch.object(
+                    reminders_adapter,
+                    "require_command_capability",
+                    return_value={"supported": True},
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "find_reminder",
+                    side_effect=[source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_attachment_selection",
+                    side_effect=[
+                        (selected, [source_payload], None),
+                        (selected, [source_payload], None),
+                        (selected, [source_payload], None),
+                    ],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attachment_payload",
+                    return_value=source_payload,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "exact_source_image_path",
+                    return_value=source_path,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "validate_image_input",
+                    side_effect=validate,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "reread_reminder",
+                    side_effect=[source, destination, source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attach_image_reminderkit_record",
+                    return_value={
+                        "attachment": mismatched_attachment,
+                        "sync": {"mobile_visible_likely": True},
+                    },
+                ),
+                mock.patch.object(reminders_adapter, "log_action", return_value=None),
+                mock.patch.object(reminders_adapter, "CACHE_DIR", temp_root / "cache"),
+            ):
+                receipt = reminders_adapter.copy_image_attachment_once(self._args())
+
+        self.assertEqual(receipt["status"], "committed_verification_pending")
+        self.assertFalse(receipt["verification"]["destination_content_matched"])
+        self.assertFalse(receipt["verification"]["final_read"])
+        self.assertEqual(
+            receipt["error"]["reason_code"],
+            "destination_image_content_mismatch",
+        )
+
+    def test_stale_source_private_version_fails_before_native_attach(self) -> None:
+        source = {
+            "Z_PK": 1,
+            "Z_OPT": 7,
+            "ZCKIDENTIFIER": self.SOURCE_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        stale_source = {**source, "Z_OPT": 8}
+        destination = {
+            "Z_PK": 2,
+            "Z_OPT": 12,
+            "ZCKIDENTIFIER": self.DESTINATION_ID,
+            "ZMARKEDFORDELETION": 0,
+        }
+        selected = {"Z_PK": 10, "ZCKIDENTIFIER": self.SOURCE_ATTACHMENT_ID}
+        source_bytes = b"private-reminders-png-bytes"
+        source_payload = {
+            "id": self.SOURCE_ATTACHMENT_ID,
+            "type": "image",
+            "uti": "public.png",
+            "filename": "source.png",
+            "sha512": reminders_adapter.hashlib.sha512(source_bytes).hexdigest(),
+            "file_size": len(source_bytes),
+            "width": 10,
+            "height": 10,
+            "marked_for_deletion": False,
+        }
+        connection = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            source_path = temp_root / "source.png"
+            source_path.write_bytes(source_bytes)
+
+            def validate(path: Path) -> mock.Mock:
+                value = Path(path)
+                return mock.Mock(
+                    path=value,
+                    format="png",
+                    sha256=reminders_adapter.hashlib.sha256(value.read_bytes()).hexdigest(),
+                )
+
+            attach = mock.Mock()
+            with (
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_database",
+                    return_value=temp_root / "store.sqlite",
+                ),
+                mock.patch.object(reminders_adapter, "connect", return_value=connection),
+                mock.patch.object(
+                    reminders_adapter,
+                    "require_command_capability",
+                    return_value={"supported": True},
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "find_reminder",
+                    side_effect=[source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "resolve_attachment_selection",
+                    return_value=(selected, [source_payload], None),
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attachment_payload",
+                    return_value=source_payload,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "exact_source_image_path",
+                    return_value=source_path,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "validate_image_input",
+                    side_effect=validate,
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "reread_reminder",
+                    side_effect=[stale_source, destination],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "attach_image_reminderkit_record",
+                    attach,
+                ),
+                mock.patch.object(reminders_adapter, "CACHE_DIR", temp_root / "cache"),
+            ):
+                with self.assertRaises(reminders_adapter.AdapterError) as raised:
+                    reminders_adapter.copy_image_attachment_once(self._args())
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        attach.assert_not_called()
+
+    def test_source_file_resolution_collapses_only_digest_equivalent_candidates(
+        self,
+    ) -> None:
+        attachment = {
+            "id": self.SOURCE_ATTACHMENT_ID,
+            "type": "image",
+            "marked_for_deletion": False,
+        }
+        with mock.patch.object(
+            reminders_adapter,
+            "source_paths_for_attachment",
+            return_value=[],
+        ):
+            with self.assertRaises(reminders_adapter.AdapterError) as raised:
+                reminders_adapter.exact_source_image_path(attachment)
+        self.assertEqual(raised.exception.code, "invalid_input")
+
+        with tempfile.TemporaryDirectory() as temp:
+            files_root = Path(temp) / "Files"
+            attachment_root = files_root / "Account-1" / "Attachments"
+            attachment_root.mkdir(parents=True)
+            first = attachment_root / "same.png"
+            second = attachment_root / "same.jpeg"
+            content = b"exact-private-image-bytes"
+            first.write_bytes(content)
+            second.write_bytes(content)
+            exact = {
+                **attachment,
+                "sha512": reminders_adapter.hashlib.sha512(content).hexdigest(),
+            }
+            with (
+                mock.patch.object(reminders_adapter, "FILES", files_root),
+                mock.patch.object(
+                    reminders_adapter,
+                    "source_paths_for_attachment",
+                    return_value=[second, first],
+                ),
+            ):
+                resolved = reminders_adapter.exact_source_image_path(exact)
+            self.assertEqual(
+                resolved,
+                min((first.resolve(), second.resolve()), key=lambda path: str(path)),
+            )
+
+            second.write_bytes(b"different-private-image-bytes")
+            with (
+                mock.patch.object(reminders_adapter, "FILES", files_root),
+                mock.patch.object(
+                    reminders_adapter,
+                    "source_paths_for_attachment",
+                    return_value=[first, second],
+                ),
+                self.assertRaises(reminders_adapter.AdapterError) as raised,
+            ):
+                reminders_adapter.exact_source_image_path(exact)
+            self.assertEqual(raised.exception.code, "ambiguous_target")
+            self.assertEqual(
+                raised.exception.details["reason_code"],
+                "source_image_files_diverge",
+            )
+
+            target = attachment_root / "target.png"
+            target.write_bytes(content)
+            symlink = attachment_root / "source.png"
+            symlink.symlink_to(target)
+            with (
+                mock.patch.object(reminders_adapter, "FILES", files_root),
+                mock.patch.object(
+                    reminders_adapter,
+                    "source_paths_for_attachment",
+                    return_value=[symlink],
+                ),
+            ):
+                with self.assertRaises(reminders_adapter.AdapterError) as raised:
+                    reminders_adapter.exact_source_image_path(exact)
+            self.assertEqual(
+                raised.exception.details["reason_code"],
+                "source_image_file_not_regular",
+            )
+
+    def test_idempotency_snapshot_keeps_receipt_proof_but_drops_private_paths(self) -> None:
+        snapshot = reminders_adapter.idempotency_result_snapshot(
+            {
+                "status": "verified",
+                "target": {"reminder_id": self.DESTINATION_ID},
+                "verification": {
+                    "state": "read_back",
+                    "write_performed": True,
+                    "final_read": True,
+                    "matched": True,
+                    "source_unchanged": True,
+                    "final_attachment_content_hash": "a" * 64,
+                },
+                "recovery": {
+                    "semantics": "not_applicable",
+                    "automatic_retry_safe": False,
+                },
+                "private_path": "/Users/example/Library/private.png",
+            }
+        )
+
+        self.assertTrue(snapshot["verification"]["write_performed"])
+        self.assertTrue(snapshot["verification"]["final_read"])
+        self.assertTrue(snapshot["verification"]["matched"])
+        self.assertEqual(
+            snapshot["verification"]["final_attachment_content_hash"],
+            "a" * 64,
+        )
+        self.assertFalse(snapshot["recovery"]["automatic_retry_safe"])
+        self.assertNotIn("private_path", snapshot)
+
+
 class AttachmentSyncTests(unittest.TestCase):
     def test_reminderkit_attach_does_not_hold_a_sqlite_write_transaction(self) -> None:
         con = sqlite3.connect(":memory:")
@@ -312,6 +1363,7 @@ class AttachmentSyncTests(unittest.TestCase):
         def attach_without_lock(
             active: sqlite3.Connection,
             *_: object,
+            **__: object,
         ) -> dict[str, object]:
             self.assertFalse(active.in_transaction)
             return {
@@ -363,6 +1415,7 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertIn("CGImageSourceGetType", source)
         self.assertIn("addImageAttachmentWithData:uti:width:height:", source)
         self.assertNotIn("NSURLContentTypeKey", source)
+        self.assertNotIn("triggerCloudKitOnlySyncWithReason:", source)
 
     def test_native_image_helper_removes_one_exact_attachment_through_save_request(self) -> None:
         source = (
@@ -1304,6 +2357,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -1386,6 +2440,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -1403,9 +2458,9 @@ class AttachmentSyncTests(unittest.TestCase):
             "ZREMINDER2": 1,
             "Z_FOK_REMINDER1": 1024,
             "ZFILENAME": "new.png",
-            "ZSHA512SUM": "sha",
+            "ZSHA512SUM": hashlib.sha512(b"synthetic").hexdigest(),
             "ZUTI": "public.png",
-            "ZFILESIZE": 12,
+            "ZFILESIZE": len(b"synthetic"),
             "ZWIDTH": 100,
             "ZHEIGHT": 50,
             "ZURL": None,
@@ -1498,6 +2553,7 @@ class AttachmentSyncTests(unittest.TestCase):
                     con,
                     {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                     image,
+                    validated_image=validated_image_fixture(image),
                 )
 
         self.assertTrue(result["attached"])
@@ -1523,6 +2579,14 @@ class AttachmentSyncTests(unittest.TestCase):
                 "stored_image_uti",
                 "public.png",
                 "native_image_content_type_mismatch",
+            ),
+            (
+                "content_mismatch",
+                "data",
+                "public.png",
+                None,
+                None,
+                "native_image_content_mismatch",
             ),
         )
         for (
@@ -1617,6 +2681,7 @@ class AttachmentSyncTests(unittest.TestCase):
                             con,
                             {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                             image,
+                            validated_image=validated_image_fixture(image),
                         )
                 finally:
                     con.close()
@@ -1625,7 +2690,10 @@ class AttachmentSyncTests(unittest.TestCase):
                 self.assertEqual(raised.exception.reason_code, reason_code)
                 self.assertFalse(raised.exception.retryable)
                 self.assertTrue(raised.exception.details["partial_failure"])
-                self.assertEqual(raised.exception.details[detail_key], detail_value)
+                if detail_key is not None:
+                    self.assertEqual(
+                        raised.exception.details[detail_key], detail_value
+                    )
                 self.assertIn(
                     "delete_attachment",
                     raised.exception.details["cleanup_command"],
@@ -1685,6 +2753,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()
@@ -1741,6 +2810,7 @@ class AttachmentSyncTests(unittest.TestCase):
                         con,
                         {"Z_PK": 1, "ZCKIDENTIFIER": "REM-1"},
                         image,
+                        validated_image=validated_image_fixture(image),
                     )
             finally:
                 con.close()

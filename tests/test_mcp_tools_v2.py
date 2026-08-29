@@ -19,6 +19,8 @@ EXPECTED_TOOLS = [
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
     "inspect_reminder_native",
     "ensure_reminder_list",
     "create_reminder_section",
@@ -35,6 +37,8 @@ EXPECTED_ANNOTATIONS = {
     "create_reminder": (False, False, True, False),
     "change_reminder": (False, True, False, False),
     "delete_reminder": (False, True, True, False),
+    "inspect_recently_deleted": (True, False, True, False),
+    "recover_deleted_reminder": (False, False, True, False),
     "inspect_reminder_native": (True, False, True, False),
     "ensure_reminder_list": (False, False, True, False),
     "create_reminder_section": (False, False, True, False),
@@ -51,6 +55,8 @@ EXPECTED_TITLES = {
     "create_reminder": "Create reminder",
     "change_reminder": "Change reminder",
     "delete_reminder": "Delete reminder",
+    "inspect_recently_deleted": "Inspect recently deleted reminders",
+    "recover_deleted_reminder": "Recover deleted reminder",
     "inspect_reminder_native": "Inspect reminder details",
     "ensure_reminder_list": "Ensure reminder list",
     "create_reminder_section": "Create reminder section",
@@ -67,6 +73,8 @@ EXPECTED_REQUIRED = {
     "create_reminder": {"list_id", "title", "idempotency_key"},
     "change_reminder": {"reference", "action"},
     "delete_reminder": {"reference"},
+    "inspect_recently_deleted": {"kind"},
+    "recover_deleted_reminder": {"reference", "list_id", "idempotency_key"},
     "inspect_reminder_native": {"kind"},
     "ensure_reminder_list": {"source_id", "name", "idempotency_key"},
     "create_reminder_section": {"list_id", "name"},
@@ -118,10 +126,24 @@ class McpToolsV2SchemaTests(unittest.TestCase):
         cls.tools = cls.document["tools"]
         cls.by_name = {tool["name"]: tool for tool in cls.tools}
 
-    def test_public_beta_exposes_exactly_the_agreed_thirteen_tools(self) -> None:
+    def test_public_surface_exposes_exactly_the_agreed_fifteen_tools(self) -> None:
         self.assertEqual(self.document["schemaVersion"], 2)
         self.assertEqual(set(self.by_name), set(EXPECTED_TOOLS))
-        self.assertEqual(len(self.by_name), 13)
+        self.assertEqual(len(self.by_name), 15)
+
+    def test_priority_schema_explains_eventkit_order(self) -> None:
+        create = self.by_name["create_reminder"]["inputSchema"]["properties"][
+            "priority"
+        ]["description"]
+        patch = self.by_name["change_reminder"]["inputSchema"]["$defs"]["patch"][
+            "properties"
+        ]["priority"]["description"]
+
+        for description in (create, patch):
+            self.assertIn("1-4 high", description)
+            self.assertIn("5 medium", description)
+            self.assertIn("6-9 low", description)
+            self.assertIn("1, 5, or 9", description)
 
     def test_every_public_tool_has_a_human_readable_title(self) -> None:
         self.assertEqual(
@@ -180,26 +202,41 @@ class McpToolsV2SchemaTests(unittest.TestCase):
             schema["properties"]["status"]["enum"],
             ["incomplete", "completed"],
         )
+        list_incomplete, due_incomplete, completed = schema["oneOf"]
         self.assertEqual(
-            schema["oneOf"],
-            [
-                {
-                    "properties": {"status": {"const": "incomplete"}},
-                    "anyOf": [
-                        {"required": ["list_ids"]},
-                        {"required": ["due_start", "due_end"]},
-                    ],
-                },
-                {
-                    "required": [
-                        "status",
-                        "completion_start",
-                        "completion_end",
-                    ],
-                    "properties": {"status": {"const": "completed"}},
-                },
-            ],
+            list_incomplete["properties"]["status"]["const"], "incomplete"
         )
+        self.assertEqual(
+            set(list_incomplete["required"]),
+            {"list_ids"},
+        )
+        self.assertTrue(
+            {"list_ids", "query", "limit", "sort", "cursor"}
+            <= set(list_incomplete["properties"])
+        )
+        self.assertNotIn("due_start", list_incomplete["properties"])
+        self.assertEqual(
+            due_incomplete["properties"]["status"]["const"], "incomplete"
+        )
+        self.assertEqual(
+            set(due_incomplete["required"]),
+            {"due_start", "due_end"},
+        )
+        self.assertTrue(
+            {"list_ids", "due_start", "due_end", "query", "limit", "sort", "cursor"}
+            <= set(due_incomplete["properties"])
+        )
+        self.assertNotIn("completion_start", due_incomplete["properties"])
+        self.assertEqual(completed["properties"]["status"]["const"], "completed")
+        self.assertEqual(
+            set(completed["required"]),
+            {"status", "completion_start", "completion_end"},
+        )
+        self.assertTrue(
+            {"list_ids", "completion_start", "completion_end", "query", "limit", "sort", "cursor"}
+            <= set(completed["properties"])
+        )
+        self.assertNotIn("due_start", completed["properties"])
         self.assertEqual(
             schema["x-rangeConstraints"],
             [
@@ -215,6 +252,54 @@ class McpToolsV2SchemaTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_top_level_union_branches_repeat_all_callable_fields(self) -> None:
+        """Codex tool conversion reads branch properties, not shared parent fields."""
+
+        for tool in self.tools:
+            schema = tool["inputSchema"]
+            branches = schema.get("oneOf")
+            if not isinstance(branches, list):
+                continue
+            covered: set[str] = set()
+            for branch in branches:
+                properties = set(branch.get("properties", {}))
+                self.assertEqual(branch.get("type"), "object", tool["name"])
+                self.assertIs(branch.get("additionalProperties"), False, tool["name"])
+                self.assertTrue(
+                    set(branch.get("required", [])) <= properties,
+                    tool["name"],
+                )
+                self.assertNotIn("oneOf", branch, tool["name"])
+                self.assertNotIn("anyOf", branch, tool["name"])
+                covered.update(properties)
+            self.assertEqual(
+                covered,
+                set(schema.get("properties", {})),
+                tool["name"],
+            )
+
+        fetch = self.by_name["fetch_reminders"]["inputSchema"]
+        for branch in fetch["oneOf"]:
+            self.assertEqual(branch.get("type"), "object")
+            self.assertIs(branch.get("additionalProperties"), False)
+            self.assertIn("status", branch.get("properties", {}))
+            self.assertIn("limit", branch.get("properties", {}))
+            self.assertIn("cursor", branch.get("properties", {}))
+
+        deleted = self.by_name["inspect_recently_deleted"]["inputSchema"]
+        list_branch, item_branch = deleted["oneOf"]
+        self.assertEqual(
+            set(list_branch["properties"]),
+            {"kind", "account_id", "limit", "cursor"},
+        )
+        self.assertEqual(
+            set(item_branch["properties"]),
+            {"kind", "reminder_id", "attachment_limit"},
+        )
+        for branch in deleted["oneOf"]:
+            self.assertEqual(branch.get("type"), "object")
+            self.assertIs(branch.get("additionalProperties"), False)
 
     def test_doctor_does_not_advertise_withheld_maintenance_workflows(self) -> None:
         scope = self.by_name["diagnose_reminders"]["inputSchema"]["properties"][
@@ -280,6 +365,28 @@ class McpToolsV2SchemaTests(unittest.TestCase):
             self.assertIn("^rev1", encoded, name)
             self.assertNotIn('"store_id"', encoded, name)
             self.assertNotIn('"revision"', encoded, name)
+
+    def test_copy_image_is_a_closed_two_reference_action_without_a_file_path(self) -> None:
+        schema = self.by_name["change_reminder_attachment"]["inputSchema"]
+        actions = schema["properties"]["action"]["oneOf"]
+        copy_action = next(
+            action
+            for action in actions
+            if action["properties"]["kind"].get("const") == "copy_image"
+        )
+
+        self.assertEqual(
+            set(copy_action["properties"]),
+            {"kind", "source_reference", "attachment_id", "idempotency_key"},
+        )
+        self.assertEqual(
+            set(copy_action["required"]),
+            {"kind", "source_reference", "attachment_id", "idempotency_key"},
+        )
+        self.assertIs(copy_action["additionalProperties"], False)
+        self.assertNotIn("image_path", json.dumps(copy_action))
+        reference = resolve_ref(schema, copy_action["properties"]["source_reference"]["$ref"])
+        self.assertEqual(reference["pattern"], "^rev1\\.[A-Za-z0-9_-]{32,4091}$")
 
 
 if __name__ == "__main__":

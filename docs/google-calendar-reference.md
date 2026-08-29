@@ -62,12 +62,14 @@ entire architecture.
 
 ## Apple Reminders translation
 
-The 0.3 design is:
+The 0.4 design is:
 
 - **Core:** EventKit-backed access, exact list identity, bounded fetch, exact
   read, create/change/delete, and idempotent list creation;
 - **Native Extension:** exact sections, tags, and native image/URL attachment
   behavior behind guarded private interfaces;
+- **Recovery:** bounded Recently Deleted discovery and exact one-item recovery
+  through short-lived `del1` References;
 - **Diagnostics:** one content-free targeted tool used after a relevant failure;
 - **local MCP:** closed input discovery, exact dispatch, concise text, and
   centrally validated structured results and Receipts.
@@ -94,13 +96,14 @@ An improvement counts as calendar-grade product discipline only when it:
 
 Neither the six-tool Apple Calendar server nor the 15-action Google Calendar
 connector implies that Apple Reminders should chase a particular count. The
-current eight Core, four Native Extension, and one Diagnostics boundaries are
-appropriate while each maps to a recognizable task and the failure-triggered
-Diagnostics tool stays out of normal first use.
+current eight Core, four Native Extension, two Recovery, and one Diagnostics
+boundaries are appropriate while each maps to a recognizable task and the
+failure-triggered Diagnostics tool stays out of normal first use.
 
 ## Intentional non-parity
 
-Unused-tag cleanup, attachment repair, backup/Snapshot, restore, log purge, flag
-mutation, and native UI handoff are withheld from the public 0.3 Interface.
+Unused-tag cleanup, raw attachment export, attachment repair, broad
+backup/Snapshot restore, log purge, flag mutation, and native UI handoff are
+withheld from the public Interface.
 Their existence in an internal adapter or another plugin does not make them
 necessary first-use product features.

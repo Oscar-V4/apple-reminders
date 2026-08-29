@@ -36,6 +36,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from receipt_contract import (  # noqa: E402
     FAILURE_RECEIPT_STATUSES,
     RESULT_RECEIPT_STATUSES,
+    SUCCESS_RECEIPT_STATUSES,
     STABLE_ERROR_CODES,
     build_operation_receipt,
 )
@@ -49,6 +50,7 @@ from reminders_contracts import (  # noqa: E402
 )
 from reminders_image_input import (  # noqa: E402
     ImageInputError,
+    ValidatedImage,
     validate_image_input,
 )
 
@@ -78,6 +80,8 @@ JOURNAL_MAX_BYTES = 1_000_000
 JOURNAL_RETENTION_DAYS = 30
 IDEMPOTENCY_RETENTION_DAYS = 30
 IDEMPOTENCY_MAX_ENTRIES = 500
+RECENTLY_DELETED_RETENTION_DAYS = 30
+RECENTLY_DELETED_SNAPSHOT_LIMIT = 10_000
 
 RESULT_STATUSES = set(RESULT_RECEIPT_STATUSES)
 ERROR_CODES = set(STABLE_ERROR_CODES)
@@ -93,12 +97,14 @@ MUTATION_COMMANDS = frozenset(
         "complete_reminder",
         "reopen_reminder",
         "delete_reminder",
+        "recover_deleted_reminder",
         "show_reminder",
         "add_tag",
         "remove_tag",
         "create_section",
         "move_to_section",
         "attach_image",
+        "copy_image_attachment",
         "attach_url",
         "repair_attachments",
         "delete_attachment",
@@ -112,6 +118,26 @@ class AdapterError(RuntimeError):
         super().__init__(message)
         self.code = code if code in ERROR_CODES else "unexpected_error"
         self.details = details
+
+
+class MutationNotStartedError(AdapterError):
+    """A typed internal proof that the guarded callback never dispatched."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_input",
+        public_payload: dict[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            mutation_not_started=True,
+            **details,
+        )
+        self.public_payload = public_payload
 
 
 class AttachmentVerificationError(AdapterError):
@@ -232,6 +258,13 @@ def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
 
 
@@ -768,7 +801,21 @@ def idempotency_result_snapshot(value: Any, *, key: str | None = None) -> Any:
                     "verified",
                     "replayed",
                     "attachment_active",
+                    "automatic_retry_safe",
                     "code",
+                    "final_read",
+                    "final_attachment_content_hash",
+                    "final_attachment_content_matched",
+                    "matched",
+                    "mobile_visible_likely",
+                    "reason_code",
+                    "retryable",
+                    "destination_attachment_active",
+                    "destination_content_matched",
+                    "destination_mobile_visible_likely",
+                    "source_bytes_matched",
+                    "source_unchanged",
+                    "write_performed",
                 }
                 or normalized.endswith("_id")
                 or normalized.endswith("_ids")
@@ -796,27 +843,75 @@ def load_idempotency_store() -> dict[str, Any]:
     try:
         with IDEMPOTENCY_STORE.open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {"version": 1, "entries": {}}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MutationNotStartedError(
+            "The durable idempotency store could not be read safely.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), dict):
-        return {"version": 1, "entries": {}}
+        raise MutationNotStartedError(
+            "The durable idempotency store has an unsupported structure.",
+            code="unexpected_error",
+            reason_code="idempotency_store_unreadable",
+        )
     return payload
 
 
-def prune_idempotency_entries(entries: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+def idempotency_record_in_progress(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    state = value.get("state")
+    if state == "in_progress":
+        return True
+    if state == "complete":
+        return False
+    # Legacy v1 records with a stored result are complete. Any other unknown
+    # shape is treated as an incomplete fence so capacity maintenance fails
+    # closed instead of authorizing a duplicate write.
+    stored_result = value.get("result")
+    return not isinstance(stored_result, dict) or not bool(stored_result)
+
+
+def prune_idempotency_entries(
+    entries: dict[str, Any],
+    *,
+    now: float | None = None,
+    protected_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     current = now if now is not None else time.time()
     cutoff = current - IDEMPOTENCY_RETENTION_DAYS * 86400
     retained = {
         key: value
         for key, value in entries.items()
-        if isinstance(value, dict) and float(value.get("created_at_epoch", 0)) >= cutoff
+        if isinstance(value, dict)
+        and (
+            key in protected_keys
+            or float(value.get("created_at_epoch", 0)) >= cutoff
+        )
     }
-    ordered = sorted(
-        retained.items(),
+    in_progress = sorted(
+        (
+            (key, value)
+            for key, value in retained.items()
+            if idempotency_record_in_progress(value)
+        ),
         key=lambda item: float(item[1].get("created_at_epoch", 0)),
         reverse=True,
-    )[:IDEMPOTENCY_MAX_ENTRIES]
-    return dict(ordered)
+    )
+    completed = sorted(
+        (
+            (key, value)
+            for key, value in retained.items()
+            if not idempotency_record_in_progress(value)
+        ),
+        key=lambda item: float(item[1].get("created_at_epoch", 0)),
+        reverse=True,
+    )
+    remaining_slots = max(0, IDEMPOTENCY_MAX_ENTRIES - len(in_progress))
+    return dict([*in_progress, *completed[:remaining_slots]])
 
 
 def write_idempotency_store(payload: dict[str, Any]) -> None:
@@ -838,8 +933,57 @@ def write_idempotency_store(payload: dict[str, Any]) -> None:
         temp_path.chmod(0o600)
         os.replace(temp_path, IDEMPOTENCY_STORE)
         IDEMPOTENCY_STORE.chmod(0o600)
+        directory_fd = os.open(APP_SUPPORT, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def idempotency_outcome_unknown_receipt(
+    operation: str,
+    operation_id: str,
+) -> dict[str, Any]:
+    receipt_operation = {
+        "eventkit_create_reminder": "create_reminder",
+        "copy_image_attachment": "copy_image",
+    }.get(operation, operation)
+    message = (
+        "A prior call crossed its durable idempotency fence, but its final "
+        "Receipt was not persisted. Read the exact target before retrying."
+    )
+    return operation_receipt(
+        status="committed_verification_pending",
+        operation=receipt_operation,
+        operation_id=operation_id,
+        backend="idempotency_fence",
+        target={},
+        before={},
+        after={},
+        verification={
+            "state": "pending",
+            "write_performed": None,
+            "final_read": False,
+        },
+        recovery={
+            "semantics": "read_before_retry",
+            "automatic_retry_safe": False,
+        },
+        warnings=[
+            {
+                "code": "verification_pending",
+                "message": message,
+            }
+        ],
+        error={
+            "code": "sync_pending",
+            "reason_code": "idempotency_outcome_unknown",
+            "message": message,
+            "retryable": False,
+        },
+    )
 
 
 def execute_idempotent(
@@ -858,29 +1002,121 @@ def execute_idempotent(
         IDEMPOTENCY_LOCK.chmod(0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         payload = load_idempotency_store()
-        entries = prune_idempotency_entries(payload.get("entries", {}))
+        entries = prune_idempotency_entries(
+            payload.get("entries", {}),
+            protected_keys=frozenset({key_hash}),
+        )
         record = entries.get(key_hash)
         if record:
             if record.get("input_hash") != input_hash:
-                raise AdapterError(
+                raise MutationNotStartedError(
                     "Idempotency key was already used with different input",
                     code="concurrent_modification",
                     operation=operation,
                 )
-            replay = dict(record.get("result") or {})
+            stored_result = record.get("result")
+            if (
+                record.get("state") == "complete"
+                or (
+                    "state" not in record
+                    and isinstance(stored_result, dict)
+                    and bool(stored_result)
+                )
+            ):
+                replay = dict(stored_result or {})
+            else:
+                operation_id = record.get("operation_id")
+                if not isinstance(operation_id, str) or not operation_id:
+                    operation_id = new_operation_id()
+                replay = idempotency_outcome_unknown_receipt(
+                    operation,
+                    operation_id,
+                )
             replay["replayed"] = True
             replay["idempotency_key_hash"] = key_hash
             return replay
 
-        result = callback()
+        while len(entries) >= IDEMPOTENCY_MAX_ENTRIES:
+            completed_keys = [
+                entry_key
+                for entry_key, entry in entries.items()
+                if not idempotency_record_in_progress(entry)
+            ]
+            if not completed_keys:
+                raise MutationNotStartedError(
+                    "The durable idempotency fence capacity is occupied by unresolved operations.",
+                    code="unexpected_error",
+                    reason_code="idempotency_capacity_exhausted",
+                )
+            oldest_key = min(
+                completed_keys,
+                key=lambda item: float(entries[item].get("created_at_epoch", 0)),
+            )
+            entries.pop(oldest_key)
+        created_at_epoch = time.time()
+        fence_operation_id = new_operation_id()
         entries[key_hash] = {
             "operation": operation,
             "input_hash": input_hash,
-            "created_at_epoch": time.time(),
+            "created_at_epoch": created_at_epoch,
+            "state": "in_progress",
+            "operation_id": fence_operation_id,
+        }
+        try:
+            write_idempotency_store(
+                {
+                    "version": 1,
+                    "entries": prune_idempotency_entries(
+                        entries,
+                        protected_keys=frozenset({key_hash}),
+                    ),
+                }
+            )
+        except OSError as exc:
+            raise MutationNotStartedError(
+                "The idempotency fence could not be persisted before dispatch.",
+                code="unexpected_error",
+                reason_code="idempotency_fence_write_failed",
+            ) from exc
+
+        try:
+            result = callback()
+        except AdapterError as exc:
+            if not isinstance(exc, MutationNotStartedError):
+                raise
+            entries.pop(key_hash, None)
+            try:
+                write_idempotency_store(
+                    {"version": 1, "entries": prune_idempotency_entries(entries)}
+                )
+            except OSError as cleanup_exc:
+                # The callback itself proved no write, but the durable fence
+                # could not be removed. Keep the on-disk fence fail-closed so
+                # a retry cannot accidentally redispatch under uncertainty.
+                raise MutationNotStartedError(
+                    "The no-write callback failed and its idempotency fence could not be cleared.",
+                    code="unexpected_error",
+                    reason_code="idempotency_fence_cleanup_failed",
+                ) from cleanup_exc
+            raise
+        entries[key_hash] = {
+            "operation": operation,
+            "input_hash": input_hash,
+            "created_at_epoch": created_at_epoch,
+            "state": "complete",
+            "operation_id": fence_operation_id,
             "result": idempotency_result_snapshot(result),
         }
         try:
-            write_idempotency_store({"version": 1, "entries": prune_idempotency_entries(entries)})
+            write_idempotency_store(
+                {
+                    "version": 1,
+                    "entries": prune_idempotency_entries(
+                        entries,
+                        protected_keys=frozenset({key_hash}),
+                    ),
+                }
+            )
         except OSError as exc:
             result.setdefault("warnings", []).append(
                 {
@@ -1063,6 +1299,200 @@ def find_reminder(
             candidates=candidates,
         )
     return dict(rows[0])
+
+
+def recently_deleted_cutoff() -> float:
+    return core_now() - RECENTLY_DELETED_RETENTION_DAYS * 86400
+
+
+def deleted_attachment_rows(
+    con: sqlite3.Connection,
+    reminder_pk: int,
+) -> list[dict[str, Any]]:
+    rows = con.execute(
+        """
+        select Z_PK,Z_ENT,ZCKIDENTIFIER,ZREMINDER2,Z_FOK_REMINDER1,
+               ZFILENAME,ZSHA512SUM,ZUTI,ZFILESIZE,ZWIDTH,ZHEIGHT,
+               ZURL,ZHOSTURL,ZMARKEDFORDELETION
+        from ZREMCDOBJECT
+        where ZREMINDER2=? and Z_ENT in (?,?)
+        order by Z_FOK_REMINDER1,Z_PK
+        """,
+        (reminder_pk, IMAGE_ATTACHMENT_ENT, URL_ATTACHMENT_ENT),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def deleted_image_byte_sha512(row: dict[str, Any]) -> str:
+    """Verify one deleted image's backing bytes without exposing its path."""
+
+    expected = row.get("ZSHA512SUM")
+    if not isinstance(expected, str) or not re.fullmatch(r"[A-Fa-f0-9]{128}", expected):
+        raise AdapterError(
+            "The deleted image attachment has no trustworthy content digest",
+            code="schema_mismatch",
+            reason_code="deleted_image_digest_unavailable",
+        )
+    attachment = {
+        "type": "image",
+        "filename": row.get("ZFILENAME"),
+        "sha512": expected,
+        "uti": row.get("ZUTI"),
+        # Deleted Reminder rows can retain an attachment-level deletion marker.
+        # Byte verification is intentionally independent from that marker.
+        "marked_for_deletion": False,
+    }
+    try:
+        path = exact_source_image_path(attachment)
+        digest = hashlib.sha512()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except (AdapterError, OSError) as exc:
+        reason = (
+            exc.details.get("reason_code")
+            if isinstance(exc, AdapterError)
+            else "deleted_image_bytes_unreadable"
+        )
+        raise AdapterError(
+            "The deleted image attachment's backing bytes are unavailable",
+            code="sync_pending",
+            reason_code=str(reason or "deleted_image_bytes_unavailable"),
+        ) from exc
+    actual = digest.hexdigest()
+    if actual.casefold() != expected.casefold():
+        raise AdapterError(
+            "The deleted image attachment's backing bytes do not match its stored digest",
+            code="sync_pending",
+            reason_code="deleted_image_bytes_mismatch",
+        )
+    return actual
+
+
+def deleted_attachment_digest(
+    rows: list[dict[str, Any]],
+    *,
+    verify_image_bytes: bool = False,
+) -> str:
+    stable = []
+    for row in rows:
+        item = {
+            "id": row.get("ZCKIDENTIFIER"),
+            "type": row.get("Z_ENT"),
+            "order": row.get("Z_FOK_REMINDER1"),
+            "filename": row.get("ZFILENAME"),
+            "sha512": row.get("ZSHA512SUM"),
+            "uti": row.get("ZUTI"),
+            "file_size": row.get("ZFILESIZE"),
+            "width": row.get("ZWIDTH"),
+            "height": row.get("ZHEIGHT"),
+            "url": row.get("ZURL"),
+            "host_url": row.get("ZHOSTURL"),
+        }
+        if verify_image_bytes and row.get("Z_ENT") == IMAGE_ATTACHMENT_ENT:
+            item["actual_sha512"] = deleted_image_byte_sha512(row)
+        stable.append(item)
+    return stable_hash(stable)
+
+
+def public_deleted_attachment(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("Z_ENT") == IMAGE_ATTACHMENT_ENT:
+        return {
+            "id": row.get("ZCKIDENTIFIER"),
+            "type": "image",
+            "filename": row.get("ZFILENAME"),
+            "file_size": row.get("ZFILESIZE"),
+            "width": row.get("ZWIDTH"),
+            "height": row.get("ZHEIGHT"),
+        }
+    return {
+        "id": row.get("ZCKIDENTIFIER"),
+        "type": "url",
+        "url": row.get("ZURL"),
+    }
+
+
+def find_deleted_reminder(
+    con: sqlite3.Connection,
+    reminder_id: str,
+) -> dict[str, Any]:
+    row = con.execute(
+        """
+        select * from ZREMCDREMINDER
+        where ZCKIDENTIFIER=?
+          and coalesce(ZMARKEDFORDELETION,0)=1
+          and ZLASTMODIFIEDDATE>=?
+        """,
+        (normalize_uuid(reminder_id), recently_deleted_cutoff()),
+    ).fetchone()
+    if not row:
+        raise AdapterError(
+            "Deleted Reminder was not found within the recoverable 30-day window",
+            code="not_found",
+            reason_code="deleted_reminder_not_recoverable",
+        )
+    return dict(row)
+
+
+def deleted_store_identity(
+    db: Path,
+    con: sqlite3.Connection,
+) -> str:
+    capability = require_command_capability(con, "recover_deleted_reminder")
+    stat = db.stat()
+    return stable_hash(
+        {
+            "database": str(db.resolve()),
+            "inode": stat.st_ino,
+            "device": stat.st_dev,
+            "schema": capability["schema_fingerprint"],
+        }
+    )
+
+
+def deleted_reminder_snapshot(
+    con: sqlite3.Connection,
+    row: dict[str, Any],
+    *,
+    attachment_limit: int = 0,
+    verify_attachment_bytes: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    attachments = deleted_attachment_rows(con, int(row["Z_PK"]))
+    image_count = sum(item.get("Z_ENT") == IMAGE_ATTACHMENT_ENT for item in attachments)
+    url_count = sum(item.get("Z_ENT") == URL_ATTACHMENT_ENT for item in attachments)
+    deleted_at = core_to_iso(row.get("ZLASTMODIFIEDDATE"))
+    expires_at = core_to_iso(
+        float(row["ZLASTMODIFIEDDATE"]) + RECENTLY_DELETED_RETENTION_DAYS * 86400
+    )
+    public: dict[str, Any] = {
+        "id": row.get("ZCKIDENTIFIER"),
+        "title": row.get("ZTITLE"),
+        "completed": bool(row.get("ZCOMPLETED")),
+        "priority": row.get("ZPRIORITY"),
+        "created_at": core_to_iso(row.get("ZCREATIONDATE")),
+        "deleted_at": deleted_at,
+        "expires_at": expires_at,
+        "account_id": account_identifier(con, row.get("ZACCOUNT")),
+        "attachment_count": len(attachments),
+        "image_attachment_count": image_count,
+        "url_attachment_count": url_count,
+    }
+    if attachment_limit:
+        public["attachments"] = [
+            public_deleted_attachment(item) for item in attachments[:attachment_limit]
+        ]
+        public["attachments_truncated"] = len(attachments) > attachment_limit
+    guard = {
+        "reminder_id": row.get("ZCKIDENTIFIER"),
+        "private_version": row.get("Z_OPT"),
+        "deleted_at": deleted_at,
+        "attachment_digest": deleted_attachment_digest(
+            attachments,
+            verify_image_bytes=verify_attachment_bytes,
+        ),
+        "account_id": public["account_id"],
+    }
+    return public, guard
 
 
 def require_exact_reminder_selector(
@@ -1616,6 +2046,139 @@ def source_paths_for_attachment(attachment: dict[str, Any]) -> list[Path]:
     return list(dict.fromkeys(paths))
 
 
+def image_copy_identity(attachment: dict[str, Any]) -> dict[str, Any]:
+    """Return content/identity fields that must not change during a copy."""
+
+    return {
+        name: attachment.get(name)
+        for name in (
+            "id",
+            "type",
+            "uti",
+            "filename",
+            "sha512",
+            "file_size",
+            "width",
+            "height",
+            "marked_for_deletion",
+        )
+    }
+
+
+def image_copy_content_identity(attachment: dict[str, Any]) -> dict[str, Any]:
+    """Return byte-identity evidence for cross-Reminder verification.
+
+    SHA-512 proves the copied bytes. ReminderKit may normalize a stale source
+    UTI to the type decoded from those same bytes, so UTI equality is not a
+    content requirement; the native attachment helper verifies the decoded
+    destination UTI independently.
+    """
+
+    return {
+        name: attachment.get(name)
+        for name in ("type", "sha512", "file_size", "width", "height")
+    }
+
+
+def image_attachment_content_hash(attachment: dict[str, Any]) -> str:
+    """Hash direct-attachment byte/type evidence without persisting raw fields."""
+
+    digest = attachment.get("sha512")
+    return stable_hash(
+        {
+            "type": attachment.get("type"),
+            "uti": attachment.get("uti"),
+            "sha512": digest.casefold() if isinstance(digest, str) else digest,
+            "file_size": attachment.get("file_size"),
+            "width": attachment.get("width"),
+            "height": attachment.get("height"),
+        }
+    )
+
+
+def exact_source_image_path(attachment: dict[str, Any]) -> Path:
+    """Resolve one active image's private backing bytes without exposing their path.
+
+    Reminders can retain the same content-addressed file under more than one
+    extension or account attachment directory. Multiple candidates are safe to
+    collapse only when every regular in-container file matches the attachment's
+    stored SHA-512 digest; byte-divergent candidates remain ambiguous.
+    """
+
+    if attachment.get("type") != "image" or attachment.get("marked_for_deletion") is True:
+        raise AdapterError(
+            "The selected source attachment is not an active image",
+            code="invalid_input",
+            reason_code="source_attachment_not_active_image",
+        )
+    paths = source_paths_for_attachment(attachment)
+    if not paths:
+        raise AdapterError(
+            "The selected source image bytes are unavailable",
+            code="invalid_input",
+            reason_code="source_image_bytes_missing",
+        )
+    resolved_paths: list[Path] = []
+    try:
+        files_root = FILES.resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError(
+            "The Reminders attachment container is unavailable",
+            code="invalid_input",
+            reason_code="source_image_container_unavailable",
+        ) from exc
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            raise AdapterError(
+                "The selected source image is not a stable regular file",
+                code="invalid_input",
+                reason_code="source_image_file_not_regular",
+            )
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(files_root)
+        except (OSError, ValueError) as exc:
+            raise AdapterError(
+                "The selected source image is outside the Reminders file container",
+                code="invalid_input",
+                reason_code="source_image_path_outside_container",
+            ) from exc
+        if resolved not in resolved_paths:
+            resolved_paths.append(resolved)
+    if len(resolved_paths) == 1:
+        return resolved_paths[0]
+
+    expected_digest = attachment.get("sha512")
+    if not isinstance(expected_digest, str) or not re.fullmatch(
+        r"[A-Fa-f0-9]{128}", expected_digest
+    ):
+        raise AdapterError(
+            "Multiple source files require an exact stored image digest",
+            code="schema_mismatch",
+            reason_code="source_image_digest_unavailable",
+        )
+    for path in resolved_paths:
+        digest = hashlib.sha512()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise AdapterError(
+                "A selected source image file became unreadable",
+                code="concurrent_modification",
+                reason_code="source_image_file_changed",
+            ) from exc
+        if digest.hexdigest().casefold() != expected_digest.casefold():
+            raise AdapterError(
+                "The selected source image files do not share the stored content digest",
+                code="ambiguous_target",
+                reason_code="source_image_files_diverge",
+                matching_file_count=len(resolved_paths),
+            )
+    return min(resolved_paths, key=lambda path: str(path))
+
+
 def resolve_attachment_selection(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
@@ -1820,6 +2383,218 @@ def reminderkit_sections_helper() -> Path:
     return helper
 
 
+def reminderkit_recover_helper() -> Path:
+    source = Path(__file__).resolve().with_name("remkit_recover.m")
+    if not source.exists():
+        raise AdapterError(f"ReminderKit recovery helper source not found: {source.name}")
+    helper = CACHE_DIR / "remkit_recover"
+    ensure_private_dir(CACHE_DIR)
+    lock_path = CACHE_DIR / "remkit_recover.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        needs_build = (
+            not helper.exists()
+            or not os.access(helper, os.X_OK)
+            or source.stat().st_mtime > helper.stat().st_mtime
+        )
+        if not needs_build:
+            return helper
+        clang = shutil.which("clang")
+        if not clang:
+            raise AdapterError("clang is required to build the ReminderKit recovery helper")
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=".remkit_recover.", dir=CACHE_DIR, delete=False
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            try:
+                proc = subprocess.run(
+                    [
+                        clang,
+                        "-x",
+                        "objective-c",
+                        "-fobjc-arc",
+                        "-framework",
+                        "Foundation",
+                        "-o",
+                        str(temp_path),
+                        str(source),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AdapterError("ReminderKit recovery helper build timed out") from exc
+            if proc.returncode != 0:
+                raise AdapterError(
+                    (proc.stderr or proc.stdout).strip()
+                    or "Failed to build ReminderKit recovery helper"
+                )
+            temp_path.chmod(0o700)
+            os.replace(temp_path, helper)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    return helper
+
+
+def invoke_reminderkit_recovery_guard(reminder_id: str) -> str:
+    helper = reminderkit_recover_helper()
+    try:
+        proc = subprocess.run(
+            [str(helper), "guard", normalize_uuid(reminder_id)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard read timed out",
+            code="sync_pending",
+            reason_code="native_recovery_guard_timeout",
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard returned invalid JSON",
+            code="unexpected_error",
+            reason_code="invalid_native_recovery_guard",
+        ) from exc
+    digest = payload.get("native_guard_digest")
+    if (
+        proc.returncode != 0
+        or payload.get("ok") is not True
+        or payload.get("operation") != "read_recovery_guard"
+        or payload.get("reminder_id") != normalize_uuid(reminder_id)
+        or payload.get("mutation_attempted") is not False
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    ):
+        reason = str(payload.get("error") or "invalid_native_recovery_guard")
+        detail = payload.get("detail") or proc.stderr.strip()
+        stable_code = (
+            "not_found"
+            if reason == "deleted_reminder_not_found"
+            else "unsupported_capability"
+            if reason
+            in {
+                "native_guard_unavailable",
+                "required_reminderkit_classes_missing",
+                "required_reminderkit_selectors_missing",
+            }
+            else "unexpected_error"
+        )
+        raise AdapterError(
+            f"{reason}: {detail}" if detail else reason,
+            code=stable_code,
+            reason_code=reason,
+        )
+    return digest
+
+
+def invoke_reminderkit_recovery(
+    reminder_id: str,
+    destination_list_id: str,
+    native_guard_digest: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{64}", native_guard_digest):
+        raise AdapterError(
+            "A valid native recovery guard is required",
+            code="invalid_input",
+            reason_code="invalid_native_recovery_guard",
+        )
+    helper = reminderkit_recover_helper()
+    try:
+        proc = subprocess.run(
+            [
+                str(helper),
+                "recover",
+                normalize_uuid(reminder_id),
+                normalize_uuid(destination_list_id),
+                native_guard_digest,
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "ReminderKit recovery timed out after dispatch",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        ) from exc
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            "ReminderKit recovery returned invalid JSON after dispatch",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            helper_output_present=bool(raw or proc.stderr.strip()),
+        ) from exc
+    if proc.returncode != 0 or payload.get("ok") is not True:
+        # A clean helper failure always emits its pre/post-dispatch marker.  No
+        # output means the helper died before it could report, so conservatively
+        # preserve a possible write instead of inventing failed_no_mutation.
+        mutation_attempted = payload.get("mutation_attempted") is True or not raw
+        reason = str(payload.get("error") or "reminderkit_recovery_failed")
+        detail = payload.get("detail") or proc.stderr.strip()
+        message = f"{reason}: {detail}" if detail else reason
+        if reason == "concurrent_modification":
+            stable_code = "concurrent_modification"
+        elif reason in {
+            "native_guard_unavailable",
+            "required_reminderkit_classes_missing",
+            "required_reminderkit_selectors_missing",
+            "undelete_selector_missing",
+            "recently_deleted_not_supported",
+            "cross_account_restore_not_supported",
+        }:
+            stable_code = "unsupported_capability"
+        elif reason == "deleted_reminder_not_found":
+            stable_code = "not_found"
+        elif reason in {"invalid_arguments", "usage"}:
+            stable_code = "invalid_input"
+        elif mutation_attempted:
+            stable_code = "sync_pending"
+        else:
+            stable_code = "unexpected_error"
+        raise AdapterError(
+            message,
+            code=stable_code,
+            partial_failure=mutation_attempted,
+            mutation_outcome_unknown=mutation_attempted,
+            reason_code=reason,
+        )
+    if (
+        payload.get("reminder_id") != normalize_uuid(reminder_id)
+        or payload.get("destination_list_id") != normalize_uuid(destination_list_id)
+        or payload.get("mutation_attempted") is not True
+        or payload.get("saved") is not True
+        or payload.get("pre_save_guard_matched") is not True
+    ):
+        raise AdapterError(
+            "ReminderKit recovery returned mismatched read-back identity",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+        )
+    return payload
+
+
 def invoke_reminderkit_section(operation: str, *arguments: str) -> dict[str, Any]:
     helper = reminderkit_sections_helper()
     try:
@@ -1871,9 +2646,20 @@ def attach_image_reminderkit_record(
     con: sqlite3.Connection,
     reminder: dict[str, Any],
     image: Path,
+    *,
+    validated_image: ValidatedImage | None = None,
 ) -> dict[str, Any]:
     if not image.exists():
         raise AdapterError(f"Image not found: {image.name}")
+    if validated_image is None:
+        try:
+            validated_image = validate_image_input(image)
+        except ImageInputError as exc:
+            raise AdapterError(
+                str(exc),
+                code="invalid_input",
+                reason_code=exc.reason_code,
+            ) from exc
     before_rows = active_attachment_rows(
         con,
         reminder["Z_PK"],
@@ -1881,23 +2667,51 @@ def attach_image_reminderkit_record(
     )
     before_ids = {row["ZCKIDENTIFIER"] for row in before_rows}
     helper = reminderkit_attach_helper()
-    try:
-        proc = subprocess.run(
-            [str(helper), reminder["ZCKIDENTIFIER"], str(image)],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    ensure_private_dir(CACHE_DIR)
+    suffix = ".png" if validated_image.format == "png" else ".jpg"
+    with tempfile.TemporaryDirectory(prefix="attach-image.", dir=CACHE_DIR) as temp_dir:
+        snapshot_path = Path(temp_dir) / f"input{suffix}"
+        shutil.copyfile(validated_image.path, snapshot_path)
+        snapshot_path.chmod(0o600)
+        try:
+            snapshot_bytes = snapshot_path.read_bytes()
+        except OSError as exc:
+            raise AdapterError(
+                "The validated image snapshot could not be read",
+                code="invalid_input",
+                reason_code="image_snapshot_unreadable",
+            ) from exc
+        snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
+        if (
+            snapshot_sha256 != validated_image.sha256
+            or len(snapshot_bytes) != validated_image.bytes
+        ):
+            raise AdapterError(
+                "The image changed before native attachment dispatch",
+                code="concurrent_modification",
+                reason_code="image_changed_before_dispatch",
+            )
+        expected_sha512 = hashlib.sha512(snapshot_bytes).hexdigest()
+        expected_uti = (
+            "public.png" if validated_image.format == "png" else "public.jpeg"
         )
-    except subprocess.TimeoutExpired as exc:
-        raise AdapterError(
-            "ReminderKit image attachment timed out",
-            code="sync_pending",
-            image=image.name,
-            partial_failure=True,
-            mutation_outcome_unknown=True,
-        ) from exc
+        try:
+            proc = subprocess.run(
+                [str(helper), reminder["ZCKIDENTIFIER"], str(snapshot_path)],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AdapterError(
+                "ReminderKit image attachment timed out",
+                code="sync_pending",
+                image=image.name,
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+            ) from exc
     raw = (proc.stdout or "").strip()
     try:
         payload = json.loads(raw) if raw else {}
@@ -1999,9 +2813,10 @@ def attach_image_reminderkit_record(
             ),
         )
     helper_image_uti = payload.get("image_uti")
-    if helper_image_uti not in {"public.jpeg", "public.png"} or attachment.get(
-        "uti"
-    ) != helper_image_uti:
+    if (
+        helper_image_uti != expected_uti
+        or attachment.get("uti") != expected_uti
+    ):
         raise AttachmentVerificationError(
             "Image attachment content type did not survive native read-back",
             row=selected,
@@ -2015,6 +2830,26 @@ def attach_image_reminderkit_record(
                 else "missing"
             ),
             stored_image_uti=attachment.get("uti"),
+            cleanup_command=(
+                "delete_attachment "
+                f"--id {reminder['ZCKIDENTIFIER']} "
+                f"--attachment-id {attachment['id']}"
+            ),
+        )
+    if (
+        not isinstance(attachment.get("sha512"), str)
+        or attachment["sha512"].casefold() != expected_sha512.casefold()
+        or attachment.get("file_size") != validated_image.bytes
+        or attachment.get("width") != validated_image.width
+        or attachment.get("height") != validated_image.height
+    ):
+        raise AttachmentVerificationError(
+            "Image attachment bytes or decoded dimensions did not match the dispatched snapshot",
+            row=selected,
+            reason_code="native_image_content_mismatch",
+            retryable=False,
+            partial_failure=True,
+            attachment=attachment,
             cleanup_command=(
                 "delete_attachment "
                 f"--id {reminder['ZCKIDENTIFIER']} "
@@ -3084,6 +3919,412 @@ def cmd_read_reminder(args: argparse.Namespace) -> int:
         return 0
     finally:
         con.close()
+
+
+def cmd_list_deleted_reminders(args: argparse.Namespace) -> int:
+    if args.limit > 200:
+        raise AdapterError("Deleted Reminder reads are limited to 200 items")
+    if args.offset > RECENTLY_DELETED_SNAPSHOT_LIMIT:
+        raise AdapterError("Deleted Reminder cursor offset is out of range")
+    db = resolve_database(args.db)
+    con = connect_read_only(db)
+    try:
+        require_command_capability(con, "recover_deleted_reminder")
+        # Python's sqlite3 driver does not open a transaction for SELECTs. Pin
+        # both the bounded identity snapshot and the page hydration query to
+        # one read transaction so the emitted rows cannot drift from the
+        # fingerprint between statements.
+        con.execute("begin")
+        where = [
+            "coalesce(r.ZMARKEDFORDELETION,0)=1",
+            "r.ZLASTMODIFIEDDATE>=?",
+        ]
+        params: list[Any] = [recently_deleted_cutoff()]
+        if args.account_id:
+            where.append("a.ZCKIDENTIFIER=?")
+            params.append(normalize_uuid(args.account_id))
+        snapshot_rows = con.execute(
+            f"""
+            select r.Z_PK,r.ZCKIDENTIFIER,r.Z_OPT,r.ZLASTMODIFIEDDATE
+            from ZREMCDREMINDER r
+            left join ZREMCDOBJECT a on a.Z_PK=r.ZACCOUNT and a.Z_ENT=14
+            where {" and ".join(where)}
+            order by r.ZLASTMODIFIEDDATE desc,r.Z_PK desc
+            limit ?
+            """,
+            [*params, RECENTLY_DELETED_SNAPSHOT_LIMIT + 1],
+        ).fetchall()
+        if len(snapshot_rows) > RECENTLY_DELETED_SNAPSHOT_LIMIT:
+            raise AdapterError(
+                "Recently Deleted is too large for one safe ordered snapshot",
+                code="ambiguous_scope",
+                reason_code="deleted_snapshot_too_large",
+            )
+        snapshot_fingerprint = stable_hash(
+            [
+                {
+                    "id": row["ZCKIDENTIFIER"],
+                    "version": row["Z_OPT"],
+                    "modified": row["ZLASTMODIFIEDDATE"],
+                    "pk": row["Z_PK"],
+                }
+                for row in snapshot_rows
+            ]
+        )
+        page_snapshot = snapshot_rows[args.offset : args.offset + args.limit]
+        page_pks = [int(row["Z_PK"]) for row in page_snapshot]
+        if page_pks:
+            placeholders = ",".join("?" for _ in page_pks)
+            page_rows = con.execute(
+                f"select r.* from ZREMCDREMINDER r where r.Z_PK in ({placeholders})",
+                page_pks,
+            ).fetchall()
+            rows_by_pk = {int(row["Z_PK"]): row for row in page_rows}
+            if set(rows_by_pk) != set(page_pks):
+                raise AdapterError(
+                    "Recently Deleted changed while reading the requested page",
+                    code="concurrent_modification",
+                    reason_code="pagination_snapshot_stale",
+                )
+            snapshot_by_pk = {int(row["Z_PK"]): row for row in page_snapshot}
+            for pk, row in rows_by_pk.items():
+                expected = snapshot_by_pk[pk]
+                if (
+                    row["ZCKIDENTIFIER"],
+                    row["Z_OPT"],
+                    row["ZLASTMODIFIEDDATE"],
+                ) != (
+                    expected["ZCKIDENTIFIER"],
+                    expected["Z_OPT"],
+                    expected["ZLASTMODIFIEDDATE"],
+                ):
+                    raise AdapterError(
+                        "Recently Deleted changed while reading the requested page",
+                        code="concurrent_modification",
+                        reason_code="pagination_snapshot_stale",
+                    )
+            page = [rows_by_pk[pk] for pk in page_pks]
+        else:
+            page = []
+        items = [
+            deleted_reminder_snapshot(con, dict(row))[0]
+            for row in page
+        ]
+        next_offset = args.offset + len(items)
+        has_more = next_offset < len(snapshot_rows)
+        json_out(
+            {
+                "ok": True,
+                "deleted_reminders": items,
+                "returned": len(items),
+                "limit": args.limit,
+                "offset": args.offset,
+                "total_matched": len(snapshot_rows),
+                "has_more": has_more,
+                "next_offset": next_offset if has_more else None,
+                "truncated": has_more,
+                "snapshot_fingerprint": snapshot_fingerprint,
+                "retention_days": RECENTLY_DELETED_RETENTION_DAYS,
+            }
+        )
+        return 0
+    finally:
+        con.close()
+
+
+def cmd_read_deleted_reminder(args: argparse.Namespace) -> int:
+    db = resolve_database(args.db)
+    con = connect_read_only(db)
+    try:
+        row = find_deleted_reminder(con, args.id)
+        public, guard = deleted_reminder_snapshot(
+            con,
+            row,
+            attachment_limit=args.attachment_limit,
+            verify_attachment_bytes=True,
+        )
+        guard["store_identity"] = deleted_store_identity(db, con)
+        guard["native_guard_digest"] = invoke_reminderkit_recovery_guard(args.id)
+        json_out({"ok": True, "deleted_reminder": public, "guard": guard})
+        return 0
+    finally:
+        con.close()
+
+
+def recovery_post_write_pending(
+    args: argparse.Namespace,
+    before: dict[str, Any],
+    *,
+    reason_code: str,
+    message: str,
+) -> dict[str, Any]:
+    """Preserve a confirmed recovery save when later verification cannot finish."""
+
+    return operation_receipt(
+        status="committed_verification_pending",
+        operation="recover_deleted_reminder",
+        backend="reminderkit_private",
+        target={
+            "reminder_id": normalize_uuid(args.id),
+            "list_id": normalize_uuid(args.list_id),
+        },
+        before=before,
+        after={},
+        verification={
+            "state": "pending",
+            "write_performed": True,
+            "final_read": False,
+            "reason_code": reason_code,
+        },
+        recovery={"semantics": "read_before_retry", "automatic_retry_safe": False},
+        warnings=[
+            {
+                "code": "verification_pending",
+                "message": message,
+            }
+        ],
+        error={
+            "code": "sync_pending",
+            "reason_code": reason_code,
+            "message": message,
+            "retryable": False,
+        },
+    )
+
+
+def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
+    db = resolve_database(args.db)
+    con = connect_read_only(db)
+    try:
+        row = find_deleted_reminder(con, args.id)
+        destination = find_list(con, list_id=args.list_id)
+        public_before, guard = deleted_reminder_snapshot(
+            con,
+            row,
+            verify_attachment_bytes=True,
+        )
+        guard["store_identity"] = deleted_store_identity(db, con)
+        expected = {
+            "store_identity": args.if_store_identity,
+            "private_version": args.if_version,
+            "deleted_at": args.if_deleted_at,
+            "attachment_digest": args.if_attachment_digest,
+        }
+        mismatched = [key for key, value in expected.items() if guard.get(key) != value]
+        if mismatched:
+            raise AdapterError(
+                "Deleted Reminder changed; inspect it again before recovery",
+                code="concurrent_modification",
+                mismatched_fields=mismatched,
+            )
+        if row.get("ZACCOUNT") != destination.get("ZACCOUNT"):
+            raise AdapterError(
+                "Recovery to another account is not supported",
+                code="unsupported_capability",
+                reason_code="cross_account_restore_not_supported",
+            )
+        before = {
+            "deleted_reminder": {
+                "id": public_before["id"],
+                "deleted_at": public_before["deleted_at"],
+                "attachment_count": public_before["attachment_count"],
+                "attachment_digest": guard["attachment_digest"],
+            }
+        }
+    finally:
+        con.close()
+
+    try:
+        native = invoke_reminderkit_recovery(
+            args.id,
+            args.list_id,
+            args.if_native_guard_digest,
+        )
+    except AdapterError as exc:
+        if not exc.details.get("partial_failure"):
+            raise
+        return operation_receipt(
+            status="committed_verification_pending",
+            operation="recover_deleted_reminder",
+            backend="reminderkit_private",
+            target={
+                "reminder_id": normalize_uuid(args.id),
+                "list_id": normalize_uuid(args.list_id),
+            },
+            before=before,
+            after={},
+            verification={
+                "state": "pending",
+                "write_performed": None,
+                "final_read": False,
+                "reason_code": "native_recovery_outcome_unknown",
+            },
+            recovery={
+                "semantics": "read_before_retry",
+                "automatic_retry_safe": False,
+            },
+            warnings=[
+                {
+                    "code": "verification_pending",
+                    "message": "Recovery may have committed; read the exact Reminder before retrying.",
+                }
+            ],
+            error={
+                "code": "sync_pending",
+                "reason_code": str(
+                    exc.details.get("reason_code") or "native_recovery_outcome_unknown"
+                ),
+                "message": str(exc),
+                "retryable": False,
+            },
+        )
+    try:
+        deadline = time.time() + 10
+        active: dict[str, Any] | None = None
+        final_attachments: list[dict[str, Any]] = []
+        while True:
+            fresh = connect_read_only(db)
+            try:
+                active_row = fresh.execute(
+                    """
+                    select * from ZREMCDREMINDER
+                    where ZCKIDENTIFIER=? and coalesce(ZMARKEDFORDELETION,0)=0
+                    """,
+                    (normalize_uuid(args.id),),
+                ).fetchone()
+                if active_row:
+                    active = dict(active_row)
+                    final_attachments = deleted_attachment_rows(
+                        fresh,
+                        int(active["Z_PK"]),
+                    )
+            finally:
+                fresh.close()
+            if active is not None or time.time() >= deadline:
+                break
+            time.sleep(0.25)
+
+        if active is None:
+            return recovery_post_write_pending(
+                args,
+                before,
+                reason_code="active_readback_pending",
+                message="Recovery saved, but the active Reminder is not readable yet.",
+            )
+
+        list_row = connect_read_only(db)
+        try:
+            destination = find_list(list_row, list_id=args.list_id)
+            list_matches = active.get("ZLIST") == destination.get("Z_PK")
+        finally:
+            list_row.close()
+        attachment_digest = deleted_attachment_digest(
+            final_attachments,
+            verify_image_bytes=True,
+        )
+    except Exception:
+        return recovery_post_write_pending(
+            args,
+            before,
+            reason_code="recovery_post_write_verification_failed",
+            message=(
+                "Recovery saved, but its exact destination or attachment integrity "
+                "could not be read back. Read the exact Reminder before retrying."
+            ),
+        )
+
+    attachments_active = all(
+        not bool(item.get("ZMARKEDFORDELETION")) for item in final_attachments
+    )
+    attachments_preserved = attachment_digest == args.if_attachment_digest
+    pre_save_guard_matched = native.get("pre_save_guard_matched") is True
+    before_attachment_count = before["deleted_reminder"].get("attachment_count")
+    native_attachment_count = native.get("attachment_count")
+    after_attachment_count = len(final_attachments)
+    attachment_counts_match = (
+        isinstance(before_attachment_count, int)
+        and not isinstance(before_attachment_count, bool)
+        and isinstance(native_attachment_count, int)
+        and not isinstance(native_attachment_count, bool)
+        and before_attachment_count
+        == native_attachment_count
+        == after_attachment_count
+    )
+    verified = (
+        list_matches
+        and pre_save_guard_matched
+        and attachments_active
+        and attachments_preserved
+        and attachment_counts_match
+    )
+    status = "verified" if verified else "partial_success"
+    result = operation_receipt(
+        status=status,
+        operation="recover_deleted_reminder",
+        backend="reminderkit_private",
+        target={"reminder_id": normalize_uuid(args.id), "list_id": normalize_uuid(args.list_id)},
+        before=before,
+        after={
+            "reminder": {
+                "id": active.get("ZCKIDENTIFIER"),
+                "list_id": normalize_uuid(args.list_id) if list_matches else None,
+                "attachment_count": after_attachment_count,
+                "attachment_digest": attachment_digest,
+            }
+        },
+        verification={
+            "state": "read_back",
+            "write_performed": True,
+            "final_read": True,
+            "matched": verified,
+            "pre_save_guard_matched": pre_save_guard_matched,
+            "destination_list_matched": list_matches,
+            "attachments_active": attachments_active,
+            "attachments_preserved": attachments_preserved,
+            "attachment_bytes_verified": True,
+            "attachment_counts_match": attachment_counts_match,
+            "before_attachment_count": before_attachment_count,
+            "native_attachment_count": native_attachment_count,
+            "after_attachment_count": after_attachment_count,
+        },
+        recovery={
+            "semantics": "native_recently_deleted_recovery",
+            "automatic_retry_safe": False,
+        },
+    )
+    if not verified:
+        result["warnings"] = [
+            {
+                "code": "partial_recovery_verification",
+                "message": "The Reminder was recovered, but exact destination or attachment preservation needs inspection.",
+            }
+        ]
+        result["error"] = {
+            "code": "sync_pending",
+            "reason_code": "recovery_readback_mismatch",
+            "message": "Inspect the recovered Reminder before another mutation.",
+            "retryable": False,
+        }
+    return result
+
+
+def cmd_recover_deleted_reminder(args: argparse.Namespace) -> int:
+    result = execute_idempotent(
+        operation="recover_deleted_reminder",
+        key=args.idempotency_key,
+        input_payload={
+            "id": normalize_uuid(args.id),
+            "list_id": normalize_uuid(args.list_id),
+            "if_store_identity": args.if_store_identity,
+            "if_version": args.if_version,
+            "if_deleted_at": args.if_deleted_at,
+            "if_attachment_digest": args.if_attachment_digest,
+            "if_native_guard_digest": args.if_native_guard_digest,
+        },
+        callback=lambda: recover_deleted_reminder_once(args),
+    )
+    json_out(result)
+    return 0 if result.get("status") in SUCCESS_RECEIPT_STATUSES else 1
 
 
 def cmd_show_reminder(args: argparse.Namespace) -> int:
@@ -5870,12 +7111,20 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
         before = reminder_mutation_snapshot(reminder)
         if args.backend == "reminderkit":
             try:
-                result = attach_image_reminderkit_record(con, reminder, image)
+                result = attach_image_reminderkit_record(
+                    con,
+                    reminder,
+                    image,
+                    validated_image=getattr(args, "_validated_image", None),
+                )
                 status = "verified"
                 verification = {
                     "state": "read_back",
                     "mobile_visible_likely": True,
                     "sync_status": "verified_mobile_visible",
+                    "final_attachment_content_hash": image_attachment_content_hash(
+                        result["attachment"]
+                    ),
                 }
                 recovery = {
                     "semantics": "delete_attachment_with_fresh_reference",
@@ -6045,6 +7294,310 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
     )
     json_out(result)
     return 0
+
+
+def copy_image_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
+    """Copy one exact active source image into a different Reminder."""
+
+    require_exact_reminder_selector(
+        reminder_id=args.id,
+        title=None,
+        list_name=None,
+    )
+    require_exact_reminder_selector(
+        reminder_id=args.source_id,
+        title=None,
+        list_name=None,
+    )
+    destination_id = normalize_uuid(args.id)
+    source_id = normalize_uuid(args.source_id)
+    if destination_id == source_id:
+        raise AdapterError(
+            "Image copy requires different source and destination Reminders",
+            code="invalid_input",
+            reason_code="copy_source_matches_destination",
+        )
+
+    operation_id = new_operation_id()
+    db = resolve_database(args.db, write=True)
+    con = connect(db)
+    result: dict[str, Any] | None = None
+    pending_warning: dict[str, Any] | None = None
+    pending_error: dict[str, Any] | None = None
+    try:
+        capability = require_command_capability(con, "attachment_mutation_db")
+        source = find_reminder(con, reminder_id=source_id)
+        destination = find_reminder(con, reminder_id=destination_id)
+        require_reminder_version(source, args.if_source_version, required=True)
+        require_reminder_version(destination, args.if_version, required=True)
+        selected, candidates, reason = resolve_attachment_selection(
+            con,
+            source,
+            attachment_id=args.attachment_id,
+            attachment_type="image",
+        )
+        if not selected:
+            raise AdapterError(
+                reason or "The exact source image attachment was not found",
+                code="ambiguous_target" if candidates else "invalid_input",
+                reason_code="source_image_attachment_not_exact",
+                candidate_count=len(candidates),
+            )
+        source_attachment = attachment_payload(selected)
+        source_identity = image_copy_identity(source_attachment)
+        source_image = exact_source_image_path(source_attachment)
+        try:
+            validated_source = validate_image_input(source_image)
+        except ImageInputError as exc:
+            raise AdapterError(
+                str(exc),
+                code="invalid_input",
+                reason_code=f"source_{exc.reason_code}",
+            ) from exc
+        stored_sha512 = source_attachment.get("sha512")
+        if not isinstance(stored_sha512, str) or not re.fullmatch(
+            r"[A-Fa-f0-9]{128}", stored_sha512
+        ):
+            raise AdapterError(
+                "The source image content digest is unavailable",
+                code="schema_mismatch",
+                reason_code="source_image_digest_unavailable",
+            )
+
+        before_destination = reminder_mutation_snapshot(destination)
+        ensure_private_dir(CACHE_DIR)
+        with tempfile.TemporaryDirectory(
+            prefix="copy-image.",
+            dir=CACHE_DIR,
+        ) as temp_dir:
+            suffix = ".png" if validated_source.format == "png" else ".jpg"
+            snapshot_path = Path(temp_dir) / f"source{suffix}"
+            shutil.copyfile(validated_source.path, snapshot_path)
+            snapshot_path.chmod(0o600)
+            try:
+                validated_snapshot = validate_image_input(snapshot_path)
+            except ImageInputError as exc:
+                raise AdapterError(
+                    str(exc),
+                    code="invalid_input",
+                    reason_code=f"source_snapshot_{exc.reason_code}",
+                ) from exc
+            snapshot_bytes = snapshot_path.read_bytes()
+            if (
+                validated_snapshot.sha256 != validated_source.sha256
+                or hashlib.sha512(snapshot_bytes).hexdigest().casefold()
+                != stored_sha512.casefold()
+            ):
+                raise AdapterError(
+                    "The source image changed while its private snapshot was created",
+                    code="concurrent_modification",
+                    reason_code="source_image_bytes_changed",
+                )
+
+            # Recheck both private versions and the exact source attachment after
+            # byte snapshotting, immediately before the native destination write.
+            source = reread_reminder(con, int(source["Z_PK"]))
+            destination = reread_reminder(con, int(destination["Z_PK"]))
+            require_reminder_version(source, args.if_source_version, required=True)
+            require_reminder_version(destination, args.if_version, required=True)
+            selected_again, candidates, reason = resolve_attachment_selection(
+                con,
+                source,
+                attachment_id=args.attachment_id,
+                attachment_type="image",
+            )
+            if not selected_again:
+                raise AdapterError(
+                    reason or "The source image changed before copy dispatch",
+                    code="concurrent_modification",
+                    reason_code="source_attachment_changed_before_copy",
+                    candidate_count=len(candidates),
+                )
+            if image_copy_identity(attachment_payload(selected_again)) != source_identity:
+                raise AdapterError(
+                    "The source image changed before copy dispatch",
+                    code="concurrent_modification",
+                    reason_code="source_attachment_changed_before_copy",
+                )
+
+            try:
+                result = attach_image_reminderkit_record(
+                    con,
+                    destination,
+                    validated_snapshot.path,
+                )
+                status = "verified"
+            except AttachmentVerificationError as exc:
+                result = exc.compensation_result()
+                status = "committed_verification_pending"
+                pending_message = (
+                    "The destination attachment exists, but native image-data or "
+                    "mobile-visibility verification did not complete."
+                )
+                pending_warning = {
+                    "code": exc.reason_code,
+                    "message": pending_message,
+                }
+                pending_error = {
+                    "code": "sync_pending",
+                    "reason_code": exc.reason_code,
+                    "message": pending_message,
+                    "retryable": False,
+                }
+            except AdapterError as exc:
+                if not exc.details.get("partial_failure"):
+                    raise
+                pending_message = (
+                    "The destination may contain the copied image, but native "
+                    "verification did not complete."
+                )
+                result = {
+                    "attachment": {},
+                    "sync": {"mobile_visible_likely": False},
+                }
+                status = "committed_verification_pending"
+                pending_warning = {"code": exc.code, "message": pending_message}
+                pending_error = {
+                    "code": "sync_pending",
+                    "reason_code": str(exc.details.get("reason_code") or exc.code),
+                    "message": pending_message,
+                    "retryable": False,
+                }
+
+        attachment = dict(result.get("attachment") or {})
+        result.pop("_row", None)
+        destination_content_matched = (
+            image_copy_content_identity(attachment)
+            == image_copy_content_identity(source_attachment)
+        )
+        if status == "verified" and not destination_content_matched:
+            status = "committed_verification_pending"
+            pending_warning = {
+                "code": "destination_image_content_mismatch",
+                "message": (
+                    "The copied destination attachment exists, but its image digest or "
+                    "decoded metadata does not match the exact source image."
+                ),
+            }
+            pending_error = {
+                "code": "sync_pending",
+                "reason_code": "destination_image_content_mismatch",
+                "message": pending_warning["message"],
+                "retryable": False,
+            }
+        source_unchanged = False
+        destination_after: dict[str, Any] = {
+            "id": destination_id,
+            "store_read_back_pending": True,
+        }
+        try:
+            source_after = reread_reminder(con, int(source["Z_PK"]))
+            destination_after = reminder_mutation_snapshot(
+                reread_reminder(con, int(destination["Z_PK"]))
+            )
+            require_reminder_version(
+                source_after,
+                args.if_source_version,
+                required=True,
+            )
+            selected_after, _, _ = resolve_attachment_selection(
+                con,
+                source_after,
+                attachment_id=args.attachment_id,
+                attachment_type="image",
+            )
+            source_unchanged = bool(
+                selected_after
+                and image_copy_identity(attachment_payload(selected_after))
+                == source_identity
+            )
+        except (AdapterError, sqlite3.Error):
+            source_unchanged = False
+
+        if not source_unchanged:
+            status = "committed_verification_pending"
+            pending_warning = {
+                "code": "source_final_read_pending",
+                "message": (
+                    "The destination may contain the copied image, but the source "
+                    "could not be proven unchanged by final read-back."
+                ),
+            }
+            pending_error = {
+                "code": "sync_pending",
+                "reason_code": "source_final_read_pending",
+                "message": pending_warning["message"],
+                "retryable": False,
+            }
+
+        journal_warning = log_action(
+            "copy_image_attachment",
+            {
+                "operation_id": operation_id,
+                "source_reminder_id": source_id,
+                "reminder_id": destination_id,
+                "source_attachment_id": source_attachment["id"],
+                "attachment_id": attachment.get("id"),
+            },
+        )
+        warnings = [item for item in (pending_warning, journal_warning) if item]
+        return operation_receipt(
+            status=status,
+            operation="copy_image",
+            operation_id=operation_id,
+            backend="reminderkit_private",
+            target={
+                "source_reminder_id": source_id,
+                "reminder_id": destination_id,
+                "source_attachment_id": source_attachment["id"],
+                "attachment_id": attachment.get("id"),
+            },
+            before={"reminder": before_destination},
+            after={
+                "reminder": destination_after,
+                "attachment": attachment,
+            },
+            verification={
+                "state": "read_back" if status == "verified" else "pending",
+                "write_performed": True if attachment.get("id") else None,
+                "final_read": status == "verified",
+                "matched": status == "verified",
+                "source_unchanged": source_unchanged,
+                "source_bytes_matched": True,
+                "destination_attachment_active": bool(attachment.get("id")),
+                "destination_content_matched": destination_content_matched,
+            },
+            recovery={
+                "semantics": (
+                    "delete_copied_attachment_with_fresh_reference"
+                    if status == "verified"
+                    else "read_both_reminders_before_retry"
+                ),
+                "automatic_retry_safe": False,
+            },
+            warnings=warnings or None,
+            **({"error": pending_error} if pending_error is not None else {}),
+            capability=capability,
+        )
+    finally:
+        con.close()
+
+
+def cmd_copy_image_attachment(args: argparse.Namespace) -> int:
+    result = execute_idempotent(
+        operation="copy_image_attachment",
+        key=args.idempotency_key,
+        input_payload={
+            "source_reminder_id": normalize_uuid(args.source_id),
+            "reminder_id": normalize_uuid(args.id),
+            "source_attachment_id": str(args.attachment_id),
+            "if_source_version": args.if_source_version,
+            "if_version": args.if_version,
+        },
+        callback=lambda: copy_image_attachment_once(args),
+    )
+    json_out(result)
+    return 0 if result.get("status") in SUCCESS_RECEIPT_STATUSES else 1
 
 
 def cmd_attach_url(args: argparse.Namespace) -> int:
@@ -6373,7 +7926,11 @@ def cmd_repair_attachments(args: argparse.Namespace) -> int:
                     required=True,
                 )
                 try:
-                    new_result = attach_image_reminderkit_record(con, reminder, source)
+                    new_result = attach_image_reminderkit_record(
+                        con,
+                        reminder,
+                        source,
+                    )
                 except AttachmentVerificationError as attach_exc:
                     new_result = attach_exc.compensation_result()
                     raise
@@ -6769,6 +8326,7 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
                     con,
                     reminder,
                     Path(args.image).expanduser().resolve(),
+                    validated_image=getattr(args, "_validated_image", None),
                 )
             except AttachmentVerificationError as attach_exc:
                 new_result = attach_exc.compensation_result()
@@ -6888,6 +8446,11 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
             verification={
                 "state": "read_back",
                 **readback,
+                "final_attachment_content_hash": (
+                    image_attachment_content_hash(new_attachment)
+                    if args.image
+                    else None
+                ),
                 "old_attachment_cloud_state_retained": deleted.get(
                     "cloud_state_tombstone_retained"
                 ),
@@ -7263,6 +8826,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list")
     p.set_defaults(func=cmd_read_reminder)
 
+    p = sub.add_parser("list_deleted_reminders")
+    add_common_db(p)
+    p.add_argument("--account-id")
+    p.add_argument("--limit", type=positive_int, default=20)
+    p.add_argument("--offset", type=nonnegative_int, default=0)
+    p.set_defaults(func=cmd_list_deleted_reminders)
+
+    p = sub.add_parser("read_deleted_reminder")
+    add_common_db(p)
+    p.add_argument("--id", required=True)
+    p.add_argument("--attachment-limit", type=positive_int, default=100)
+    p.set_defaults(func=cmd_read_deleted_reminder)
+
+    p = sub.add_parser("recover_deleted_reminder")
+    add_common_db(p)
+    p.add_argument("--id", required=True)
+    p.add_argument("--list-id", required=True)
+    p.add_argument("--if-store-identity", required=True)
+    p.add_argument("--if-version", type=int, required=True)
+    p.add_argument("--if-deleted-at", required=True)
+    p.add_argument("--if-attachment-digest", required=True)
+    p.add_argument("--if-native-guard-digest", required=True)
+    p.add_argument("--idempotency-key", required=True)
+    p.set_defaults(func=cmd_recover_deleted_reminder)
+
     p = sub.add_parser("show_reminder")
     add_common_db(p)
     p.add_argument("--id")
@@ -7414,6 +9002,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--idempotency-key")
     p.set_defaults(func=cmd_attach_image)
 
+    p = sub.add_parser("copy_image_attachment")
+    add_common_db(p)
+    p.add_argument("--source-id", required=True)
+    p.add_argument("--id", required=True)
+    p.add_argument("--attachment-id", required=True)
+    p.add_argument("--if-source-version", type=int, required=True)
+    p.add_argument("--if-version", type=int, required=True)
+    p.add_argument("--idempotency-key", required=True)
+    p.set_defaults(func=cmd_copy_image_attachment)
+
     p = sub.add_parser("attach_url")
     add_common_db(p)
     p.add_argument("--id")
@@ -7499,6 +9097,7 @@ def main(argv: list[str] | None = None) -> int:
                     reason_code=exc.reason_code,
                 ) from exc
             args.image = str(validated_image.path)
+            args._validated_image = validated_image
             args._validated_image_sha256 = validated_image.sha256
         return args.func(args)
     except AdapterError as exc:

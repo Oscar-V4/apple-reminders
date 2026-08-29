@@ -1,4 +1,5 @@
 #import <CoreLocation/CoreLocation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <EventKit/EventKit.h>
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
@@ -1280,6 +1281,32 @@ static NSComparisonResult CompareNullableDates(NSDate *left, NSDate *right) {
     return [left compare:right];
 }
 
+static NSString *OrderedReminderSnapshotFingerprint(NSArray<EKReminder *> *reminders) {
+    NSMutableArray *revisions = [NSMutableArray arrayWithCapacity:reminders.count];
+    for (EKReminder *reminder in reminders) {
+        [revisions addObject:@[
+            reminder.calendarItemIdentifier ?: @"",
+            reminder.lastModifiedDate != nil
+                ? @([reminder.lastModifiedDate timeIntervalSinceReferenceDate])
+                : (id)[NSNull null],
+        ]];
+    }
+    NSError *encodingError = nil;
+    NSData *encoded = [NSJSONSerialization dataWithJSONObject:revisions
+                                                      options:0
+                                                        error:&encodingError];
+    if (encoded == nil || encodingError != nil || encoded.length > UINT32_MAX) {
+        return nil;
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(encoded.bytes, (CC_LONG)encoded.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index += 1) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
 static NSDictionary *FetchReminders(EKEventStore *store, NSDictionary *request, NSString *operation) {
     NSArray<EKCalendar *> *calendars = CalendarsForRequest(store, request);
     NSString *status = request[@"status"] ?: @"incomplete";
@@ -1362,6 +1389,14 @@ static NSDictionary *FetchReminders(EKEventStore *store, NSDictionary *request, 
         }
         return result;
     }];
+    NSString *snapshotFingerprint = OrderedReminderSnapshotFingerprint(matched);
+    if (snapshotFingerprint == nil) {
+        return Failure(operation,
+                       @"pagination_snapshot_failed",
+                       @"The ordered Reminder snapshot could not be fingerprinted",
+                       @"runtime",
+                       @{});
+    }
     NSUInteger offset = [request[@"offset"] unsignedIntegerValue];
     NSUInteger limit = [request[@"limit"] unsignedIntegerValue];
     NSUInteger start = MIN(offset, matched.count);
@@ -1381,6 +1416,7 @@ static NSDictionary *FetchReminders(EKEventStore *store, NSDictionary *request, 
                               @"offset" : @(offset),
                               @"has_more" : @(hasMore),
                               @"next_offset" : hasMore ? @(start + count) : (id)[NSNull null],
+                              @"snapshot_fingerprint" : snapshotFingerprint,
                           },
                           nil);
 }

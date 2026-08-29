@@ -10,26 +10,43 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
 import re
+import sys
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from receipt_contract import validated_receipt_mutation_state
+
 if __package__:  # Package import in tests; script-local import in the stdio server.
-    from .v2_core import EventKitReply
+    from .v2_core import EventKitReply, MutationState
+    from .v2_transport import TransportResult
 else:  # pragma: no cover - exercised by the script entry point
-    from v2_core import EventKitReply
+    from v2_core import EventKitReply, MutationState
+    from v2_transport import TransportResult
 
 
-BridgeCall = Callable[[str, dict[str, Any]], tuple[dict[str, Any], bool]]
-AdapterCall = Callable[[list[str]], tuple[dict[str, Any], bool]]
+BridgeCall = Callable[[str, dict[str, Any]], TransportResult]
+AdapterCall = Callable[[list[str]], TransportResult]
 ArgvBuilder = Callable[[str, dict[str, Any]], list[str]]
 ModuleLoader = Callable[[], Any]
 ReceiptValidator = Callable[..., str | None]
 
 
 class _EventKitBridgeFailure(RuntimeError):
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        mutation_state: MutationState,
+    ) -> None:
         super().__init__("EventKit bridge operation failed")
         self.payload = payload
+        self.mutation_state = mutation_state
 
 
 class _EventKitReceiptFailure(RuntimeError):
@@ -78,14 +95,21 @@ class CoreBackend:
             tool_name = self._MUTATION_TOOL_NAMES.get(operation)
             if tool_name is None:
                 raise RuntimeError(f"Unsupported v2 EventKit mutation: {operation}")
-            payload, is_error = self._invoke_mutation(
+            payload, is_error, mutation_state = self._invoke_mutation(
                 tool_name,
                 operation,
                 supplied,
             )
         else:
-            payload, is_error = self._bridge_call(operation, supplied)
-        return EventKitReply(payload=payload, is_error=is_error)
+            transport = self._bridge_call(operation, supplied)
+            payload = transport.payload
+            is_error = transport.is_error
+            mutation_state = None
+        return EventKitReply(
+            payload=payload,
+            is_error=is_error,
+            mutation_state=mutation_state,
+        )
 
     @staticmethod
     def _mutation_reminder_id(payload: dict[str, Any]) -> str | None:
@@ -149,6 +173,60 @@ class CoreBackend:
         return payload
 
     @staticmethod
+    def _url_attachment_no_write_ambiguity_receipt(
+        payload: dict[str, Any],
+        *,
+        code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        payload["ok"] = False
+        payload["status"] = "failed_no_mutation"
+        payload["after"] = {}
+        verification = payload.setdefault("verification", {})
+        verification.update(
+            {
+                "state": "not_needed",
+                "write_performed": False,
+                "final_read": False,
+                "matched": False,
+            }
+        )
+        verification["url_attachment"] = {
+            "state": "ambiguous",
+            "status": "failed_no_mutation",
+            "error_code": code,
+        }
+        recovery = payload.setdefault("recovery", {})
+        recovery.update(
+            {
+                "semantics": "inspect_url_attachments_before_exact_cleanup",
+                "automatic_retry_safe": False,
+                "manual_action": (
+                    "Read the exact Reminder to obtain a fresh Reference, use "
+                    "inspect_reminder_native with that Reference, then use "
+                    "change_reminder_attachment only for an exact attachment ID "
+                    "that the user intends to clean up."
+                ),
+            }
+        )
+        payload["error"] = {
+            "code": "ambiguous_scope",
+            "reason_code": code,
+            "message": message,
+            "retryable": False,
+        }
+        payload["next_action"] = {
+            "kind": "fresh_read",
+            "tool": "read_reminder",
+            "retry_original_once": False,
+            "message": (
+                "Read the exact Reminder to obtain a fresh Reference before native "
+                "attachment inspection; do not retry the URL patch."
+            ),
+        }
+        return payload
+
+    @staticmethod
     def _is_rfc3339_timestamp(value: Any) -> bool:
         if not isinstance(value, str) or not re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})",
@@ -199,6 +277,18 @@ class CoreBackend:
         payload["ok"] = True
         payload["status"] = "committed_verification_pending"
         verification["state"] = "pending"
+        url_verification = verification.get("url_attachment")
+        verification["write_performed"] = (
+            True
+            if verification.get("write_performed") is True
+            or (
+                isinstance(url_verification, dict)
+                and url_verification.get("status") == "verified"
+            )
+            else None
+        )
+        verification["final_read"] = False
+        verification["matched"] = None
         payload["error"] = {
             "code": "sync_pending",
             "reason_code": reason_code,
@@ -225,15 +315,38 @@ class CoreBackend:
             )
 
         initial_eventkit_status = str(payload["status"])
+
+        def inventory_failure(*, code: str, message: str) -> dict[str, Any]:
+            if initial_eventkit_status == "unchanged":
+                return self._url_attachment_no_write_ambiguity_receipt(
+                    payload,
+                    code=code,
+                    message=message,
+                )
+            return self._url_attachment_partial_receipt(
+                payload,
+                code=code,
+                message=message,
+            )
+
         attachment: dict[str, Any] | None = None
         attachment_status: str | None = None
-        list_arguments = {"reminder_id": reminder_id, "limit": 1}
-        list_payload, list_is_error = self._adapter_call(
+        before = payload.get("before")
+        previous_url = before.get("url") if isinstance(before, Mapping) else None
+        list_arguments = {
+            "reminder_id": reminder_id,
+            "attachment_type": "url",
+            "limit": 200,
+        }
+        list_transport = self._adapter_call(
             self._build_adapter_argv("list_reminder_attachments", list_arguments)
         )
+        list_payload = list_transport.payload
+        list_is_error = list_transport.is_error
         reminder_version = list_payload.get("reminder_version")
         if (
             list_is_error
+            or list_payload.get("ok") is not True
             or not isinstance(reminder_version, int)
             or isinstance(reminder_version, bool)
             or reminder_version < 0
@@ -243,8 +356,7 @@ class CoreBackend:
                 if isinstance(list_payload.get("error"), dict)
                 else {}
             )
-            self._url_attachment_partial_receipt(
-                payload,
+            return inventory_failure(
                 code=str(error.get("code") or "native_url_attachment_precondition_failed"),
                 message=(
                     "The EventKit write succeeded, but the plugin could not obtain a "
@@ -253,20 +365,179 @@ class CoreBackend:
                 ),
             )
         else:
-            attach_arguments = {
+            raw_attachments = list_payload.get("attachments")
+            inventory_valid = (
+                list_payload.get("reminder_id") == reminder_id
+                and isinstance(raw_attachments, list)
+                and isinstance(list_payload.get("truncated"), bool)
+            )
+            seen_attachment_ids: set[str] = set()
+            if inventory_valid:
+                for item in raw_attachments:
+                    item_id = item.get("id") if isinstance(item, Mapping) else None
+                    if (
+                        not isinstance(item, Mapping)
+                        or not isinstance(item_id, str)
+                        or not item_id
+                        or item_id in seen_attachment_ids
+                        or item.get("type") != "url"
+                        or not isinstance(item.get("url"), str)
+                        or not item.get("url")
+                    ):
+                        inventory_valid = False
+                        break
+                    seen_attachment_ids.add(item_id)
+            if not inventory_valid:
+                return inventory_failure(
+                    code="native_url_attachment_inventory_invalid",
+                    message=(
+                        "The plugin could not prove a complete exact URL attachment "
+                        "inventory, so it performed no native attachment write."
+                    ),
+                )
+            attachments = raw_attachments
+            matching_previous = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") == previous_url
+            ]
+            matching_target = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") == url
+            ]
+            other_url_attachments = [
+                item
+                for item in attachments
+                if isinstance(item, Mapping)
+                and item.get("type") == "url"
+                and item.get("url") != url
+            ]
+            mutation_tool = "attach_url_to_reminder"
+            expected_operation = "attach_url"
+            attachment_arguments: dict[str, Any] = {
                 "reminder_id": reminder_id,
                 "url": url,
                 "if_version": reminder_version,
             }
-            attach_payload, attach_is_error = self._adapter_call(
-                self._build_adapter_argv("attach_url_to_reminder", attach_arguments)
+            replacing_previous = (
+                isinstance(previous_url, str)
+                and bool(previous_url)
+                and previous_url != url
             )
+            ambiguity_code: str | None = None
+            no_write_ambiguity = False
+            reuse_existing = False
+            if list_payload.get("truncated") is True:
+                ambiguity_code = "native_url_attachment_inventory_truncated"
+            elif len(matching_target) > 1:
+                ambiguity_code = "ambiguous_target_url_attachment"
+            elif (
+                initial_eventkit_status == "unchanged"
+                and other_url_attachments
+            ):
+                # A fresh same-URL retry no longer carries the A -> B lineage
+                # from an earlier partial composed write. Any non-target URL
+                # could be an intentional link or the stale A, whether or not B
+                # is already present. Appending B in the A-only case would
+                # create the same ambiguous A+B state and falsely claim success.
+                no_write_ambiguity = True
+            elif len(matching_target) == 1 and replacing_previous and matching_previous:
+                # This is the characteristic retry state after the visible B
+                # attachment committed but the composed A -> B Receipt was
+                # uncertain. Replacing A now would create a second B. Preserve
+                # both exact objects and ask for an explicit attachment cleanup.
+                ambiguity_code = "target_url_attachment_already_exists"
+            elif len(matching_target) == 1:
+                reuse_existing = True
+            elif replacing_previous and len(matching_previous) > 1:
+                ambiguity_code = "ambiguous_visible_url_attachment"
+            elif replacing_previous and len(matching_previous) == 1:
+                attachment_id = matching_previous[0].get("id")
+                if not isinstance(attachment_id, str) or not attachment_id:
+                    ambiguity_code = "native_url_attachment_identity_missing"
+                else:
+                    mutation_tool = "replace_reminder_attachment"
+                    expected_operation = "replace_attachment"
+                    attachment_arguments["attachment_id"] = attachment_id
+                    attachment_arguments["idempotency_key"] = (
+                        "core-url-replace-"
+                        + hashlib.sha256(
+                            (
+                                f"{payload.get('operation_id')}\n{reminder_id}\n"
+                                f"{attachment_id}\n{url}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
+
+            if reuse_existing:
+                attachment = copy.deepcopy(dict(matching_target[0]))
+                attachment_status = "unchanged"
+                payload.setdefault("verification", {})["url_attachment"] = {
+                    "state": "read_back",
+                    "write_performed": False,
+                    "final_read": True,
+                    "matched": True,
+                    "attachment_active": True,
+                    "status": "unchanged",
+                }
+                payload.setdefault("recovery", {})["url_attachment"] = {
+                    "semantics": "not_applicable",
+                    "automatic_retry_safe": True,
+                }
+                attach_payload: dict[str, Any] = {}
+                attach_is_error = False
+            elif no_write_ambiguity:
+                attachment = (
+                    copy.deepcopy(dict(matching_target[0]))
+                    if matching_target
+                    else None
+                )
+                self._url_attachment_no_write_ambiguity_receipt(
+                    payload,
+                    code="ambiguous_visible_url_attachment",
+                    message=(
+                        "The EventKit URL was already unchanged, but a non-target URL "
+                        "attachment is still present. No attachment was changed because "
+                        "the plugin cannot infer whether that object is an intentional "
+                        "link or a stale replacement source, and it cannot safely append "
+                        "another target attachment. Inspect the exact native "
+                        "attachments before cleaning up one exact attachment ID."
+                    ),
+                )
+                attach_payload = {}
+                attach_is_error = True
+            elif ambiguity_code is not None:
+                self._url_attachment_partial_receipt(
+                    payload,
+                    code=ambiguity_code,
+                    message=(
+                        "The EventKit URL changed, but the visible URL attachment state "
+                        "could not be selected uniquely without risking a duplicate or "
+                        "removing the wrong object. Existing attachments were preserved; "
+                        "inspect the exact Reminder before any attachment change."
+                    ),
+                )
+                attach_payload = {}
+                attach_is_error = True
+            else:
+                attach_transport = self._adapter_call(
+                    self._build_adapter_argv(mutation_tool, attachment_arguments)
+                )
+                attach_payload = attach_transport.payload
+                attach_is_error = attach_transport.is_error
             receipt_error = (
                 self._receipt_validator(
                     attach_payload,
-                    expected_operation="attach_url",
+                    expected_operation=expected_operation,
                 )
                 if not attach_is_error
+                and ambiguity_code is None
+                and not no_write_ambiguity
                 else None
             )
             candidate_attachment = (
@@ -287,7 +558,9 @@ class CoreBackend:
                 isinstance(candidate_attachment, dict)
                 and candidate_attachment.get("url") == url
             )
-            if (
+            if reuse_existing or ambiguity_code is not None or no_write_ambiguity:
+                pass
+            elif (
                 attach_is_error
                 or receipt_error
                 or not attachment_receipt_complete
@@ -325,10 +598,12 @@ class CoreBackend:
                     "recovery"
                 ]
 
-        final_payload, final_is_error = self._bridge_call(
+        final_transport = self._bridge_call(
             "read_reminder",
             {"reminder_id": reminder_id},
         )
+        final_payload = final_transport.payload
+        final_is_error = final_transport.is_error
         final_data = final_payload.get("data")
         final_reminder = (
             final_data.get("reminder")
@@ -364,10 +639,6 @@ class CoreBackend:
                 reason_code=reason_code,
             )
 
-        final_after = dict(final_reminder)
-        if attachment is not None:
-            final_after["url_attachment"] = attachment
-        payload["after"] = final_after
         payload.setdefault("verification", {})["eventkit_final_read"] = {
             "state": "read_back",
             "reminder_id": reminder_id,
@@ -377,17 +648,39 @@ class CoreBackend:
             "semantics": "not_applicable",
             "automatic_retry_safe": True,
         }
+        final_after = dict(final_reminder)
+        if attachment is not None:
+            final_after["url_attachment"] = attachment
         if payload.get("status") == "partial_success":
+            payload["after"] = final_after
             verification = payload.setdefault("verification", {})
             verification["state"] = "partial"
             verification["final_read"] = True
             verification["matched"] = True
             return payload
+        if payload.get("status") == "failed_no_mutation":
+            verification = payload.setdefault("verification", {})
+            verification["state"] = "not_needed"
+            verification["write_performed"] = False
+            verification["final_read"] = False
+            verification["matched"] = False
+            payload["after"] = {}
+            return payload
+        payload["after"] = final_after
         payload["status"] = (
             "unchanged"
             if initial_eventkit_status == "unchanged"
             and attachment_status == "unchanged"
             else "verified"
+        )
+        verification = payload.setdefault("verification", {})
+        verification.update(
+            {
+                "state": "read_back",
+                "write_performed": payload["status"] == "verified",
+                "final_read": True,
+                "matched": True,
+            }
         )
         return payload
 
@@ -396,19 +689,86 @@ class CoreBackend:
         tool_name: str,
         operation: str,
         arguments: dict[str, Any],
-    ) -> tuple[dict[str, Any], bool]:
+    ) -> tuple[dict[str, Any], bool, MutationState]:
         bridge_arguments = dict(arguments)
         idempotency_key = bridge_arguments.pop("idempotency_key", None)
         bridge_contract = self._bridge_module()
+        adapter: Any | None = None
+        executed_state: MutationState | None = None
 
         def execute_once() -> dict[str, Any]:
-            payload, is_error = self._bridge_call(operation, bridge_arguments)
+            nonlocal executed_state
+            transport = self._bridge_call(operation, bridge_arguments)
+            payload = transport.payload
+            is_error = transport.is_error
             if is_error:
-                raise _EventKitBridgeFailure(payload)
+                adapter_error = (
+                    getattr(adapter, "AdapterError", None)
+                    if adapter is not None
+                    else None
+                )
+                mutation_not_started_error = (
+                    getattr(adapter, "MutationNotStartedError", None)
+                    if adapter is not None
+                    else None
+                )
+                validate_response = getattr(bridge_contract, "validate_response", None)
+                transport_not_started = (
+                    transport.proves_not_started and payload.get("ok") is False
+                )
+                contract_proved_no_write = (
+                    payload.get("status") == "failed_no_mutation"
+                    and payload.get("ok") is False
+                    and callable(validate_response)
+                )
+                error_state: MutationState = "unknown"
+                if transport_not_started:
+                    error_state = "not_mutated"
+                elif contract_proved_no_write:
+                    try:
+                        validate_response(payload, operation)
+                    except RuntimeError:
+                        contract_proved_no_write = False
+                    else:
+                        error_state = "not_mutated"
+                proven_no_write = (
+                    tool_name == "create_reminder"
+                    and isinstance(adapter_error, type)
+                    and isinstance(mutation_not_started_error, type)
+                    and (transport_not_started or contract_proved_no_write)
+                )
+                if proven_no_write and error_state != "not_mutated":
+                    proven_no_write = False
+                if proven_no_write:
+                    error = payload.get("error")
+                    if not isinstance(error, dict):
+                        proven_no_write = False
+                if proven_no_write:
+                    public_payload = copy.deepcopy(payload)
+                    if transport_not_started:
+                        public_payload.setdefault("schema_version", 1)
+                        public_payload["operation"] = operation
+                        public_payload["status"] = "failed_no_mutation"
+                        public_payload["ok"] = False
+                    # The trusted EventKit boundary proved that no mutation
+                    # occurred.  Translate that proof into the adapter's
+                    # callback exception contract so execute_idempotent can
+                    # remove its write-ahead fence and permit an exact retry.
+                    # Preserve the bounded bridge payload after fence cleanup;
+                    # launcher provenance is stripped before public MCP output.
+                    raise mutation_not_started_error(
+                        str(error["message"]),
+                        code=str(error["code"]),
+                        reason_code=str(error.get("reason_code") or error["code"]),
+                        result_status="failed_no_mutation",
+                        public_payload=public_payload,
+                    )
+                raise _EventKitBridgeFailure(payload, error_state)
             try:
                 bridge_contract.validate_mutation_receipt(payload, operation)
             except RuntimeError as exc:
                 raise _EventKitReceiptFailure(str(exc)) from exc
+            raw_state = validated_receipt_mutation_state(payload)
             visible_url = (
                 bridge_arguments.get("url")
                 if tool_name == "create_reminder"
@@ -420,6 +780,14 @@ class CoreBackend:
                 visible_url = bridge_arguments["patch"].get("url")
             if isinstance(visible_url, str):
                 payload = self._ensure_visible_url_attachment(payload, visible_url)
+            projected_state = validated_receipt_mutation_state(payload)
+            executed_state = (
+                "committed"
+                if raw_state == "committed"
+                else "unknown"
+                if raw_state == "unknown"
+                else projected_state
+            )
             return payload
 
         try:
@@ -460,7 +828,7 @@ class CoreBackend:
             else:
                 payload = execute_once()
         except _EventKitBridgeFailure as exc:
-            return exc.payload, True
+            return exc.payload, True, exc.mutation_state
         except _EventKitReceiptFailure as exc:
             return (
                 {
@@ -471,10 +839,28 @@ class CoreBackend:
                     },
                 },
                 True,
+                "unknown",
             )
         except Exception as exc:
-            adapter_error = getattr(self._adapter_module(), "AdapterError", ())
+            adapter_contract = (
+                adapter if adapter is not None else self._adapter_module()
+            )
+            adapter_error = getattr(adapter_contract, "AdapterError", ())
+            mutation_not_started_error = getattr(
+                adapter_contract,
+                "MutationNotStartedError",
+                (),
+            )
             if adapter_error and isinstance(exc, adapter_error):
+                error_state: MutationState = (
+                    "not_mutated"
+                    if mutation_not_started_error
+                    and isinstance(exc, mutation_not_started_error)
+                    else "unknown"
+                )
+                eventkit_payload = getattr(exc, "public_payload", None)
+                if isinstance(eventkit_payload, dict):
+                    return copy.deepcopy(eventkit_payload), True, error_state
                 return (
                     {
                         "ok": False,
@@ -487,6 +873,16 @@ class CoreBackend:
                         },
                     },
                     True,
+                    error_state,
                 )
             raise
-        return payload, payload.get("ok") is not True
+        if executed_state is None:
+            try:
+                bridge_contract.validate_mutation_receipt(payload, operation)
+            except RuntimeError:
+                mutation_state: MutationState = "unknown"
+            else:
+                mutation_state = validated_receipt_mutation_state(payload)
+        else:
+            mutation_state = executed_state
+        return payload, payload.get("ok") is not True, mutation_state

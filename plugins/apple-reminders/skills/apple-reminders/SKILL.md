@@ -1,6 +1,6 @@
 ---
 name: apple-reminders
-description: Manage native Apple Reminders from Codex. Use for bounded task reads, lists and sections, due dates and alarms, completion, safe create/change/delete work, tags, and image or URL attachments. Native flags, UI selection, bulk repair, and backup/restore are not public operations.
+description: Manage native Apple Reminders from Codex. Use for bounded task reads, lists and sections, due dates and alarms, completion, safe create/change/delete/recover work, tags, and image or URL attachments. Native flags, raw UI selection, bulk repair, and backup apply are not public operations.
 ---
 
 # Apple Reminders
@@ -13,19 +13,20 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 
 - Use `$apple-reminders-daily-brief` for today, overdue, week, or no-due-date briefs.
 - Use `$apple-reminders-quick-capture` to create reminders with typed dates, alarms, recurrence, URLs, or an image follow-up.
-- Use `$apple-reminders-organize-cleanup` for bounded completion/deletion proposals, list or section moves, section creation, and tag assignment changes.
-- Use `$apple-reminders-attachment-maintenance` for image and URL inspection, attach, replace, or delete work.
+- Use `$apple-reminders-organize-cleanup` for bounded completion/deletion/recovery workflows, list or section moves, section creation, and tag assignment changes.
+- Use `$apple-reminders-attachment-maintenance` for image and URL inspection, attach, cross-reminder image copy, replace, or delete work.
 
 ## Normal workflow
 
 1. Start with the requested bounded Core operation. Do not run Doctor or capability preflight first.
 2. Use `list_reminder_lists`, `fetch_reminders`, and `read_reminder` to ground names in exact identities. List titles are display values; `list_id` and `source_id` are selectors.
-3. Keep page reads semantically bounded. Incomplete reads require exact `list_ids` or a bounded due range. Completed reads require a bounded completion range. Reuse a cursor only with identical filters, sort, and limit.
+3. Keep page reads semantically bounded. Incomplete reads require exact `list_ids` or a bounded due range. Completed reads require a bounded completion range. Reuse an opaque cursor only with identical filters, sort, and limit; if it returns `pagination_snapshot_stale`, discard the paged set and restart without a cursor. For literal UI-relative “top” or “visible” targets, directly observe the current UI and resolve each visible row to one exact ID. If current UI observation is unavailable, stop and offer an explicit bounded API snapshot with the proposed scope/sort instead; use that surrogate only after the user explicitly agrees to reinterpret the request as API order. Stop on duplicate UI-to-ID mapping, state which basis was used, and never conflate UI order with API order.
 4. Before changing an existing reminder, call `read_reminder` and use its opaque `rev1` reference. Never construct, decode, or reuse a stale reference.
 5. Use `change_reminder` with one closed action: `patch`, `set_completion`, or `move_to_list`. Omitted patch fields stay unchanged; due values and alarms remain distinct.
-6. Use `delete_reminder` only with a fresh exact reference. It uses EventKit deletion and requires verified local absence; Recently Deleted is expected but not UI-verified.
-7. For Native Extension work, resolve the exact reminder first. Use `inspect_reminder_native` for sections, tags, attachments, or sync evidence; then pass a fresh opaque reference to `organize_reminder` or `change_reminder_attachment`.
-8. After a write, trust only the returned Receipt. `verified` requires final read-back; `committed_verification_pending` and `partial_success` require a fresh read before another write.
+6. Use `delete_reminder` only with a fresh exact reference. It uses EventKit deletion and requires verified local absence; that receipt alone does not prove UI state, retention, or later recoverability.
+7. To recover an exact item retained in Recently Deleted, use `inspect_recently_deleted` list mode only for bounded discovery. Follow a Recently Deleted cursor only with the identical account and limit. If continuation returns `pagination_snapshot_stale`, discard every collected page and restart without a cursor. Then use item mode with the exact ID immediately before recovery. Pass its fresh opaque `del1`, an exact same-account destination `list_id`, and a unique idempotency key to `recover_deleted_reminder`. The deleted item's `account_id` and the destination Reminder List's `source.id` are the account comparison keys; never resolve duplicate list titles without them. Recover one item at a time and stop on any non-verified result.
+8. For Native Extension work, resolve the exact reminder first. Use `inspect_reminder_native` for sections, tags, attachments, or sync evidence; then pass a fresh opaque reference to `organize_reminder` or `change_reminder_attachment`.
+9. After a write, trust only the returned Receipt. `verified` requires final read-back; `committed_verification_pending` and `partial_success` require a fresh read before another write.
 
 ## Permission and diagnosis
 
@@ -39,16 +40,20 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Do not invent an alarm from a due date. Absolute alarms and coordinate-backed enter/leave location alarms are supported; relative and messaging alarms are not.
 - Only one validated recurrence rule is supported and it requires a due date.
 - A non-null URL on Core create/change is one hybrid operation: EventKit metadata, one visible native URL attachment, and final exact read. Do not add the same URL again after `verified`.
+- If a fresh same-URL patch returns `ambiguous_visible_url_attachment`, do not retry or guess which extra URL is stale. Follow `read_reminder` to obtain a fresh Reference, inspect native attachments, and clean up only an exact user-intended attachment ID.
 - Clearing Core `patch.url` does not delete existing URL attachment objects; attachment deletion is explicit.
 
 ## Lists, sections, tags, and attachments
 
-- `ensure_reminder_list` selects an exact account by `source_id` and exact name. Public 0.3 does not promise list color or emblem writes.
+- `ensure_reminder_list` selects an exact account by `source_id` and exact name. The public interface does not promise list color or emblem writes.
 - Section reads and writes use exact `list_id`; section names are not global.
-- `organize_reminder` supports section move and tag add/remove assignments. Unused-label row cleanup is withheld from public 0.3.
+- `organize_reminder` supports section move and tag add/remove assignments. Unused-label row cleanup is withheld from the public interface.
 - Image input must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, 16,384 pixels per dimension, and 40,000,000 pixels total.
+- Cross-reminder image copy uses `change_reminder_attachment` action `copy_image` with fresh destination and source `rev1` references plus one exact active source image attachment ID. It never exports a private file path or mutates the source.
 - `mobile_visible_likely` is CloudKit/mobile-sync evidence, not direct iPhone observation. Say “mobile visibility evidence was found”; claim device confirmation only after actual UI observation.
-- Attachment repair, backup/Snapshot apply, log purge, native flag mutation, and `show_reminder` are withheld until their public verification contracts are complete.
+- Recently Deleted inspection/recovery is a local macOS, private-framework capability within the 30-day retention window. Treat success on one tested Mac as local evidence, not a generic macOS/account guarantee.
+- Exact deleted-item inspection authorizes recovery only after both the private-store and native ReminderKit snapshot guards are captured and any local image backing bytes match their stored SHA-512. Missing bytes or proof means no `del1`, not permission to weaken verification.
+- Attachment export, attachment repair apply, backup/Snapshot apply, log purge, native flag mutation, and `show_reminder` are withheld until their public verification contracts are complete.
 
 ## Write safety
 
@@ -56,6 +61,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Preserve all omitted fields and unrelated sections, tags, URLs, and attachments.
 - Resolve duplicate names before mutation. Never mutate a title-only match.
 - For broad completion, deletion, or many moves, show the bounded candidate set unless the user has already granted standing delegation.
+- Complete and verify every non-destructive dependency before deleting a source. Copy required attachments to the exact destination first, then re-read each source and delete one at a time. Recovery is a guarded repair path for an item already deleted, not a substitute for dependency-first ordering.
 - Do not continue after ambiguity, stale reference, sync uncertainty, partial success, or manual-repair status except with a read-only resolution step.
 - Never write directly to Reminders SQLite, invoke unexposed adapter writes, or claim sync from process exit alone.
 

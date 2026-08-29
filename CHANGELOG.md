@@ -2,6 +2,142 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.4.0 — 2026-08-28
+
+### Added
+
+- Added bounded Recently Deleted discovery and exact one-item recovery. Only an
+  exact deleted-item read issues a short-lived, one-use opaque `del1`
+  Reference; recovery requires a same-account destination, an idempotency key,
+  native attachment preservation, and final EventKit read-back.
+- Added the closed `copy_image` attachment action. It revalidates fresh source
+  and destination `rev1` References, snapshots one exact private image without
+  exposing its path, preserves the source, and verifies byte-identical content
+  on the destination.
+- Added explicit completed-range daily briefs with a separate Completed
+  section and human priority labels.
+- Added a current workflow capability matrix covering UI-versus-API ordering,
+  dependency-first destructive flows, CRUD boundaries, and evidence limits.
+
+### Changed
+
+- Bound pagination to a private ordered ID-and-revision SHA-256 snapshot.
+  Continuation now fails read-only with `pagination_snapshot_stale` when list
+  membership or revisions change between pages.
+- Added a separate snapshot-bound Recently Deleted cursor so deleted items
+  beyond the first 200 remain reachable. Continuations bind the identical
+  account and limit and restart from page one after snapshot drift.
+- Literal UI-relative selection now requires direct current-UI identity.
+  API order is offered only as an explicitly approved reinterpretation;
+  ambiguous “organize” requests do not authorize deletion or imply bitmap
+  compositing.
+- Broad cleanup now discovers summaries first, obtains write References just
+  in time, processes authorized 25–40 item chunks, verifies each item, and
+  stops the entire run on the first uncertain Receipt.
+- MCP text output now leads with a content-free outcome, write state, evidence
+  scope, exact safe target identifiers, and the next read-only action.
+- URL metadata changes now replace one exact matching visible attachment,
+  preserve unrelated or ambiguous objects, and reuse an already-correct target
+  attachment instead of creating a duplicate on retry.
+- Isolated MCP initialization, rate limits, backend paths, and lazy Facade
+  ownership inside one `McpRuntime` per stdio session instead of mutable module
+  globals. Test backend injection is now constructor-owned and cannot leak into
+  another runtime.
+- Replaced private JSON dispatch-provenance flags with a closed internal
+  `TransportResult`. Only the parent launcher can prove that a subprocess never
+  started; child output, timeouts, transport errors, and malformed results
+  cannot forge that fact or clear a durable mutation fence.
+- Carried independent `not_mutated`/`committed`/`unknown` facts through every
+  Core, Native, and Recovery mutation, durable replay, public projection, and
+  server fallback. Final-proof loss keeps commits but degrades unproven
+  no-write claims to unknown instead of reconstructing state from display
+  status.
+
+### Fixed
+
+- Made top-level discriminated MCP schemas branch-complete so Codex discovery
+  exposes all bounded `fetch_reminders` and exact Recently Deleted arguments,
+  instead of reducing branches to only a status or kind discriminator.
+- Kept URL A-to-B retry state honest: if EventKit already reads B while native
+  attachments contain B plus another URL, the plugin performs no write,
+  returns an ambiguity, and requires exact attachment inspection rather than
+  reporting `unchanged` or guessing which link to delete.
+- Rejected malformed, mismatched, or incomplete native URL inventories before
+  any attachment write, preventing a hidden existing URL from being duplicated.
+- Re-fetched and hashed the deleted Reminder immediately before the native
+  recovery save, and prevented non-empty post-state from being laundered into
+  a `failed_no_mutation` Receipt.
+- Bound verified recovery's raw target, before/after identity, deletion time,
+  destination, and attachment counts to the authorized item and proof tuple.
+  Snapshot-stale active and deleted pages now point to the same read without a
+  cursor instead of falling back to diagnosis.
+- Required both raw recovery attachment-set digests to equal the private
+  `del1` guard before `verified`, and made a fresh unchanged URL retry with
+  stale A but no B fail without a native write instead of appending B.
+- Reduced Recently Deleted pagination exposure by reading only ordered
+  identity/revision columns for the snapshot and full content for the current
+  page inside one pinned read transaction, with page revisions checked against
+  the fingerprint. Missing or expired deleted items now retain typed
+  `not_found` errors.
+- Bound every terminal Core create/change and ordinary Native mutation to the
+  requested field or action before returning `verified` or issuing a fresh
+  `rev1`. A contradictory final read or post-dispatch projection failure now
+  preserves a possible write and requires a fresh read instead of claiming
+  success or `failed_no_mutation`; pre-dispatch Reference read failures remain
+  proven no-write results.
+- Canonicalized native UUID and tag comparisons and require complete,
+  non-truncated inventories before proving a tag or attachment absent. Image
+  success now binds a mode-0600 validated snapshot to the final SHA-512, byte
+  size, dimensions, decoded UTI, and mobile-visible CloudKit evidence.
+- Added a content-free durable idempotency fence before commit-capable adapter
+  callbacks. Store damage or a failed pre-dispatch fence stops the write, while
+  a crash or final-Receipt persistence failure blocks redispatch and returns
+  verification-pending on replay. The current key survives wall-clock jumps,
+  and unresolved fences cannot be evicted merely to make capacity for a new
+  write. A callback failure that affirmatively occurred before mutation clears
+  its fence for a safe retry; possible-commit failures retain it. Core create
+  now carries contract-validated EventKit no-write results through that same
+  cleanup path instead of leaving a permanent unresolved fence.
+- Added a native ReminderKit snapshot guard immediately before deleted-item
+  recovery, actual image backing-byte SHA-512 checks, pre/native/post attachment
+  count agreement, and independent mutation-state transport into public
+  contract validation. Missing proof or any post-save read failure now fails
+  closed without inventing a verified or no-write outcome.
+- Mapped recovery failures to fixed public messages so private store paths and
+  native helper details cannot enter structured output. Parent-verified missing
+  paths and request-bound failures retain pre-dispatch `failed_no_mutation`;
+  generic process transport errors, timeouts, and malformed post-launch output
+  remain outcome-unknown because an `OSError` alone cannot prove the child never
+  started. Child output cannot spoof parent dispatch provenance.
+- Removed an unsafe nil-completion ReminderKit sync trigger that could crash
+  after a successful recovery save. A helper crash or malformed post-dispatch
+  result is now conservatively verification-pending rather than a false
+  no-write failure.
+- Preserved local clock and IANA timezone in timed daily-brief output and
+  translated Apple/EventKit priority numbers into high, medium, and low labels.
+- Allowed multiple content-addressed backing-file candidates only when every
+  candidate matches the stored SHA-512 digest. ReminderKit UTI normalization is
+  accepted when the copied bytes, dimensions, and file size remain exact.
+- Rejected contradictory `failed_no_mutation` claims across the EventKit,
+  adapter, Native, Core, and public Receipt boundaries. Non-empty post-state or
+  affirmative write evidence now preserves an unknown/pending outcome, and
+  generic adapter failures no longer clear a durable fence without explicit
+  pre-dispatch proof.
+
+### Local validation
+
+- On macOS 26.5.2 (25F84), Reminders 7.0 (3976), restored four exact deleted
+  Reminders with all four images, created a four-image rollup, and observed the
+  final state in the native app.
+- Exercised `copy_image` end to end through the public MCP, observed one image
+  on the destination in the native app, then deleted the disposable test
+  Reminder and verified local absence.
+- Re-ran the complete source-MCP live smoke after runtime isolation and typed
+  transport changes. All create/replay/read/change/section/image/delete steps
+  and exact synthetic-list cleanup passed. A separate synthetic Reminder was
+  observed in the native Reminders list through Computer Use, then deleted via
+  a fresh public Reference; local absence and UI disappearance both matched.
+
 ## 0.3.1 — 2026-08-27
 
 ### Fixed

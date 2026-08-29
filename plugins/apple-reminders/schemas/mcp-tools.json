@@ -129,36 +129,186 @@
         },
         "oneOf": [
           {
+            "type": "object",
+            "required": [
+              "list_ids"
+            ],
             "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
               "status": {
-                "const": "incomplete"
+                "const": "incomplete",
+                "default": "incomplete"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
               }
             },
-            "anyOf": [
-              {
-                "required": [
-                  "list_ids"
-                ]
-              },
-              {
-                "required": [
-                  "due_start",
-                  "due_end"
-                ]
-              }
-            ]
+            "additionalProperties": false
           },
           {
+            "type": "object",
+            "required": [
+              "due_start",
+              "due_end"
+            ],
+            "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
+              "status": {
+                "const": "incomplete",
+                "default": "incomplete"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "due_start": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "due_end": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
             "required": [
               "status",
               "completion_start",
               "completion_end"
             ],
             "properties": {
+              "list_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              },
               "status": {
                 "const": "completed"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "completion_start": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "completion_end": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "modified_after": {
+                "type": "string",
+                "format": "date-time",
+                "minLength": 20,
+                "maxLength": 64
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              },
+              "sort": {
+                "enum": [
+                  "due",
+                  "modified",
+                  "title"
+                ],
+                "default": "due"
+              },
+              "cursor": {
+                "$ref": "#/$defs/cursor"
               }
-            }
+            },
+            "additionalProperties": false
           }
         ],
         "x-rangeConstraints": [
@@ -245,7 +395,8 @@
           "priority": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9
+            "maximum": 9,
+            "description": "Apple/EventKit priority: 0 means none; 1-4 high; 5 medium; 6-9 low. Prefer 1, 5, or 9 for human high, medium, or low."
           },
           "due": {
             "$ref": "#/$defs/due"
@@ -986,7 +1137,8 @@
               "priority": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 9
+                "maximum": 9,
+                "description": "Apple/EventKit priority: 0 means none; 1-4 high; 5 medium; 6-9 low. Prefer 1, 5, or 9 for human high, medium, or low."
               },
               "due": {
                 "oneOf": [
@@ -1065,6 +1217,157 @@
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "inspect_recently_deleted",
+      "title": "Inspect recently deleted reminders",
+      "description": "List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "list",
+              "item"
+            ]
+          },
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 20
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "attachment_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          }
+        },
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "list"
+              },
+              "account_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 20
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "reminder_id"
+            ],
+            "properties": {
+              "kind": {
+                "const": "item"
+              },
+              "reminder_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "attachment_limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "recover_deleted_reminder",
+      "title": "Recover deleted reminder",
+      "description": "Recover one exact Recently Deleted Reminder into an exact writable Reminder List using a fresh opaque del1 Reference. Recovery preserves the Reminder identity and verifies its attachment set before reporting success.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "$ref": "#/$defs/deleted_reference"
+          },
+          "list_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]{8,256}$"
+          }
+        },
+        "required": [
+          "reference",
+          "list_id",
+          "idempotency_key"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "deleted_reference": {
+            "type": "string",
+            "minLength": 37,
+            "maxLength": 4096,
+            "pattern": "^del1\\.[A-Za-z0-9_-]{32,4091}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
       }
@@ -1407,7 +1710,7 @@
     {
       "name": "change_reminder_attachment",
       "title": "Change reminder attachment",
-      "description": "Attach, replace, or delete one exact image or URL attachment through a closed action. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
+      "description": "Attach, copy, replace, or delete one exact image or URL attachment through a closed action. copy_image uses fresh exact source and destination References and never exposes the source file path. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1435,6 +1738,32 @@
                 "required": [
                   "kind",
                   "image_path",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "copy_image"
+                  },
+                  "source_reference": {
+                    "$ref": "#/$defs/reference"
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "idempotency_key": {
+                    "$ref": "#/$defs/idempotency_key"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source_reference",
+                  "attachment_id",
                   "idempotency_key"
                 ],
                 "additionalProperties": false
