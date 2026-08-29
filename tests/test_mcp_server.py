@@ -482,7 +482,10 @@ class McpPackagingTests(unittest.TestCase):
         for tool in tools:
             with self.subTest(tool=tool["name"]):
                 self.assertNotIn("outputSchema", tool)
-                self.assertIs(tool["annotations"]["openWorldHint"], False)
+                self.assertIs(
+                    tool["annotations"]["openWorldHint"],
+                    tool["name"] in MUTATION_TOOLS,
+                )
                 assert_bounded(tool["inputSchema"], f"$.{tool['name']}")
 
     def test_tool_discovery_does_not_eagerly_import_facade_backends(self) -> None:
@@ -1058,7 +1061,7 @@ class McpProtocolTests(unittest.TestCase):
                     name, copy.deepcopy(VALID_ARGUMENTS[name])
                 )
                 payload = result["structuredContent"]
-                self.assertFalse(result["isError"])
+                self.assertTrue(result["isError"])
                 self.assertEqual(
                     payload["status"], "committed_verification_pending"
                 )
@@ -1093,7 +1096,7 @@ class McpProtocolTests(unittest.TestCase):
         )
 
         payload = result["structuredContent"]
-        self.assertFalse(result["isError"])
+        self.assertTrue(result["isError"])
         self.assertEqual(payload["status"], "committed_verification_pending")
         self.assertEqual(
             payload["error"]["reason_code"], "public_result_contract_failed"
@@ -1174,7 +1177,7 @@ class McpProtocolTests(unittest.TestCase):
         result = self.runtime.call_tool("create_reminder", arguments)
 
         payload = result["structuredContent"]
-        self.assertFalse(result["isError"])
+        self.assertTrue(result["isError"])
         self.assertEqual(payload["status"], "committed_verification_pending")
         self.assertIsNone(payload["verification"]["write_performed"])
         self.assertEqual(
@@ -1407,6 +1410,38 @@ class McpProtocolTests(unittest.TestCase):
                     },
                 )
                 self.assertNotIn("private failure detail", json.dumps(summary))
+
+    def test_mutation_attention_receipts_are_mcp_tool_errors(self) -> None:
+        cases = {
+            "verified": False,
+            "unchanged": False,
+            "committed_verification_pending": True,
+            "partial_success": True,
+            "failed_no_mutation": True,
+            "failed_manual_repair_required": True,
+        }
+        successful_receipts = {
+            "verified",
+            "unchanged",
+            "committed_verification_pending",
+            "partial_success",
+        }
+        for status, expected in cases.items():
+            with self.subTest(status=status):
+                self.assertIs(
+                    self.server._mcp_tool_call_is_error(
+                        "change_reminder",
+                        {"ok": status in successful_receipts, "status": status},
+                    ),
+                    expected,
+                )
+
+        self.assertFalse(
+            self.server._mcp_tool_call_is_error(
+                "diagnose_reminders",
+                {"ok": True, "status": "verified"},
+            )
+        )
 
     def test_stale_page_summary_recommends_restarting_the_same_read_without_cursor(self) -> None:
         for operation in ("fetch_reminders", "inspect_recently_deleted"):

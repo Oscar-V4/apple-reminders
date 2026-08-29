@@ -2,8 +2,8 @@
 
 The bundled OpenAI Messages plugin is a product-discipline reference for this
 community Apple Reminders plugin, not a code or endorsement claim. The local
-comparison inspected Messages 1.0.1000816 and its live MCP discovery contract
-on 2026-08-28 without reading message content.
+comparison inspected Messages 1.0.1000901 and its live MCP discovery contract
+on 2026-08-29 without reading message content.
 
 ## Useful Messages patterns
 
@@ -34,6 +34,8 @@ The six discovered tools are `find_chats`, `read_messages`, `search_messages`,
 | Dedicated exact image access | Closed `copy_image` moves exact bytes internally without exporting them |
 | Approval-aware send | Broad/destructive skills show the bounded target set unless standing delegation covers it |
 | Explicit structured relationships | Central v2 result/Receipt validation plus compact content-free MCP summaries |
+| Open-world mutation signaling | Every Reminders mutation advertises open-world effects because Apple sync and shared lists can carry writes beyond the local process |
+| Unverified-send error signaling | Pending, partial, and failed Reminders mutations set MCP `isError` while retaining their exact Receipt and read-before-retry action |
 
 The comparison directly motivated snapshot-stale pagination behavior and the
 choice to close the consolidation workflow with an internal exact copy rather
