@@ -30,13 +30,13 @@ everywhere:
 | `<ZIP_URL>` | `https://github.com/Oscar-V4/apple-reminders/releases/download/v0.4.0/apple-reminders-0.4.0.zip` |
 | `<ZIP_SHA256>` | `a0f53ae4053053abe75541e68ae35b01f904ff4a013b99b14e686b95fa1355da` |
 | `<CI_URL>` | `https://github.com/Oscar-V4/apple-reminders/actions/runs/33257175249` |
-| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
-| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
-| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
+| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
+| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
+| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
 | `<DEMO_URL>` | Public 60–90 second demo |
-| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/main/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
+| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/6bcc6c5fde7f3e06e8c308fd0368dc1bcb33fd84/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
 | `<ISSUES_URL>` | `https://github.com/Oscar-V4/apple-reminders/issues/new/choose` |
-| `<MODEL_BUILD_NOTES>` | Codex desktop; a separately orchestrated WebGPT Agent Pro audit found a bug in public PR #19. Describe it as cross-agent AI review, not independent human review. Do not add a model-specific claim without a linkable record. |
+| `<MODEL_BUILD_NOTES>` | Maintainer attestation: Codex desktop plus a separately orchestrated WebGPT Agent Pro audit. Public PR #19 proves the finding/fix, not agent identity. Describe it as cross-agent AI review, not independent human review; do not add a model-specific claim without a linkable record. |
 
 ## Launch gates
 
@@ -67,7 +67,7 @@ everywhere:
 - [ ] Record and review `<DEMO_URL>` using only synthetic content. Crop or hide
   the Reminders sidebar, notifications, account names, menu-bar data, file
   paths, and any other personal information.
-- [x] Use one consistent public author name across GitHub, plugin metadata,
+- [ ] Use one consistent public author name across GitHub, plugin metadata,
   social profiles, and the Showcase draft. Confirm rights to the logo, cover,
   video, music, and screenshots.
 - [ ] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
@@ -86,7 +86,7 @@ the official route.
 
 ### After release and announcement
 
-- [ ] Re-run the exact tagged install from the public repository, not a branch,
+- [x] Re-run the exact tagged install from the public repository, not a branch,
   and compare the installed version and artifact checksum with the release.
 - [ ] Triage first-user reports promptly; turn confirmed failures into minimal
   reproductions, regression tests, fixes, and changelog entries.
@@ -252,7 +252,8 @@ mean acceptance or endorsement.
 
   Start a new Codex task, ask for a bounded Reminders read, and approve the
   explicit macOS Reminders permission request if needed. Requirements and
-  troubleshooting are in the [tagged README](../../README.md).
+  troubleshooting are in the [tagged
+  README](https://github.com/Oscar-V4/apple-reminders/blob/v0.4.0/README.md).
 
 Before submitting, re-open the official [community
 page](https://developers.openai.com/community) and [Showcase
@@ -384,9 +385,11 @@ Plugins Directory listing.
 
 ### Public assets
 
-- [ ] Repository social preview and `<COVER_IMAGE_URL>` use the released name,
-  legible community/local-MCP wording, the caption links the Codex result
-  boundary, and all artwork is rights-owned.
+- [x] `<COVER_IMAGE_URL>` uses the released name, legible
+  independent/local-MCP wording, no endorsement mark, and rights-owned source
+  artwork.
+- [ ] Set the repository social preview to `<COVER_IMAGE_URL>` and verify the
+  public Open Graph card no longer uses GitHub's default avatar/stats image.
 - [ ] `<DEMO_URL>` is captioned, readable without audio, 60–90 seconds, and
   contains no personal reminders, accounts, notifications, paths, or secrets.
 - [ ] One static screenshot shows the exact pinned install commands; one shows
@@ -414,8 +417,9 @@ Plugins Directory listing.
   [architecture](../architecture.md), [release
   contract](../regression-contract.md), [changelog](../../CHANGELOG.md), and
   user-facing policies are reachable from the release.
-- [x] Any “built/audited with Codex” claim links to a public build history or
-  cross-agent AI audit artifact and does not imply independent human review.
+- [x] Any “built/audited with Codex” claim distinguishes maintainer attestation
+  about agent identity from the public finding/fix artifact and does not imply
+  independent human review.
   Any external-user claim links to a public issue, contribution, or
   permissioned testimonial.
 

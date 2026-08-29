@@ -1,0 +1,130 @@
+{
+  "all_steps_passed": true,
+  "captured_at": "2026-08-29T14:48:32.380730+00:00",
+  "exact_cleanup_passed": true,
+  "private_content_included": false,
+  "raw_output": "v0.4.0-live-smoke.txt",
+  "schema_version": 1,
+  "scope": "reserved_synthetic_list_only",
+  "source_checkout": "isolated_exact_tag_marketplace",
+  "step_count": 23,
+  "steps": [
+    {
+      "latency_ms": 57.017,
+      "status": "passed",
+      "step": "server_start"
+    },
+    {
+      "latency_ms": 357.936,
+      "status": "passed",
+      "step": "ensure_list"
+    },
+    {
+      "latency_ms": 7.142,
+      "status": "passed",
+      "step": "ensure_list_replay"
+    },
+    {
+      "latency_ms": 2463.403,
+      "status": "passed",
+      "step": "create_section"
+    },
+    {
+      "latency_ms": 949.308,
+      "status": "passed",
+      "step": "create_reminder"
+    },
+    {
+      "latency_ms": 196.621,
+      "status": "passed",
+      "step": "create_reminder_replay"
+    },
+    {
+      "latency_ms": 225.402,
+      "status": "passed",
+      "step": "bounded_fetch"
+    },
+    {
+      "latency_ms": 181.74,
+      "status": "passed",
+      "step": "exact_read_primary"
+    },
+    {
+      "latency_ms": 181.464,
+      "status": "passed",
+      "step": "exact_read_parallel"
+    },
+    {
+      "latency_ms": 489.488,
+      "status": "passed",
+      "step": "patch_reminder"
+    },
+    {
+      "latency_ms": 185.742,
+      "status": "passed",
+      "step": "stale_reference"
+    },
+    {
+      "latency_ms": 454.165,
+      "status": "passed",
+      "step": "complete_reminder"
+    },
+    {
+      "latency_ms": 519.292,
+      "status": "passed",
+      "step": "reopen_reminder"
+    },
+    {
+      "latency_ms": 3489.633,
+      "status": "passed",
+      "step": "move_to_section"
+    },
+    {
+      "latency_ms": 3115.36,
+      "status": "passed",
+      "step": "attach_image"
+    },
+    {
+      "latency_ms": 734.546,
+      "status": "passed",
+      "step": "inspect_native"
+    },
+    {
+      "latency_ms": 3920.202,
+      "status": "passed",
+      "step": "replace_image"
+    },
+    {
+      "latency_ms": 784.124,
+      "status": "passed",
+      "step": "inspect_replaced_image"
+    },
+    {
+      "latency_ms": 1447.532,
+      "status": "passed",
+      "step": "delete_image"
+    },
+    {
+      "latency_ms": 769.775,
+      "status": "passed",
+      "step": "inspect_deleted_image"
+    },
+    {
+      "latency_ms": 430.205,
+      "status": "passed",
+      "step": "delete_reminder"
+    },
+    {
+      "latency_ms": 185.626,
+      "status": "passed",
+      "step": "post_delete_read"
+    },
+    {
+      "latency_ms": 2838.737,
+      "status": "passed",
+      "step": "cleanup"
+    }
+  ],
+  "tag": "v0.4.0",
+  "tag_commit": "f8eb9e25e6eec486cbf99650bc74ec57f1d5de65"
+}

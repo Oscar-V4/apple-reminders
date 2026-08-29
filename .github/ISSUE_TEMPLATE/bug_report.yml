@@ -32,7 +32,7 @@ body:
     attributes:
       label: Plugin version or commit
       description: Use the installed version, tag, or exact commit SHA.
-      placeholder: "0.3.1 or abc1234"
+      placeholder: "0.4.0 or abc1234"
     validations:
       required: true
 
@@ -41,6 +41,31 @@ body:
     attributes:
       label: macOS version
       placeholder: "14.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mac-hardware
+    attributes:
+      label: Mac hardware
+      options:
+        - Apple silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: permission-state
+    attributes:
+      label: Reminders permission state before the failure
+      description: Do not reset permissions just to answer this question.
+      options:
+        - First use; macOS had not asked yet
+        - Granted
+        - Denied
+        - Changed in System Settings
+        - Not sure
     validations:
       required: true
 

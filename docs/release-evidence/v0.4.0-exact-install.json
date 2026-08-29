@@ -1,0 +1,26 @@
+{
+  "archive_sha256": "a0f53ae4053053abe75541e68ae35b01f904ff4a013b99b14e686b95fa1355da",
+  "captured_at": "2026-08-29T14:47:36.908863+00:00",
+  "codex_home_state": "empty_temporary",
+  "first_core_read": {
+    "bounded_item_count": 1,
+    "limit": 1,
+    "status": "verified",
+    "tool": "list_reminder_lists"
+  },
+  "launcher_path_mode": "finder_like_minimal",
+  "packaging_diagnosis": {
+    "overall": "ready",
+    "status": "verified"
+  },
+  "private_content_printed": false,
+  "public_tool_count": 15,
+  "public_tool_names_unique": true,
+  "schema_version": 1,
+  "selected_python": "/opt/homebrew/bin/python3",
+  "selected_python_version": "3.14.6",
+  "server_name": "apple-reminders-local",
+  "server_version": "0.4.0",
+  "tag": "v0.4.0",
+  "tag_commit": "f8eb9e25e6eec486cbf99650bc74ec57f1d5de65"
+}

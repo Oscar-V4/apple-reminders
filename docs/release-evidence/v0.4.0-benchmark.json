@@ -1,0 +1,140 @@
+{
+  "captured_at": "2026-08-29T14:27:53.466399+00:00",
+  "git": {
+    "branch": "main",
+    "commit": "f8eb9e25e6eec486cbf99650bc74ec57f1d5de65",
+    "dirty": false
+  },
+  "label": "v0.4.0-release",
+  "measurement_semantics": {
+    "cross_machine_comparable": false,
+    "doctor_home_state": "isolated_empty_temporary_home",
+    "host_load_controlled": false,
+    "process_startup_included": true,
+    "timing": "end_to_end_subprocess_wall_clock"
+  },
+  "measurements": {
+    "deterministic_package_build": {
+      "mad_ms": 3.242,
+      "max_ms": 412.854,
+      "mean_ms": 403.632,
+      "median_ms": 409.612,
+      "min_ms": 379.912,
+      "p95_ms": 412.854,
+      "samples": 5,
+      "stdev_ms": 13.559
+    },
+    "eventkit_helper_build_cached": {
+      "mad_ms": 1.881,
+      "max_ms": 79.218,
+      "mean_ms": 75.61,
+      "median_ms": 76.024,
+      "min_ms": 71.05,
+      "p95_ms": 79.218,
+      "samples": 5,
+      "stdev_ms": 3.168
+    },
+    "eventkit_helper_build_fresh": {
+      "mad_ms": 12.516,
+      "max_ms": 390.543,
+      "mean_ms": 373.412,
+      "median_ms": 375.635,
+      "min_ms": 357.067,
+      "p95_ms": 390.543,
+      "samples": 5,
+      "stdev_ms": 13.459
+    },
+    "eventkit_validate_create": {
+      "mad_ms": 1.661,
+      "max_ms": 65.138,
+      "mean_ms": 62.796,
+      "median_ms": 62.785,
+      "min_ms": 59.56,
+      "p95_ms": 65.138,
+      "samples": 15,
+      "stdev_ms": 1.784
+    },
+    "mcp_doctor_route": {
+      "mad_ms": 3.846,
+      "max_ms": 503.499,
+      "mean_ms": 483.074,
+      "median_ms": 485.13,
+      "min_ms": 450.265,
+      "p95_ms": 503.499,
+      "samples": 15,
+      "stdev_ms": 13.714
+    },
+    "mcp_initialize_tools_list": {
+      "mad_ms": 2.351,
+      "max_ms": 102.101,
+      "mean_ms": 93.035,
+      "median_ms": 93.812,
+      "min_ms": 86.373,
+      "p95_ms": 102.101,
+      "samples": 15,
+      "stdev_ms": 4.285
+    },
+    "source_package_audit": {
+      "mad_ms": 1.794,
+      "max_ms": 228.078,
+      "mean_ms": 223.654,
+      "median_ms": 225.205,
+      "min_ms": 212.875,
+      "p95_ms": 228.078,
+      "samples": 15,
+      "stdev_ms": 4.448
+    }
+  },
+  "package": {
+    "allowlisted_files": 55,
+    "allowlisted_source_bytes": 1247414,
+    "archive_bytes": 1256730
+  },
+  "performance_gates": {
+    "cases": {
+      "eventkit_helper_build_cached": {
+        "actual_ms": 79.218,
+        "budget_ms": 350.0,
+        "status": "passed"
+      },
+      "eventkit_helper_build_fresh": {
+        "actual_ms": 390.543,
+        "budget_ms": 2500.0,
+        "status": "passed"
+      },
+      "mcp_doctor_route": {
+        "actual_ms": 503.499,
+        "budget_ms": 1500.0,
+        "status": "passed"
+      },
+      "mcp_initialize_tools_list": {
+        "actual_ms": 102.101,
+        "budget_ms": 300.0,
+        "status": "passed"
+      }
+    },
+    "complete": true,
+    "metric": "p95_ms",
+    "passed": true
+  },
+  "platform": {
+    "machine": "arm64",
+    "python": "3.14.6",
+    "release": "25.5.0",
+    "system": "Darwin"
+  },
+  "safety": {
+    "doctor_isolated_home": true,
+    "doctor_via_mcp_route": true,
+    "eventkit_api_called": false,
+    "eventkit_helper_compiled": true,
+    "eventkit_live_invocation": false,
+    "eventkit_loaded": false,
+    "eventkit_validation_only": true,
+    "isolated_home": true,
+    "native_helper_executed": false,
+    "reminder_rows_read": false,
+    "tcc_requested": false
+  },
+  "schema_version": 1
+}

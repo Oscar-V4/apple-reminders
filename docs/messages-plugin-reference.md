@@ -71,8 +71,9 @@ centralized runtime validator and boundary fixtures to every structured result.
 - Continue sacrificial recovery/copy checks after macOS or Reminders upgrades,
   because one tested private-framework build is not a compatibility guarantee.
 
-The first separate-agent AI audit of PR #14 found release-blocking gaps in recovery
-outcome classification, URL fresh-retry truthfulness, and private recovery
-error text. The branch now carries targeted fixes and regressions for those
-findings, plus branch-complete callable schemas; a no-blocker conclusion is
-reserved for fresh CI and follow-up audit of the updated head.
+The first maintainer-orchestrated audit pass on PR #14 found release-blocking
+gaps in recovery outcome classification, URL fresh-retry truthfulness, and
+private recovery error text. The branch now carries targeted fixes and
+regressions for those findings, plus branch-complete callable schemas; a
+no-blocker conclusion is reserved for fresh CI and follow-up audit of the
+updated head.
