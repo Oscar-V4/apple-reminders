@@ -50,8 +50,9 @@ legacy complete results without changing the store version:
 - every other callback failure retains the fence fail-closed;
 - final Receipt persistence failure returns the successful live result with a
   warning and leaves replay outcome unknown;
-- legacy state-less v1 records, 30-day retention, 500-entry capacity, current
-  key protection, and operation aliases do not change;
+- legacy state-less v1 records, 500-entry capacity, current-key protection, and
+  operation aliases do not change; retention expires only redispatch-safe
+  records, never unresolved fences;
 - complete modern and legacy results are re-sanitized while the existing lock
   is held, then atomically rewritten with every fence metadata field intact;
 - a failed existing-key scrub returns only the sanitized in-memory replay plus
@@ -66,10 +67,13 @@ legacy complete results without changing the store version:
   malformed, or unknown version fails before dispatch without rewriting bytes;
 - a malformed complete `result` is removed during the locked privacy scrub
   while its fence metadata remains intact and replay stays outcome-unknown;
-- capacity maintenance treats complete records without a replayable Receipt
-  and every unknown explicit state as unresolved, non-evictable fences. A
-  replayable legacy or modern Receipt must have a recognized status and the
-  matching boolean `ok`; an arbitrary non-empty object is not completion proof.
+- capacity maintenance treats complete records without a replayable Receipt,
+  every unknown explicit state, and replayable Receipts that still require
+  verification, partial-result handling, or manual repair as unresolved,
+  non-evictable fences. A replayable legacy or modern Receipt must have a
+  recognized status and the matching boolean `ok`; an arbitrary non-empty
+  object is not completion proof. Here, complete means the Receipt is durable;
+  it does not imply that redispatch is safe.
 
 ## Non-goals
 

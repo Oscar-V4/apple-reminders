@@ -82,6 +82,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
+- Made keyed recovery and image-mutation failures durable before returning, so
+  the first result and its same-key replay keep the same conservative safety
+  classification. Only the existing typed proof of no dispatch may clear a
+  write-ahead fence; unclassified callback failures now require inspection and
+  cannot be capacity-evicted into a later redispatch.
+- Treated a missing native `mutation_attempted` failure marker as an unknown
+  outcome for recovery and image removal; only an explicit `false` can prove
+  that the helper did not save.
 - Made top-level discriminated MCP schemas branch-complete so Codex discovery
   exposes all bounded `fetch_reminders` and exact Recently Deleted arguments,
   instead of reducing branches to only a status or kind discriminator.
@@ -121,7 +129,8 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   a crash or final-Receipt persistence failure blocks redispatch and returns
   verification-pending on replay. The current key survives wall-clock jumps,
   and unresolved fences cannot be evicted merely to make capacity for a new
-  write. A callback failure that affirmatively occurred before mutation clears
+  write or age into a second dispatch; retention expires only redispatch-safe
+  results. A callback failure that affirmatively occurred before mutation clears
   its fence for a safe retry; possible-commit failures retain it. Core create
   now carries contract-validated EventKit no-write results through that same
   cleanup path instead of leaving a permanent unresolved fence.

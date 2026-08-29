@@ -22,6 +22,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,7 @@ def command_failure_receipt(
     *,
     code: str,
     status: str,
+    operation: str | None = None,
     **details: Any,
 ) -> dict[str, Any]:
     target = {
@@ -172,7 +174,7 @@ def command_failure_receipt(
     mutation_not_performed = status == "failed_no_mutation"
     return operation_receipt(
         status=status,
-        operation=args.command,
+        operation=operation or args.command,
         backend="adapter_boundary",
         target=target,
         after={},
@@ -186,6 +188,168 @@ def command_failure_receipt(
             else "manual_inspection_required"
         },
         error={"code": code, "message": message, **details},
+    )
+
+
+_EXCEPTION_RESULT_STATUSES = FAILURE_RECEIPT_STATUSES | frozenset(
+    {"committed_verification_pending", "partial_success"}
+)
+_IDEMPOTENT_ADAPTER_RECEIPT_OPERATIONS = {
+    "recover_deleted_reminder": "recover_deleted_reminder",
+    "attach_image": "attach_image",
+    "copy_image_attachment": "copy_image",
+    "replace_attachment": "replace_attachment",
+}
+
+
+def _json_safe_error_details(details: dict[str, Any]) -> dict[str, Any]:
+    """Keep the failure boundary serializable even for malformed internals."""
+
+    try:
+        encoded = json.dumps(
+            details,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=lambda value: f"<{type(value).__name__}>",
+        )
+        decoded = json.loads(encoded)
+        if not isinstance(decoded, dict):
+            raise TypeError("error details must remain an object")
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        decoded = {
+            "detail_redacted": True,
+            "detail_error_type": type(exc).__name__,
+        }
+    for reserved in ("code", "message", "operation", "status"):
+        if reserved in decoded:
+            decoded[f"detail_{reserved}"] = decoded.pop(reserved)
+    return decoded
+
+
+def _command_exception_receipt(
+    args: argparse.Namespace,
+    exc: Exception,
+    *,
+    operation: str | None = None,
+    default_adapter_status: str,
+    honor_adapter_status: bool = True,
+) -> dict[str, Any]:
+    if isinstance(exc, AdapterError):
+        details = dict(exc.details)
+        explicit_status = details.pop("result_status", None)
+        explicit_status_recognized = (
+            isinstance(explicit_status, str)
+            and explicit_status in _EXCEPTION_RESULT_STATUSES
+        )
+        if not honor_adapter_status:
+            status = default_adapter_status
+            if explicit_status is not None:
+                details["reported_result_status"] = explicit_status
+                details.setdefault(
+                    "reason_code",
+                    (
+                        "untyped_adapter_result_status_ignored"
+                        if explicit_status_recognized
+                        else "invalid_adapter_result_status"
+                    ),
+                )
+        elif explicit_status_recognized:
+            status = explicit_status
+        elif explicit_status is not None:
+            status = "failed_manual_repair_required"
+            details.setdefault("reason_code", "invalid_adapter_result_status")
+            details["reported_result_status"] = explicit_status
+        elif details.get("partial_failure"):
+            status = (
+                "failed_no_mutation"
+                if details.get("compensated")
+                and not details.get("compensation_error")
+                else "failed_manual_repair_required"
+            )
+        else:
+            status = default_adapter_status
+        return command_failure_receipt(
+            args,
+            str(exc),
+            code=exc.code,
+            status=status,
+            operation=operation,
+            **_json_safe_error_details(details),
+        )
+    return command_failure_receipt(
+        args,
+        f"{type(exc).__name__}: {exc}",
+        code="unexpected_error",
+        status="failed_manual_repair_required",
+        operation=operation,
+    )
+
+
+def command_exception_receipt(
+    args: argparse.Namespace,
+    exc: Exception,
+    *,
+    operation: str | None = None,
+) -> dict[str, Any]:
+    """Normalize one outer-boundary exception using the legacy CLI policy."""
+
+    return _command_exception_receipt(
+        args,
+        exc,
+        operation=operation,
+        default_adapter_status="failed_no_mutation",
+    )
+
+
+def execute_idempotent_adapter_command(
+    *,
+    args: argparse.Namespace,
+    operation: str,
+    key: str | None,
+    input_payload: dict[str, Any],
+    callback: Callable[[], dict[str, Any]],
+    storage_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Persist a complete adapter Receipt before a keyed callback can escape."""
+
+    receipt_operation = _IDEMPOTENT_ADAPTER_RECEIPT_OPERATIONS.get(operation)
+    command = getattr(args, "command", None)
+    if receipt_operation is None or (
+        isinstance(command, str) and command != operation
+    ):
+        raise ValueError("Unsupported or mismatched idempotent adapter command")
+    if not key:
+        return callback()
+
+    def receipt_returning_callback() -> dict[str, Any]:
+        try:
+            return callback()
+        except MutationNotStartedError:
+            # This typed proof remains the sole authority to clear a new fence.
+            raise
+        except AdapterError as exc:
+            return _command_exception_receipt(
+                args,
+                exc,
+                operation=receipt_operation,
+                default_adapter_status="failed_manual_repair_required",
+                honor_adapter_status=False,
+            )
+        except Exception as exc:
+            return _command_exception_receipt(
+                args,
+                exc,
+                operation=receipt_operation,
+                default_adapter_status="failed_manual_repair_required",
+                honor_adapter_status=False,
+            )
+
+    return execute_idempotent(
+        operation=operation,
+        key=key,
+        input_payload=input_payload,
+        callback=receipt_returning_callback,
+        storage_dir=storage_dir,
     )
 
 
@@ -1738,7 +1902,9 @@ def invoke_reminderkit_recovery(
         # A clean helper failure always emits its pre/post-dispatch marker.  No
         # output means the helper died before it could report, so conservatively
         # preserve a possible write instead of inventing failed_no_mutation.
-        mutation_attempted = payload.get("mutation_attempted") is True or not raw
+        # Only an explicit false marker is proof that the helper never saved.
+        # Missing or malformed provenance remains a possible write.
+        mutation_attempted = payload.get("mutation_attempted") is not False
         reason = str(payload.get("error") or "reminderkit_recovery_failed")
         detail = payload.get("detail") or proc.stderr.strip()
         message = f"{reason}: {detail}" if detail else reason
@@ -2135,7 +2301,9 @@ def remove_image_reminderkit_record(
             mutation_outcome_unknown=True,
         )
     if proc.returncode != 0 or payload.get("ok") is not True:
-        mutation_attempted = payload.get("mutation_attempted") is True
+        # A helper failure may be emitted after save by a fallback path. Only
+        # an explicit false marker proves that removal never started.
+        mutation_attempted = payload.get("mutation_attempted") is not False
         detail = payload.get("detail") or proc.stderr.strip()
         message = payload.get("error") or "ReminderKit image removal failed"
         if detail:
@@ -2168,15 +2336,15 @@ def remove_image_reminderkit_record(
             mutation_outcome_unknown=True,
         )
 
-    if REMINDERKIT_REMOVAL_SETTLE_SECONDS > 0:
-        time.sleep(REMINDERKIT_REMOVAL_SETTLE_SECONDS)
     row_deleted = False
     exact_row_identity = False
     detached_from_reminder = False
     cloud_state_tombstone_retained: bool | None = None
     cloud_state_verified = cloud_state_pk is None
-    deadline = time.monotonic() + REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS
     try:
+        if REMINDERKIT_REMOVAL_SETTLE_SECONDS > 0:
+            time.sleep(REMINDERKIT_REMOVAL_SETTLE_SECONDS)
+        deadline = time.monotonic() + REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS
         while True:
             fresh = connect_read_only(db_path)
             try:
@@ -2898,7 +3066,8 @@ def recover_deleted_reminder_once(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_recover_deleted_reminder(args: argparse.Namespace) -> int:
-    result = execute_idempotent(
+    result = execute_idempotent_adapter_command(
+        args=args,
         operation="recover_deleted_reminder",
         key=args.idempotency_key,
         input_payload={
@@ -4377,7 +4546,8 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
     image_hash = getattr(args, "_validated_image_sha256", None)
     if not isinstance(image_hash, str):
         image_hash = hashlib.sha256(image.read_bytes()).hexdigest() if image.exists() else "missing"
-    result = execute_idempotent(
+    result = execute_idempotent_adapter_command(
+        args=args,
         operation="attach_image",
         key=args.idempotency_key,
         input_payload={
@@ -4391,7 +4561,7 @@ def cmd_attach_image(args: argparse.Namespace) -> int:
         callback=lambda: attach_image_once(args),
     )
     json_out(result)
-    return 0
+    return 0 if result.get("status") in SUCCESS_RECEIPT_STATUSES else 1
 
 
 def copy_image_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
@@ -4682,7 +4852,8 @@ def copy_image_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_copy_image_attachment(args: argparse.Namespace) -> int:
-    result = execute_idempotent(
+    result = execute_idempotent_adapter_command(
+        args=args,
         operation="copy_image_attachment",
         key=args.idempotency_key,
         input_payload={
@@ -5271,6 +5442,11 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
                     con.close()
                     con = None
                 compensated = compensate_new_attachment(db, reminder, new_result)
+                if compensated is None:
+                    raise AdapterError(
+                        "Compensating attachment cleanup could not be verified",
+                        code="sync_pending",
+                    )
                 con = connect(db)
             except Exception as cleanup_exc:
                 return operation_receipt(
@@ -5356,7 +5532,8 @@ def cmd_replace_attachment(args: argparse.Namespace) -> int:
     key = getattr(args, "idempotency_key", None)
     if not isinstance(key, str):
         key = None
-    result = execute_idempotent(
+    result = execute_idempotent_adapter_command(
+        args=args,
         operation="replace_attachment",
         key=key,
         input_payload={
@@ -5553,6 +5730,9 @@ def main(argv: list[str] | None = None) -> int:
             args._validated_image_sha256 = validated_image.sha256
         return args.func(args)
     except AdapterError as exc:
+        if getattr(args, "command", None) in MUTATION_COMMANDS:
+            json_out(command_exception_receipt(args, exc))
+            return 1
         details = dict(exc.details)
         explicit_status = details.pop("result_status", None)
         if explicit_status is None and details.get("partial_failure"):
@@ -5562,17 +5742,6 @@ def main(argv: list[str] | None = None) -> int:
                 else "failed_manual_repair_required"
             )
         status = explicit_status or "failed_no_mutation"
-        if getattr(args, "command", None) in MUTATION_COMMANDS:
-            json_out(
-                command_failure_receipt(
-                    args,
-                    str(exc),
-                    code=exc.code,
-                    status=status,
-                    **details,
-                )
-            )
-            return 1
         return fail(
             str(exc),
             code=exc.code,
@@ -5581,14 +5750,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:
         if getattr(args, "command", None) in MUTATION_COMMANDS:
-            json_out(
-                command_failure_receipt(
-                    args,
-                    f"{type(exc).__name__}: {exc}",
-                    code="unexpected_error",
-                    status="failed_manual_repair_required",
-                )
-            )
+            json_out(command_exception_receipt(args, exc))
             return 1
         return fail(f"{type(exc).__name__}: {exc}", code="unexpected_error")
 

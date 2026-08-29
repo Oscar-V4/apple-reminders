@@ -162,8 +162,9 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `in_progress` fence before dispatch. An unreadable store or failed fence
     prevents dispatch; an incomplete fence on replay blocks the callback and
     returns outcome-unknown. The current key is protected from wall-clock
-    pruning, and unresolved fences are never capacity-evicted to admit a new
-    mutation; a full unresolved store fails closed before dispatch. An adapter
+    pruning. Unresolved fences are neither age-pruned nor capacity-evicted to
+    admit a new mutation; a full unresolved store fails closed before
+    dispatch. An adapter
     typed `MutationNotStartedError` that the existing receipt boundary proves
     happened before mutation atomically clears its fence; arbitrary error
     detail flags cannot do so, while partial or outcome-unknown
@@ -173,6 +174,19 @@ even though optional MCP `outputSchema` descriptors are omitted from
     request-size rejection are parent-proven; a generic process `OSError`,
     timeout, oversized output, malformed output, or child-supplied provenance
     cannot authorize fence removal.
+    `recover_deleted_reminder`, `attach_image`, `copy_image_attachment`, and
+    `replace_attachment` construct any untyped or unexpected callback failure
+    Receipt inside the idempotent callback, before completion is persisted.
+    Untyped failures are conservatively manual-repair-required; only
+    `MutationNotStartedError` may escape to clear the fence. A same-key,
+    same-input replay preserves the completed Receipt's operation, status,
+    operation ID, mutation evidence, and recovery semantics; only replay and
+    privacy-scrub metadata may differ. Complete Receipts that still require
+    verification, partial-result handling, or manual repair remain unresolved
+    for capacity policy and are never evicted to admit another mutation.
+    `copy_image_attachment` remains the CLI and v1 durable-operation namespace,
+    while its adapter Receipt operation is `copy_image` and its public action is
+    `change_reminder_attachment.copy_image`.
 28. Each stdio connection owns a fresh `McpRuntime`. Initialization, rate-limit
     history, injected backend paths, and lazy Core/Native/Recovery/Diagnostics
     Facades cannot leak between runtime instances. Tool discovery remains lazy,

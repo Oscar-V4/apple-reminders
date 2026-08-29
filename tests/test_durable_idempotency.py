@@ -1205,6 +1205,147 @@ class DurableIdempotencyContractTests(unittest.TestCase):
                 )
                 self.assertIn(old_hash, read_store(storage_dir)["entries"])
 
+    def test_capacity_never_evicts_complete_receipts_that_forbid_retry(
+        self,
+    ) -> None:
+        now = 1_000.0
+        statuses = (
+            "committed_verification_pending",
+            "partial_success",
+            "failed_manual_repair_required",
+        )
+        for status in statuses:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                receipt = build_operation_receipt(
+                    status=status,
+                    operation="attach_image",
+                    operation_id=FIXED_RECEIPT_OPERATION_ID,
+                    backend="synthetic",
+                    target={"id": "R-1"},
+                    verification={
+                        "state": "pending",
+                        "write_performed": None,
+                        "final_read": False,
+                    },
+                    recovery={
+                        "semantics": "read_before_retry",
+                        "automatic_retry_safe": False,
+                    },
+                )
+                entries = {
+                    f"{index:064x}": {
+                        "operation": "attach_image",
+                        "input_hash": f"{index + 1:064x}",
+                        "created_at_epoch": now,
+                        "state": "complete",
+                        "operation_id": (
+                            f"00000000-0000-4000-8000-{index:012d}"
+                        ),
+                        "result": receipt,
+                    }
+                    for index in range(MAX_ENTRIES)
+                }
+                seed_store(storage_dir, {"version": 1, "entries": entries})
+                callback = mock.Mock(return_value=verified_receipt())
+
+                with (
+                    mock.patch.object(
+                        durable_idempotency._time,
+                        "time",
+                        return_value=now,
+                    ),
+                    self.assertRaises(MutationNotStartedError) as raised,
+                ):
+                    durable_idempotency.execute_idempotent(
+                        operation="attach_image",
+                        key=f"new-{status}",
+                        input_payload={"id": "R-NEW"},
+                        callback=callback,
+                        storage_dir=storage_dir,
+                    )
+
+                callback.assert_not_called()
+                self.assertEqual(
+                    raised.exception.details["reason_code"],
+                    "idempotency_capacity_exhausted",
+                )
+                self.assertEqual(
+                    len(read_store(storage_dir)["entries"]),
+                    MAX_ENTRIES,
+                )
+
+    def test_age_pruning_never_turns_unresolved_receipts_into_redispatch(self) -> None:
+        operation = "eventkit_create_reminder"
+        old_key = "old-unresolved-request"
+        old_input = {"title": "Potentially committed"}
+        old_key_hash = stable_hash({"operation": operation, "key": old_key})
+        old_time = 100.0
+        future = old_time + (RETENTION_DAYS + 1) * 86400
+
+        for status in (
+            "committed_verification_pending",
+            "partial_success",
+            "failed_manual_repair_required",
+        ):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_dir:
+                storage_dir = Path(temp_dir) / "support"
+                receipt = build_operation_receipt(
+                    status=status,
+                    operation="create_reminder",
+                    operation_id=FIXED_RECEIPT_OPERATION_ID,
+                    backend="synthetic",
+                    target={"id": "R-OLD"},
+                    verification={
+                        "state": "pending",
+                        "write_performed": None,
+                        "final_read": False,
+                    },
+                    recovery={
+                        "semantics": "read_before_retry",
+                        "automatic_retry_safe": False,
+                    },
+                )
+                seed_store(
+                    storage_dir,
+                    {
+                        "version": 1,
+                        "entries": {
+                            old_key_hash: {
+                                "operation": operation,
+                                "input_hash": stable_hash(old_input),
+                                "created_at_epoch": old_time,
+                                "state": "complete",
+                                "operation_id": FIXED_RECEIPT_OPERATION_ID,
+                                "result": receipt,
+                            }
+                        },
+                    },
+                )
+                old_callback = mock.Mock(return_value=verified_receipt())
+                with mock.patch.object(
+                    durable_idempotency._time, "time", return_value=future
+                ):
+                    durable_idempotency.execute_idempotent(
+                        operation=operation,
+                        key="new-request",
+                        input_payload={"title": "New"},
+                        callback=verified_receipt,
+                        storage_dir=storage_dir,
+                    )
+                    replay = durable_idempotency.execute_idempotent(
+                        operation=operation,
+                        key=old_key,
+                        input_payload=old_input,
+                        callback=old_callback,
+                        storage_dir=storage_dir,
+                    )
+
+                old_callback.assert_not_called()
+                self.assertEqual(replay["status"], status)
+                self.assertEqual(replay["operation_id"], FIXED_RECEIPT_OPERATION_ID)
+                self.assertIn(old_key_hash, read_store(storage_dir)["entries"])
+
     def test_corrupt_existing_store_fails_closed_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_dir = Path(temp_dir) / "support"
