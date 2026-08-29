@@ -82,6 +82,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
+- Made keyed recovery and image-mutation failures durable before returning, so
+  the first result and its same-key replay keep the same conservative safety
+  classification. Only the existing typed proof of no dispatch may clear a
+  write-ahead fence; unclassified callback failures now require inspection and
+  cannot be capacity-evicted into a later redispatch.
+- Treated a missing native `mutation_attempted` failure marker as an unknown
+  outcome for recovery and image removal; only an explicit `false` can prove
+  that the helper did not save.
 - Made top-level discriminated MCP schemas branch-complete so Codex discovery
   exposes all bounded `fetch_reminders` and exact Recently Deleted arguments,
   instead of reducing branches to only a status or kind discriminator.

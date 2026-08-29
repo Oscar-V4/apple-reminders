@@ -45,6 +45,13 @@ _STORE_NAME = "idempotency.json"
 _LOCK_NAME = "idempotency.lock"
 _RETENTION_DAYS = 30
 _MAX_ENTRIES = 500
+_NON_EVICTABLE_RESULT_STATUSES = frozenset(
+    {
+        "committed_verification_pending",
+        "partial_success",
+        "failed_manual_repair_required",
+    }
+)
 
 
 def _new_operation_id() -> str:
@@ -201,11 +208,15 @@ def _record_unresolved(value: Any) -> bool:
     if state == "in_progress":
         return True
     if state == "complete":
-        return not has_replayable_result
+        return not has_replayable_result or stored_result.get("status") in (
+            _NON_EVICTABLE_RESULT_STATUSES
+        )
     if "state" not in value:
         # Legacy state-less v1 records are complete only when their final
         # Receipt is actually replayable.
-        return not has_replayable_result
+        return not has_replayable_result or stored_result.get("status") in (
+            _NON_EVICTABLE_RESULT_STATUSES
+        )
     # An unknown explicit state is an unresolved fence even if it happens to
     # carry a result object whose future semantics this runtime cannot know.
     return True
