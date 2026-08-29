@@ -2,7 +2,7 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## 0.4.0 — 2026-08-28
+## 0.4.0 — 2026-08-29
 
 ### Added
 
