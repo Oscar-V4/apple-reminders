@@ -30,11 +30,11 @@ everywhere:
 | `<ZIP_URL>` | `https://github.com/Oscar-V4/apple-reminders/releases/download/v0.4.0/apple-reminders-0.4.0.zip` |
 | `<ZIP_SHA256>` | `a0f53ae4053053abe75541e68ae35b01f904ff4a013b99b14e686b95fa1355da` |
 | `<CI_URL>` | `https://github.com/Oscar-V4/apple-reminders/actions/runs/33257175249` |
-| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
-| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
-| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/9ce32c2263a1c98524ec46d98fdeb49f7af6af3e/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
+| `<CLEAN_INSTALL_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#exact-tag-clean-install` |
+| `<LIVE_SMOKE_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#live-apple-reminders-smoke` |
+| `<BENCHMARK_EVIDENCE_URL>` | `https://github.com/Oscar-V4/apple-reminders/blob/ac5bae536a8c9864abcc226a9742723076624c2f/docs/release-evidence/v0.4.0.md#data-free-release-benchmark` |
 | `<DEMO_URL>` | Public 60–90 second demo |
-| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/6bcc6c5fde7f3e06e8c308fd0368dc1bcb33fd84/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
+| `<COVER_IMAGE_URL>` | `https://raw.githubusercontent.com/Oscar-V4/apple-reminders/ac5bae536a8c9864abcc226a9742723076624c2f/docs/launch/assets/apple-reminders-v0.4.0-cover.png` |
 | `<ISSUES_URL>` | `https://github.com/Oscar-V4/apple-reminders/issues/new/choose` |
 | `<MODEL_BUILD_NOTES>` | Maintainer attestation: Codex desktop plus a separately orchestrated WebGPT Agent Pro audit. Public PR #19 proves the finding/fix, not agent identity. Describe it as cross-agent AI review, not independent human review; do not add a model-specific claim without a linkable record. |
 
@@ -70,9 +70,10 @@ everywhere:
 - [ ] Use one consistent public author name across GitHub, plugin metadata,
   social profiles, and the Showcase draft. Confirm rights to the logo, cover,
   video, music, and screenshots.
-- [ ] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
+- [x] Test `<ISSUES_URL>` while logged out and prepare issue labels or a short
   report template for install, permission, Core, Native Extension, and privacy
-  reports.
+  reports. The public path resolves correctly and redirects signed-out reporters
+  to GitHub login with a return to the chooser.
 - [x] Read the final announcement aloud once. Remove “official,” “approved,”
   “certified,” “partner,” “production-ready,” or any unverified adoption or
   performance claim.
