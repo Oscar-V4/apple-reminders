@@ -283,7 +283,9 @@ def _validate_file(root: Path, relative: Path, errors: list[str]) -> None:
         return
     private_path = PRIVATE_HOME_RE.search(text)
     if private_path:
-        errors.append(f"absolute user-home path found in {relative}: {private_path.group(0)!r}")
+        # Never echo the matched value: this error is routinely written to CI
+        # logs, where repeating a private path would create a second exposure.
+        errors.append(f"absolute user-home path found in {relative}")
     if path.suffix == ".py":
         try:
             compile(text, str(relative), "exec")

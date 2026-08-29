@@ -27,6 +27,18 @@ jobs:
       PLUGIN_ROOT: plugins/apple-reminders
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Guard new commit identity privacy
+        env:
+          AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          AUDIT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 scripts/audit_commit_identity.py
+          --base "$AUDIT_BASE_SHA"
+          --head "$AUDIT_HEAD_SHA"
+          --protected-name "Oscar-V4"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
