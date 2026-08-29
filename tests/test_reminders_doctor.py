@@ -268,6 +268,63 @@ class ContentFreeSchemaTests(unittest.TestCase):
 
 
 class StaticDependencyTests(unittest.TestCase):
+    def test_static_command_uses_explicit_diagnostic_output_budgets(self) -> None:
+        completed = subprocess.CompletedProcess(["clang"], 0, "", "")
+        with mock.patch.object(
+            reminders_doctor,
+            "run_bounded_process",
+            return_value=completed,
+        ) as run:
+            result = reminders_doctor.run_static_command(["clang"], timeout=3.0)
+
+        self.assertIs(result, completed)
+        self.assertEqual(
+            run.call_args.kwargs,
+            {
+                "timeout_s": 3.0,
+                "stdout_limit": reminders_doctor.DOCTOR_STDOUT_LIMIT_BYTES,
+                "stderr_limit": reminders_doctor.DOCTOR_STDERR_LIMIT_BYTES,
+                "output": "utf8",
+            },
+        )
+
+    def test_static_process_failures_keep_stable_doctor_codes(self) -> None:
+        failures = (
+            (
+                reminders_doctor.ProcessLaunchError(
+                    argv=("clang",),
+                    cause=FileNotFoundError("synthetic launch failure"),
+                ),
+                "clang_invocation_failed",
+            ),
+            (
+                reminders_doctor.ProcessError(
+                    "synthetic post-launch failure",
+                    argv=("clang",),
+                    pid=123,
+                    returncode=-15,
+                    stdout=b"",
+                    stderr=b"",
+                ),
+                "helper_syntax_check_failed",
+            ),
+        )
+        for failure, code in failures:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                fixture = DoctorFixture(Path(temporary))
+
+                def failing_runner(*_: object, **__: object) -> object:
+                    raise failure
+
+                result = reminders_doctor.inspect_helper_toolchain(
+                    fixture.paths,
+                    which=fake_which,
+                    runner=failing_runner,
+                )
+
+            self.assertEqual(result["status"], "warning")
+            self.assertEqual(result["code"], code)
+
     def test_helper_buildability_uses_syntax_only_and_writes_no_executable(self) -> None:
         commands: list[list[str]] = []
 

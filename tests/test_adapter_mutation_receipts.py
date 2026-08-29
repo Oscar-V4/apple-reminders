@@ -885,6 +885,63 @@ class MutationReceiptTests(unittest.TestCase):
         self.assertEqual(receipt["verification"]["icloud_sync"], "verified")
         self.assertTrue(receipt["verification"]["cloud"]["icloud_sync_verified"])
 
+    def test_second_section_repair_launch_failure_preserves_first_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Path(temp_dir) / "reminders.sqlite"
+            seed_catalog_fixture(db)
+            connection = sqlite3.connect(db)
+            try:
+                connection.execute(
+                    "update ZREMCKCLOUDSTATE set ZLATESTVERSIONSYNCEDTOCLOUD=0 where Z_PK=221"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            calls: list[tuple[str, str, str]] = []
+
+            def native_repair(
+                operation: str,
+                section_id: str,
+                name: str,
+            ) -> dict[str, object]:
+                calls.append((operation, section_id, name))
+                if len(calls) == 1:
+                    return {"ok": True, "saved": True, "section_id": section_id}
+                raise adapter.MutationNotStartedError(
+                    "synthetic second launch failure",
+                    code="unexpected_error",
+                    reason_code="native_section_launch_failed",
+                )
+
+            args = argparse.Namespace(
+                db=None,
+                list=None,
+                list_id=LIST_BETA_ID,
+                name="Section B",
+            )
+            with (
+                mock.patch.object(adapter, "resolve_database", return_value=db),
+                mock.patch.object(
+                    adapter,
+                    "invoke_reminderkit_section",
+                    side_effect=native_repair,
+                ),
+                self.assertRaises(adapter.AdapterError) as raised,
+            ):
+                adapter.cmd_create_section(args)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:2], ("repair", SECTION_B_ID))
+        self.assertEqual(calls[1], ("repair", SECTION_B_ID, "Section B"))
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["partial_failure"])
+        self.assertFalse(raised.exception.details["mutation_outcome_unknown"])
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "section_name_restore_not_started",
+        )
+
     def test_native_section_move_writes_membership_through_reminderkit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Path(temp_dir) / "reminders.sqlite"

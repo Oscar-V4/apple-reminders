@@ -292,6 +292,12 @@ reuse protocol logic;
 subprocess provenance, request validation, helper compilation, and native
 execution remain at their existing seams.
 
+`scripts/bounded_process.py` drains every local helper's streams under byte
+limits, applies one deadline and strict UTF-8, terminates leftover process-group
+descendants, and reaps the direct leader. Domain callers retain JSON and Receipt
+meaning: only a typed pre-launch failure proves no dispatch; every post-launch
+mutation failure remains conservative.
+
 ## Local validation
 
 These checks do not launch Reminders or read live reminder rows:

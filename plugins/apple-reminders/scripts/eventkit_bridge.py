@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -37,6 +36,14 @@ from eventkit_protocol import (  # noqa: E402
     validate_mutation_receipt,
     validate_response,
 )
+from bounded_process import (  # noqa: E402
+    ProcessDecodeError,
+    ProcessError,
+    ProcessLaunchError,
+    ProcessOutputLimitError,
+    ProcessTimeoutError,
+    run as run_bounded_process,
+)
 
 
 SOURCE_PATH = SCRIPT_DIR / "reminders_eventkit.m"
@@ -47,6 +54,12 @@ MAX_REQUEST_BYTES = 1_000_000
 MAX_NOTES_CHARS = 100_000
 NATIVE_TIMEOUT_SECONDS = 70
 HELPER_BUNDLE_IDENTIFIER = "com.codex.apple-reminders.eventkit-bridge"
+MAX_NATIVE_STDOUT_BYTES = 2_000_000
+MAX_NATIVE_STDERR_BYTES = 256 * 1024
+MAX_COMPILER_IDENTITY_STDOUT_BYTES = 64 * 1024
+MAX_COMPILER_IDENTITY_STDERR_BYTES = 64 * 1024
+MAX_BUILD_STDOUT_BYTES = 256 * 1024
+MAX_BUILD_STDERR_BYTES = 1024 * 1024
 
 OPERATIONS = {
     "schema",
@@ -876,16 +889,24 @@ def normalize_request(raw: Any) -> dict[str, Any]:
 
 def _compiler_identity() -> bytes:
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             ["xcrun", "clang", "--version"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=10,
+            timeout_s=10,
+            stdout_limit=MAX_COMPILER_IDENTITY_STDOUT_BYTES,
+            stderr_limit=MAX_COMPILER_IDENTITY_STDERR_BYTES,
+            output="bytes",
         )
-        return result.stdout
-    except (OSError, subprocess.SubprocessError) as exc:
+    except ProcessError as exc:
         raise RuntimeError(f"Unable to locate the Xcode command-line compiler: {exc}") from exc
+    if result.returncode != 0:
+        diagnostics = bytes(result.stderr or result.stdout).decode(
+            "utf-8", errors="replace"
+        ).strip()
+        raise RuntimeError(
+            "Unable to locate the Xcode command-line compiler: "
+            f"compiler exited {result.returncode}: {diagnostics}"
+        )
+    return bytes(result.stdout) + bytes(result.stderr)
 
 
 def helper_digest() -> str:
@@ -948,15 +969,14 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
         str(temporary_binary),
     ]
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             command,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=120,
+            timeout_s=120,
+            stdout_limit=MAX_BUILD_STDOUT_BYTES,
+            stderr_limit=MAX_BUILD_STDERR_BYTES,
+            output="utf8",
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except ProcessError as exc:
         temporary_binary.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to run the EventKit bridge compiler: {exc}") from exc
     if result.returncode != 0:
@@ -964,7 +984,7 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
         diagnostics = (result.stderr or result.stdout).strip()
         raise RuntimeError(f"EventKit bridge compilation failed: {diagnostics}")
     try:
-        signing = subprocess.run(
+        signing = run_bounded_process(
             [
                 "codesign",
                 "--force",
@@ -974,13 +994,12 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
                 HELPER_BUNDLE_IDENTIFIER,
                 str(temporary_binary),
             ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
+            timeout_s=30,
+            stdout_limit=MAX_BUILD_STDOUT_BYTES,
+            stderr_limit=MAX_BUILD_STDERR_BYTES,
+            output="utf8",
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except ProcessError as exc:
         temporary_binary.unlink(missing_ok=True)
         raise RuntimeError(f"Unable to ad-hoc sign the EventKit bridge: {exc}") from exc
     if signing.returncode != 0:
@@ -990,6 +1009,34 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
     temporary_binary.chmod(0o700)
     os.replace(temporary_binary, binary)
     return binary
+
+
+def _invalid_native_response(
+    request: dict[str, Any],
+    *,
+    message: str,
+    returncode: int | None,
+    stderr: str,
+) -> dict[str, Any]:
+    details = {"exit_code": returncode, "stderr": stderr[-4000:]}
+    if request["operation"] in MUTATION_OPERATIONS:
+        return mutation_outcome_unknown_response(
+            request,
+            reason_code="invalid_native_response",
+            message=message,
+            details=details,
+        )
+    return response(
+        request["operation"],
+        "failed_no_mutation",
+        error={
+            "code": "unexpected_error",
+            "reason_code": "invalid_native_response",
+            "message": message,
+            "retryable": False,
+            "details": details,
+        },
+    )
 
 
 def invoke_native(
@@ -1027,15 +1074,15 @@ def invoke_native(
             },
         )
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             [str(binary)],
             input=encoded,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
+            timeout_s=timeout,
+            stdout_limit=MAX_NATIVE_STDOUT_BYTES,
+            stderr_limit=MAX_NATIVE_STDERR_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessTimeoutError:
         if request["operation"] in MUTATION_OPERATIONS:
             return mutation_outcome_unknown_response(
                 request,
@@ -1054,50 +1101,44 @@ def invoke_native(
                 "details": {},
             },
         )
-    except OSError as exc:
-        if request["operation"] in MUTATION_OPERATIONS:
-            return mutation_outcome_unknown_response(
-                request,
-                reason_code="native_launch_failed",
-                message=(
-                    "The EventKit helper process failed without a trustworthy "
-                    "mutation outcome."
-                ),
-                details={"error_type": type(exc).__name__},
-            )
+    except ProcessLaunchError:
         return response(
             request["operation"],
             "failed_no_mutation",
             error={
                 "code": "unexpected_error",
                 "reason_code": "native_launch_failed",
-                "message": str(exc),
+                "message": "The EventKit helper process could not start.",
                 "retryable": False,
                 "details": {},
             },
         )
+    except (ProcessOutputLimitError, ProcessDecodeError) as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace").strip()
+        return _invalid_native_response(
+            request,
+            message=str(exc),
+            returncode=exc.returncode,
+            stderr=stderr,
+        )
+    except ProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace").strip()
+        return _invalid_native_response(
+            request,
+            message="The EventKit helper failed after launch without a valid response.",
+            returncode=exc.returncode,
+            stderr=stderr,
+        )
     try:
-        decoded = json.loads(result.stdout.decode("utf-8"))
+        decoded = json.loads(result.stdout)
         return validate_response(decoded, request["operation"])
-    except (UnicodeDecodeError, json.JSONDecodeError, RuntimeError) as exc:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        if request["operation"] in MUTATION_OPERATIONS:
-            return mutation_outcome_unknown_response(
-                request,
-                reason_code="invalid_native_response",
-                message=str(exc),
-                details={"exit_code": result.returncode, "stderr": stderr[-4000:]},
-            )
-        return response(
-            request["operation"],
-            "failed_no_mutation",
-            error={
-                "code": "unexpected_error",
-                "reason_code": "invalid_native_response",
-                "message": str(exc),
-                "retryable": False,
-                "details": {"exit_code": result.returncode, "stderr": stderr[-4000:]},
-            },
+    except (json.JSONDecodeError, RuntimeError) as exc:
+        stderr = str(result.stderr).strip()
+        return _invalid_native_response(
+            request,
+            message=str(exc),
+            returncode=result.returncode,
+            stderr=stderr,
         )
 
 

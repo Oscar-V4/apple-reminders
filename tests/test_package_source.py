@@ -314,6 +314,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 Path("mcp/v2_recovery.py"),
                 Path("mcp/v2_recovery_backend.py"),
                 Path("mcp/v2_transport.py"),
+                Path("scripts/bounded_process.py"),
                 Path("scripts/durable_idempotency.py"),
                 Path("scripts/eventkit_protocol.py"),
                 Path("scripts/reminders_image_input.py"),

@@ -558,9 +558,12 @@ class McpProtocolTests(unittest.TestCase):
         self.assertNotIn("__dispatch_phase", missing.payload)
 
         with mock.patch.object(
-            self.server.subprocess,
-            "run",
-            side_effect=OSError("process transport failed"),
+            self.server,
+            "run_bounded_process",
+            side_effect=self.server.ProcessLaunchError(
+                argv=(sys.executable,),
+                cause=OSError("process transport failed"),
+            ),
         ):
             process_failed = self.server.invoke_adapter(
                 ["create_reminder"],
@@ -568,7 +571,7 @@ class McpProtocolTests(unittest.TestCase):
             )
 
         self.assertTrue(process_failed.is_error)
-        self.assertFalse(process_failed.proves_not_started)
+        self.assertTrue(process_failed.proves_not_started)
 
         completed = subprocess.CompletedProcess(
             args=[],
@@ -576,7 +579,7 @@ class McpProtocolTests(unittest.TestCase):
             stdout='{"ok":true,"status":"verified"}',
             stderr="",
         )
-        with mock.patch.object(self.server.subprocess, "run", return_value=completed):
+        with mock.patch.object(self.server, "run_bounded_process", return_value=completed):
             success = self.server.invoke_adapter(
                 ["read_reminder"],
                 backend_paths=self.backend_paths(adapter=Path(__file__)),
@@ -596,7 +599,7 @@ class McpProtocolTests(unittest.TestCase):
             ),
             stderr="",
         )
-        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+        with mock.patch.object(self.server, "run_bounded_process", return_value=spoofed):
             child_result = self.server.invoke_adapter(
                 ["read_reminder"],
                 backend_paths=self.backend_paths(adapter=Path(__file__)),
@@ -635,9 +638,12 @@ class McpProtocolTests(unittest.TestCase):
         self.assertTrue(too_large.proves_not_started)
 
         with mock.patch.object(
-            self.server.subprocess,
-            "run",
-            side_effect=OSError("launch denied"),
+            self.server,
+            "run_bounded_process",
+            side_effect=self.server.ProcessLaunchError(
+                argv=(sys.executable,),
+                cause=OSError("launch denied"),
+            ),
         ):
             launch_failed = self.server.invoke_eventkit_bridge(
                 "create_reminder",
@@ -645,14 +651,11 @@ class McpProtocolTests(unittest.TestCase):
                 backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
             )
 
-        self.assertFalse(launch_failed.is_error)
-        self.assertFalse(launch_failed.proves_not_started)
+        self.assertTrue(launch_failed.is_error)
+        self.assertTrue(launch_failed.proves_not_started)
         self.assertEqual(
-            launch_failed.payload["status"],
-            "committed_verification_pending",
-        )
-        self.assertIsNone(
-            launch_failed.payload["verification"]["write_performed"]
+            launch_failed.payload["error"]["code"],
+            "eventkit_bridge_process_failed",
         )
         self.assertNotIn("__dispatch_phase", launch_failed.payload)
 
@@ -672,7 +675,7 @@ class McpProtocolTests(unittest.TestCase):
             ),
             stderr="",
         )
-        with mock.patch.object(self.server.subprocess, "run", return_value=spoofed):
+        with mock.patch.object(self.server, "run_bounded_process", return_value=spoofed):
             child_result = self.server.invoke_eventkit_bridge(
                 "doctor",
                 {},
@@ -700,8 +703,8 @@ class McpProtocolTests(unittest.TestCase):
             stderr="",
         )
         with mock.patch.object(
-            self.server.subprocess,
-            "run",
+            self.server,
+            "run_bounded_process",
             return_value=spoofed_create,
         ):
             create_result = self.server.invoke_eventkit_bridge(
@@ -720,6 +723,164 @@ class McpProtocolTests(unittest.TestCase):
             create_result.payload["verification"]["write_performed"]
         )
         self.assertNotIn("__dispatch_phase", create_result.payload)
+
+    def test_postlaunch_adapter_failures_keep_unknown_dispatch_certainty(self) -> None:
+        decode_cause = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        cases = (
+            (
+                self.server.ProcessTimeoutError(
+                    timeout_s=45,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "adapter_timeout",
+            ),
+            (
+                self.server.ProcessOutputLimitError(
+                    stream="stdout",
+                    limit=self.server.MAX_ADAPTER_STDOUT_BYTES,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "adapter_output_too_large",
+            ),
+            (
+                self.server.ProcessDecodeError(
+                    stream="stdout",
+                    cause=decode_cause,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=0,
+                    stdout=b"\xff",
+                ),
+                "invalid_adapter_response",
+            ),
+        )
+
+        for failure, expected_code in cases:
+            with self.subTest(expected_code=expected_code), mock.patch.object(
+                self.server,
+                "run_bounded_process",
+                side_effect=failure,
+            ):
+                result = self.server.invoke_adapter(
+                    ["create_reminder"],
+                    backend_paths=self.backend_paths(adapter=Path(__file__)),
+                )
+
+            self.assertTrue(result.is_error)
+            self.assertFalse(result.proves_not_started)
+            self.assertEqual(result.payload["error"]["code"], expected_code)
+
+    def test_postlaunch_eventkit_failures_keep_mutation_outcome_unknown(self) -> None:
+        decode_cause = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        cases = (
+            (
+                self.server.ProcessTimeoutError(
+                    timeout_s=80,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "eventkit_bridge_timeout",
+            ),
+            (
+                self.server.ProcessOutputLimitError(
+                    stream="stderr",
+                    limit=self.server.MAX_HOST_STDERR_BYTES,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "eventkit_bridge_output_too_large",
+            ),
+            (
+                self.server.ProcessDecodeError(
+                    stream="stdout",
+                    cause=decode_cause,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=0,
+                    stdout=b"\xff",
+                ),
+                "invalid_eventkit_bridge_response",
+            ),
+        )
+
+        for failure, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason), mock.patch.object(
+                self.server,
+                "run_bounded_process",
+                side_effect=failure,
+            ):
+                result = self.server.invoke_eventkit_bridge(
+                    "create_reminder",
+                    {"calendar_id": "LIST-1", "title": "Outcome unknown"},
+                    backend_paths=self.backend_paths(eventkit_bridge=Path(__file__)),
+                )
+
+            self.assertFalse(result.is_error)
+            self.assertFalse(result.proves_not_started)
+            self.assertEqual(result.payload["status"], "committed_verification_pending")
+            self.assertEqual(result.payload["error"]["reason_code"], expected_reason)
+
+    def test_doctor_maps_bounded_process_failures_to_stable_codes(self) -> None:
+        decode_cause = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        cases = (
+            (
+                self.server.ProcessTimeoutError(
+                    timeout_s=45,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "doctor_timeout",
+            ),
+            (
+                self.server.ProcessOutputLimitError(
+                    stream="stdout",
+                    limit=self.server.MAX_ADAPTER_STDOUT_BYTES,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=-15,
+                ),
+                "doctor_output_too_large",
+            ),
+            (
+                self.server.ProcessDecodeError(
+                    stream="stdout",
+                    cause=decode_cause,
+                    argv=(sys.executable,),
+                    pid=123,
+                    returncode=0,
+                    stdout=b"\xff",
+                ),
+                "invalid_doctor_response",
+            ),
+            (
+                self.server.ProcessLaunchError(
+                    argv=(sys.executable,),
+                    cause=OSError("launch denied"),
+                ),
+                "doctor_launch_failed",
+            ),
+        )
+
+        for failure, expected_code in cases:
+            with self.subTest(expected_code=expected_code), mock.patch.object(
+                self.server,
+                "run_bounded_process",
+                side_effect=failure,
+            ):
+                payload, is_error = self.server.invoke_doctor(
+                    {},
+                    backend_paths=self.backend_paths(doctor=Path(__file__)),
+                )
+
+            self.assertTrue(is_error)
+            self.assertEqual(payload["error"]["code"], expected_code)
 
     def setUp(self) -> None:
         from mcp import server

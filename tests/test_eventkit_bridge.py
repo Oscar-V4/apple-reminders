@@ -800,9 +800,14 @@ class EventKitContractTests(unittest.TestCase):
         with (
             mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
             mock.patch.object(
-                eventkit_bridge.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired(["/helper"], 45),
+                eventkit_bridge,
+                "run_bounded_process",
+                side_effect=eventkit_bridge.ProcessTimeoutError(
+                    timeout_s=45,
+                    argv=("/helper",),
+                    pid=123,
+                    returncode=-15,
+                ),
             ),
         ):
             payload = eventkit_bridge.invoke_native(request)
@@ -815,7 +820,66 @@ class EventKitContractTests(unittest.TestCase):
         self.assertEqual(payload["error"]["reason_code"], "native_timeout")
         self.assertIs(eventkit_bridge.validate_response(payload, "delete_reminder"), payload)
 
-    def test_native_oserror_after_process_dispatch_is_verification_pending(self) -> None:
+    def test_native_output_limit_after_mutation_dispatch_is_verification_pending(
+        self,
+    ) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "update_reminder",
+            "reminder_id": "OPAQUE-REMINDER-ID",
+            "expected_last_modified": "2026-08-08T00:00:00.000Z",
+            "patch": {"title": "Changed"},
+        }
+        failure = eventkit_bridge.ProcessOutputLimitError(
+            stream="stdout",
+            limit=eventkit_bridge.MAX_NATIVE_STDOUT_BYTES,
+            argv=("/helper",),
+            pid=123,
+            returncode=-15,
+        )
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(
+                eventkit_bridge,
+                "run_bounded_process",
+                side_effect=failure,
+            ),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "committed_verification_pending")
+        self.assertEqual(payload["error"]["reason_code"], "invalid_native_response")
+        self.assertIsNone(payload["verification"]["write_performed"])
+
+    def test_native_utf8_decode_failure_for_read_is_no_mutation_failure(self) -> None:
+        request = {
+            "schema_version": 1,
+            "operation": "read_reminder",
+            "reminder_id": "OPAQUE-REMINDER-ID",
+        }
+        failure = eventkit_bridge.ProcessDecodeError(
+            stream="stdout",
+            cause=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+            argv=("/helper",),
+            pid=123,
+            returncode=0,
+            stdout=b"\xff",
+        )
+        with (
+            mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
+            mock.patch.object(
+                eventkit_bridge,
+                "run_bounded_process",
+                side_effect=failure,
+            ),
+        ):
+            payload = eventkit_bridge.invoke_native(request)
+
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["reason_code"], "invalid_native_response")
+
+    def test_native_typed_launch_failure_proves_no_mutation(self) -> None:
         request = {
             "schema_version": 1,
             "operation": "create_reminder",
@@ -825,18 +889,24 @@ class EventKitContractTests(unittest.TestCase):
         with (
             mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
             mock.patch.object(
-                eventkit_bridge.subprocess,
-                "run",
-                side_effect=OSError("process state unavailable"),
+                eventkit_bridge,
+                "run_bounded_process",
+                side_effect=eventkit_bridge.ProcessLaunchError(
+                    argv=("/helper",),
+                    cause=OSError("process state unavailable"),
+                ),
             ),
         ):
             payload = eventkit_bridge.invoke_native(request)
 
-        self.assertEqual(payload["status"], "committed_verification_pending")
-        self.assertTrue(payload["ok"])
-        self.assertIsNone(payload["verification"]["write_performed"])
-        self.assertEqual(payload["error"]["code"], "sync_pending")
+        self.assertEqual(payload["status"], "failed_no_mutation")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "unexpected_error")
         self.assertEqual(payload["error"]["reason_code"], "native_launch_failed")
+        self.assertEqual(
+            payload["error"]["message"],
+            "The EventKit helper process could not start.",
+        )
         self.assertIs(eventkit_bridge.validate_response(payload, "create_reminder"), payload)
 
     def test_native_helper_build_failure_is_no_mutation_failure(self) -> None:
@@ -868,7 +938,7 @@ class EventKitContractTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(["/helper"], 0, b"not-json", b"")
         with (
             mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
-            mock.patch.object(eventkit_bridge.subprocess, "run", return_value=completed),
+            mock.patch.object(eventkit_bridge, "run_bounded_process", return_value=completed),
         ):
             payload = eventkit_bridge.invoke_native(request)
 
@@ -885,9 +955,14 @@ class EventKitContractTests(unittest.TestCase):
         with (
             mock.patch.object(eventkit_bridge, "build_helper", return_value=Path("/helper")),
             mock.patch.object(
-                eventkit_bridge.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired(["/helper"], 45),
+                eventkit_bridge,
+                "run_bounded_process",
+                side_effect=eventkit_bridge.ProcessTimeoutError(
+                    timeout_s=45,
+                    argv=("/helper",),
+                    pid=123,
+                    returncode=-15,
+                ),
             ),
         ):
             payload = eventkit_bridge.invoke_native(request)

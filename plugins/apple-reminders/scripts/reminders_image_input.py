@@ -6,10 +6,22 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from bounded_process import (  # noqa: E402
+    ProcessError,
+    ProcessLaunchError,
+    ProcessTimeoutError,
+    run as run_bounded_process,
+)
 
 
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
@@ -17,6 +29,7 @@ MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_IMAGE_PATH_LENGTH = 4_096
 IMAGE_INSPECTION_TIMEOUT_SECONDS = 10
+IMAGE_INSPECTION_OUTPUT_LIMIT_BYTES = 64 * 1024
 SUPPORTED_IMAGE_FORMATS = frozenset({"jpeg", "png"})
 
 
@@ -44,7 +57,7 @@ def _fail(reason_code: str, message: str) -> ImageInputError:
 
 def _inspect_image(path: Path) -> tuple[str, int, int]:
     try:
-        completed = subprocess.run(
+        completed = run_bounded_process(
             [
                 "sips",
                 "-g",
@@ -55,16 +68,25 @@ def _inspect_image(path: Path) -> tuple[str, int, int]:
                 "pixelHeight",
                 str(path),
             ],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=IMAGE_INSPECTION_TIMEOUT_SECONDS,
+            timeout_s=IMAGE_INSPECTION_TIMEOUT_SECONDS,
+            stdout_limit=IMAGE_INSPECTION_OUTPUT_LIMIT_BYTES,
+            stderr_limit=IMAGE_INSPECTION_OUTPUT_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessTimeoutError as exc:
         raise _fail(
             "image_inspection_timeout",
             f"Image metadata inspection timed out for {path.name}",
+        ) from exc
+    except ProcessLaunchError as exc:
+        raise _fail(
+            "image_decode_failed",
+            f"Image metadata inspection could not start for {path.name}",
+        ) from exc
+    except ProcessError as exc:
+        raise _fail(
+            "image_decode_failed",
+            f"Image metadata inspection returned invalid output for {path.name}",
         ) from exc
     if completed.returncode != 0:
         raise _fail(

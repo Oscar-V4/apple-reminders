@@ -12,7 +12,6 @@ import datetime as dt
 import hashlib
 import json
 import re
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -33,6 +32,14 @@ if str(MCP_DIR) not in sys.path:
 
 from receipt_contract import (  # noqa: E402
     adapter_receipt_error,
+)
+from bounded_process import (  # noqa: E402
+    ProcessDecodeError,
+    ProcessError,
+    ProcessLaunchError,
+    ProcessOutputLimitError,
+    ProcessTimeoutError,
+    run as run_bounded_process,
 )
 from durable_idempotency import execute_idempotent  # noqa: E402
 from eventkit_protocol import (  # noqa: E402
@@ -90,6 +97,7 @@ DEFAULT_BACKEND_PATHS = BackendPaths(
 ADAPTER_TIMEOUT_SECONDS = 45
 EVENTKIT_BRIDGE_TIMEOUT_SECONDS = 80
 MAX_ADAPTER_STDOUT_BYTES = 2_000_000
+MAX_HOST_STDERR_BYTES = 256 * 1024
 MAX_EVENTKIT_REQUEST_BYTES = 1_000_000
 MAX_MCP_MESSAGE_BYTES = 2_000_000
 MAX_CALLS_PER_MINUTE = 120
@@ -552,16 +560,15 @@ def invoke_adapter(
             dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
         )
     try:
-        completed = subprocess.run(
+        completed = run_bounded_process(
             [sys.executable, str(path), *argv],
             cwd=PLUGIN_ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=ADAPTER_TIMEOUT_SECONDS,
-            check=False,
+            timeout_s=ADAPTER_TIMEOUT_SECONDS,
+            stdout_limit=MAX_ADAPTER_STDOUT_BYTES,
+            stderr_limit=MAX_HOST_STDERR_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired:
+    except ProcessTimeoutError:
         return TransportResult(
             payload={
                 "ok": False,
@@ -573,21 +580,7 @@ def invoke_adapter(
             is_error=True,
             dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
-    except OSError as exc:
-        return TransportResult(
-            payload={
-                "ok": False,
-                "error": {
-                    "code": "adapter_process_failed",
-                    "message": f"The Reminders adapter failed before returning ({type(exc).__name__}).",
-                },
-            },
-            is_error=True,
-            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
-        )
-
-    stdout = completed.stdout.strip()
-    if len(stdout.encode("utf-8", errors="replace")) > MAX_ADAPTER_STDOUT_BYTES:
+    except ProcessOutputLimitError:
         return TransportResult(
             payload={
                 "ok": False,
@@ -599,6 +592,47 @@ def invoke_adapter(
             is_error=True,
             dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
         )
+    except ProcessDecodeError:
+        return TransportResult(
+            payload={
+                "ok": False,
+                "error": {
+                    "code": "invalid_adapter_response",
+                    "message": "The Reminders adapter returned an invalid JSON response.",
+                },
+            },
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+        )
+    except ProcessLaunchError as exc:
+        return TransportResult(
+            payload={
+                "ok": False,
+                "error": {
+                    "code": "adapter_process_failed",
+                    "message": f"The Reminders adapter failed before returning ({type(exc).__name__}).",
+                },
+            },
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
+        )
+    except ProcessError as exc:
+        return TransportResult(
+            payload={
+                "ok": False,
+                "error": {
+                    "code": "adapter_process_failed",
+                    "message": (
+                        "The Reminders adapter failed after launch without "
+                        f"returning a result ({type(exc).__name__})."
+                    ),
+                },
+            },
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.MAY_HAVE_STARTED,
+        )
+
+    stdout = completed.stdout.strip()
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
@@ -649,7 +683,7 @@ def invoke_doctor(
             True,
         )
     try:
-        completed = subprocess.run(
+        completed = run_bounded_process(
             [
                 sys.executable,
                 str(path),
@@ -658,13 +692,12 @@ def invoke_doctor(
                 str(arguments.get("detail_level", "summary")),
             ],
             cwd=PLUGIN_ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=ADAPTER_TIMEOUT_SECONDS,
-            check=False,
+            timeout_s=ADAPTER_TIMEOUT_SECONDS,
+            stdout_limit=MAX_ADAPTER_STDOUT_BYTES,
+            stderr_limit=MAX_HOST_STDERR_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired:
+    except ProcessTimeoutError:
         return (
             {
                 "ok": False,
@@ -675,19 +708,7 @@ def invoke_doctor(
             },
             True,
         )
-    except OSError as exc:
-        return (
-            {
-                "ok": False,
-                "error": {
-                    "code": "doctor_launch_failed",
-                    "message": f"The Reminders doctor could not start ({type(exc).__name__}).",
-                },
-            },
-            True,
-        )
-    stdout = completed.stdout.strip()
-    if len(stdout.encode("utf-8", errors="replace")) > MAX_ADAPTER_STDOUT_BYTES:
+    except ProcessOutputLimitError:
         return (
             {
                 "ok": False,
@@ -698,6 +719,40 @@ def invoke_doctor(
             },
             True,
         )
+    except ProcessDecodeError:
+        return (
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_doctor_response",
+                    "message": "The Reminders doctor returned an invalid JSON report.",
+                },
+            },
+            True,
+        )
+    except ProcessLaunchError as exc:
+        return (
+            {
+                "ok": False,
+                "error": {
+                    "code": "doctor_launch_failed",
+                    "message": f"The Reminders doctor could not start ({type(exc).__name__}).",
+                },
+            },
+            True,
+        )
+    except ProcessError:
+        return (
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_doctor_response",
+                    "message": "The Reminders doctor did not return a valid report.",
+                },
+            },
+            True,
+        )
+    stdout = completed.stdout.strip()
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
@@ -791,35 +846,54 @@ def invoke_eventkit_bridge(
             dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
         )
     try:
-        completed = subprocess.run(
+        completed = run_bounded_process(
             [sys.executable, str(path)],
             cwd=PLUGIN_ROOT,
-            input=encoded_request,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=EVENTKIT_BRIDGE_TIMEOUT_SECONDS,
-            check=False,
+            input=encoded_request.encode("utf-8"),
+            timeout_s=EVENTKIT_BRIDGE_TIMEOUT_SECONDS,
+            stdout_limit=MAX_ADAPTER_STDOUT_BYTES,
+            stderr_limit=MAX_HOST_STDERR_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired:
+    except ProcessTimeoutError:
         return transport_failure(
             code="eventkit_bridge_timeout",
             message="The EventKit bridge timed out before returning a result.",
             details={"timeout_seconds": EVENTKIT_BRIDGE_TIMEOUT_SECONDS},
         )
-    except OSError as exc:
-        return transport_failure(
-            code="eventkit_bridge_process_failed",
-            message=f"The EventKit bridge failed before returning ({type(exc).__name__}).",
-        )
-
-    stdout = completed.stdout.strip()
-    if len(stdout.encode("utf-8", errors="replace")) > MAX_ADAPTER_STDOUT_BYTES:
+    except ProcessOutputLimitError as exc:
         return transport_failure(
             code="eventkit_bridge_output_too_large",
             message="The EventKit bridge result exceeded the MCP output bound.",
-            details={"exit_code": completed.returncode},
+            details={"exit_code": exc.returncode},
         )
+    except ProcessDecodeError:
+        return transport_failure(
+            code="invalid_eventkit_bridge_response",
+            message="The EventKit bridge returned an invalid JSON response.",
+        )
+    except ProcessLaunchError as exc:
+        return TransportResult(
+            payload={
+                "ok": False,
+                "error": {
+                    "code": "eventkit_bridge_process_failed",
+                    "message": (
+                        "The EventKit bridge failed before returning "
+                        f"({type(exc).__name__})."
+                    ),
+                },
+            },
+            is_error=True,
+            dispatch_certainty=DispatchCertainty.PROVEN_NOT_STARTED,
+        )
+    except ProcessError:
+        return transport_failure(
+            code="invalid_eventkit_bridge_response",
+            message="The EventKit bridge did not return a valid response.",
+        )
+
+    stdout = completed.stdout.strip()
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
