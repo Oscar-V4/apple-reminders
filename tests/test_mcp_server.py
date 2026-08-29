@@ -280,6 +280,10 @@ def valid_public_result(name: str, arguments: Mapping[str, Any]) -> dict[str, An
                 "prompt_observed": None,
                 "prompted_explicitly": True,
             }
+        elif name == "list_reminder_lists":
+            data = {"items": [], "returned": 0, "truncated": False}
+        elif name == "fetch_reminders":
+            data = {"items": [], "returned": 0, "has_more": False}
         elif name == "read_reminder":
             data = {
                 "reminder": {
@@ -1553,6 +1557,41 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(
             doctor_argv,
             ["--compact", "--detail-level", "summary"],
+        )
+
+    def test_malformed_eventkit_collection_is_returned_as_an_mcp_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            eventkit = Path(temporary) / "mock_eventkit.py"
+            mock_eventkit_bridge(eventkit)
+            source = eventkit.read_text(encoding="utf-8")
+            eventkit.write_text(
+                source.replace('"items": [{', '"items": [None, {', 1),
+                encoding="utf-8",
+            )
+
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_reminder_lists",
+                            "arguments": {"limit": 1},
+                        },
+                    },
+                ],
+                eventkit_bridge_path=eventkit,
+            )
+
+        result = responses[1]["result"]
+        self.assertTrue(result["isError"])
+        structured = result["structuredContent"]
+        self.assertEqual(structured["status"], "failed_no_mutation")
+        self.assertEqual(
+            structured["error"]["reason_code"],
+            "invalid_eventkit_bridge_response",
         )
 
     def test_full_doctor_details_cross_stdio_as_bounded_scalar_facts(self) -> None:

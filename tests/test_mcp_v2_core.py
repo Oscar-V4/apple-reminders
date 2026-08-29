@@ -209,6 +209,58 @@ def facade(eventkit: FakeEventKit) -> V2CoreFacade:
 
 
 class V2CoreFacadeTests(unittest.TestCase):
+    def test_list_and_fetch_reject_non_object_items_beyond_public_limit(self) -> None:
+        cases = (
+            (
+                "list_calendars",
+                "list_reminder_lists",
+                {"id": "LIST-1", "title": "Inbox"},
+                None,
+                "invalid_eventkit_list_item",
+            ),
+            (
+                "fetch_reminders",
+                "fetch_reminders",
+                native_reminder(),
+                42,
+                "invalid_eventkit_fetch_item",
+            ),
+        )
+        for (
+            native_operation,
+            public_operation,
+            valid_item,
+            malformed_item,
+            reason_code,
+        ) in cases:
+            eventkit = FakeEventKit()
+            data: dict[str, Any] = {"items": [valid_item, malformed_item]}
+            if native_operation == "fetch_reminders":
+                data.update(
+                    {
+                        "total_matched": 2,
+                        "has_more": False,
+                        "next_offset": None,
+                    }
+                )
+            eventkit.queue(
+                native_operation,
+                {
+                    "schema_version": 1,
+                    "ok": True,
+                    "status": "verified",
+                    "operation": native_operation,
+                    "data": data,
+                },
+            )
+
+            with self.subTest(operation=public_operation):
+                result = getattr(facade(eventkit), public_operation)({"limit": 1})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "failed_no_mutation")
+                self.assertEqual(result["error"]["reason_code"], reason_code)
+                validate_public_result(public_operation, result, "not_mutated")
+
     def test_missing_native_build_prerequisite_has_an_actionable_recovery_path(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue(

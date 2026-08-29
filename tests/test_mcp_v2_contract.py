@@ -280,6 +280,34 @@ def pending_mutation(tool_name: str = "change_reminder") -> dict[str, object]:
 
 
 class PublicV2ResultContractTests(unittest.TestCase):
+    def test_public_collection_items_must_be_objects(self) -> None:
+        recently_deleted = read_success("inspect_recently_deleted")
+        recently_deleted["data"] = {
+            "kind": "list",
+            "items": [None],
+            "returned": 1,
+            "limit": 20,
+            "total_matched": 1,
+            "truncated": False,
+            "has_more": False,
+            "next_cursor": None,
+            "pagination_exhausted": False,
+            "retention_days": 30,
+        }
+        fixtures = (
+            ("list_reminder_lists", read_success("list_reminder_lists")),
+            ("fetch_reminders", read_success("fetch_reminders")),
+            ("inspect_recently_deleted", recently_deleted),
+        )
+        for tool_name, fixture in fixtures:
+            fixture["data"]["items"] = [None]  # type: ignore[index]
+            fixture["data"]["returned"] = 1  # type: ignore[index]
+            with self.subTest(tool=tool_name):
+                with self.assertRaises(PublicResultContractError) as raised:
+                    validate_public_result(tool_name, fixture)
+                self.assertEqual(raised.exception.code, "invalid_read_envelope")
+                self.assertEqual(raised.exception.path, "$.data.items[0]")
+
     def test_read_success_is_returned_as_an_independent_copy(self) -> None:
         payload = {
             "schema_version": 2,

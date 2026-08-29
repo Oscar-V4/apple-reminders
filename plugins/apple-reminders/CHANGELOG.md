@@ -82,6 +82,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
+- Rejected non-object records in EventKit list/fetch pages, Recently Deleted
+  pages, and final public collection results. A malformed backend member now
+  fails the whole bounded read instead of being preserved, silently dropped,
+  or returned as a verified MCP result.
 - Made keyed recovery and image-mutation failures durable before returning, so
   the first result and its same-key replay keep the same conservative safety
   classification. Only the existing typed proof of no dispatch may clear a

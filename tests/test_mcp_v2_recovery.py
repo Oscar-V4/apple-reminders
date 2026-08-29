@@ -223,6 +223,21 @@ class RecoveryFacadeTests(unittest.TestCase):
         self.assertNotIn("reference", result["data"]["items"][0])
         self.assertNotIn("attachments", result["data"]["items"][0])
 
+    def test_list_rejects_non_object_deleted_items_beyond_public_limit(self) -> None:
+        class MalformedBackend(FakeBackend):
+            def list_deleted(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+                return {"items": [copy.deepcopy(DELETED), None], "truncated": False}
+
+        result = RecoveryFacade(MalformedBackend()).call(
+            "inspect_recently_deleted",
+            {"kind": "list", "limit": 1},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["reason_code"], "invalid_deleted_item")
+        validate_public_result("inspect_recently_deleted", result, "not_mutated")
+
     def test_list_cursor_reaches_later_deleted_items_without_exposing_snapshot(self) -> None:
         backend = PagedBackend()
         facade = RecoveryFacade(backend)

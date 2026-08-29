@@ -1344,6 +1344,18 @@ class V2CoreFacade:
                     }
                 },
             )
+        if any(not isinstance(item, Mapping) for item in raw_items):
+            return _read_failure(
+                "list_reminder_lists",
+                {
+                    "error": {
+                        "code": "unexpected_error",
+                        "reason_code": "invalid_eventkit_list_item",
+                        "message": "EventKit returned an invalid Reminder List item.",
+                        "retryable": False,
+                    }
+                },
+            )
         items = [_public_list(item) for item in raw_items[:limit]]
         return {
             "schema_version": 2,
@@ -1423,6 +1435,18 @@ class V2CoreFacade:
                     }
                 },
             )
+        if any(not isinstance(item, Mapping) for item in raw_items):
+            return _read_failure(
+                "fetch_reminders",
+                {
+                    "error": {
+                        "code": "unexpected_error",
+                        "reason_code": "invalid_eventkit_fetch_item",
+                        "message": "EventKit returned an invalid Reminder item.",
+                        "retryable": False,
+                    }
+                },
+            )
         has_more = data.get("has_more") is True
         snapshot_fingerprint = data.get("snapshot_fingerprint")
         valid_snapshot_fingerprint = (
@@ -1462,11 +1486,7 @@ class V2CoreFacade:
                     }
                 },
             )
-        items = [
-            _public_reminder_summary(item)
-            for item in raw_items
-            if isinstance(item, Mapping)
-        ]
+        items = [_public_reminder_summary(item) for item in raw_items]
         next_offset = data.get("next_offset")
         if (
             has_more

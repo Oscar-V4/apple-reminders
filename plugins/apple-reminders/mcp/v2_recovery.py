@@ -45,6 +45,7 @@ RECOVERY_PUBLIC_REASON_CODES = frozenset(
         "idempotency_key_conflict",
         "invalid_adapter_response",
         "invalid_deleted_guard",
+        "invalid_deleted_item",
         "invalid_deleted_reference",
         "invalid_deleted_cursor",
         "invalid_deleted_snapshot",
@@ -524,12 +525,17 @@ class RecoveryFacade:
                         "pagination_snapshot_stale",
                         "Recently Deleted changed after the previous page.",
                     )
-                items = [
-                    public
-                    for raw_item in raw_items[:limit]
-                    if (public := _public_deleted(raw_item, include_attachments=False))
-                    is not None
+                public_items = [
+                    _public_deleted(raw_item, include_attachments=False)
+                    for raw_item in raw_items
                 ]
+                if any(public is None for public in public_items):
+                    raise RecoveryBackendError(
+                        "unexpected_error",
+                        "invalid_deleted_item",
+                        "Recently Deleted returned an invalid Reminder item.",
+                    )
+                items = public_items[:limit]
                 next_offset = raw.get("next_offset")
                 if (
                     has_more

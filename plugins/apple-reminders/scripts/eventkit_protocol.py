@@ -39,6 +39,7 @@ EXIT_CODES = {
     "failed_no_mutation": 2,
 }
 STABLE_ERROR_CODES = set(CONTRACT_STABLE_ERROR_CODES)
+COLLECTION_READ_OPERATIONS = {"list_calendars", "fetch_reminders"}
 
 
 def _validated_status_and_ok(payload: dict[str, Any]) -> tuple[str, bool]:
@@ -130,6 +131,20 @@ def validate_response(payload: Any, operation: str) -> dict[str, Any]:
             or not isinstance(error.get("message"), str)
         ):
             raise RuntimeError("Native bridge error must include a stable code and message")
+    if expected_ok and operation in COLLECTION_READ_OPERATIONS:
+        if status != "verified":
+            raise RuntimeError(
+                "Native bridge collection reads must use verified status"
+            )
+        data = payload.get("data")
+        items = data.get("items") if isinstance(data, Mapping) else None
+        if not isinstance(items, list):
+            raise RuntimeError("Native bridge response data.items must be an array")
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                raise RuntimeError(
+                    f"Native bridge response data.items[{index}] must be an object"
+                )
     if operation in MUTATION_OPERATIONS:
         if payload["status"] == "failed_no_mutation":
             no_write_error = failed_no_mutation_evidence_error(payload)

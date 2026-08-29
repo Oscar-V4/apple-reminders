@@ -637,6 +637,33 @@ def _validate_warnings(
         )
 
 
+def _validate_object_items(
+    value: Any,
+    *,
+    path: str,
+    tool_name: str,
+    mutation_state: str | None,
+) -> list[Any]:
+    if not isinstance(value, list):
+        _fail(
+            "invalid_read_envelope",
+            path,
+            "collection items must be an array",
+            tool_name=tool_name,
+            mutation_state=mutation_state,
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            _fail(
+                "invalid_read_envelope",
+                f"{path}[{index}]",
+                "collection item must be an object",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
+    return value
+
+
 def _validate_next_action(
     value: Any,
     *,
@@ -998,6 +1025,13 @@ def _validate_read_result(
             mutation_state=mutation_state,
         )
         expected_reference_path: str | None = None
+        if tool_name in {"list_reminder_lists", "fetch_reminders"}:
+            _validate_object_items(
+                result["data"].get("items"),
+                path="$.data.items",
+                tool_name=tool_name,
+                mutation_state=mutation_state,
+            )
         if tool_name == "read_reminder":
             reminder = result["data"].get("reminder")
             if not isinstance(reminder, Mapping):
@@ -1060,6 +1094,12 @@ def _validate_read_result(
                     missing_code="invalid_read_envelope",
                 )
                 items = data.get("items")
+                _validate_object_items(
+                    items,
+                    path="$.data.items",
+                    tool_name=tool_name,
+                    mutation_state=mutation_state,
+                )
                 returned = data.get("returned")
                 limit = data.get("limit")
                 total_matched = data.get("total_matched")
