@@ -21,6 +21,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Changed
 
+- Routed all bundled subprocesses through one byte-bounded, deadline-aware
+  process-group runner. Timeouts, oversized output, invalid UTF-8, and exited
+  leaders with lingering descendants terminate the full group and reap the
+  direct leader; only a typed pre-launch failure can prove that a mutation was
+  not dispatched.
 - Bound pagination to a private ordered ID-and-revision SHA-256 snapshot.
   Continuation now fails read-only with `pagination_snapshot_stale` when list
   membership or revisions change between pages.

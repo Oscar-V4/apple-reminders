@@ -108,7 +108,15 @@ user-facing promise.
      in-process to obtain protocol rules.
    - Does not own subprocess provenance, request normalization, helper
      compilation, native execution, or Core mutation-state interpretation.
-9. **Internal adapter and helpers**
+9. **Bounded process Module**
+   - Owns concurrent byte-bounded pipe draining, strict UTF-8 decoding,
+     deadlines, process-group termination, and direct-leader reaping for every
+     local helper.
+   - Returns nonzero exits to domain callers and exposes typed launch, timeout,
+     output-limit, and decode failures without interpreting mutation outcome.
+   - Makes only a pre-launch failure no-dispatch proof; every post-launch
+     mutation failure remains unknown until domain read-back proves otherwise.
+10. **Internal adapter and helpers**
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.

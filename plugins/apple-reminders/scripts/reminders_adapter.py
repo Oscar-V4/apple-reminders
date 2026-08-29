@@ -16,7 +16,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
@@ -37,6 +36,12 @@ from receipt_contract import (  # noqa: E402
     MutationNotStartedError,
     SUCCESS_RECEIPT_STATUSES,
     build_operation_receipt,
+)
+from bounded_process import (  # noqa: E402
+    ProcessError,
+    ProcessLaunchError,
+    ProcessTimeoutError,
+    run as run_bounded_process,
 )
 from durable_idempotency import execute_idempotent  # noqa: E402
 from reminders_contracts import (  # noqa: E402
@@ -62,6 +67,11 @@ IMAGE_ATTACHMENT_ENT = 25
 URL_ATTACHMENT_ENT = 26
 TAG_OBJECT_ENT = 32
 SUBPROCESS_TIMEOUT_SECONDS = 30
+BUILDER_STDOUT_LIMIT_BYTES = 256 * 1024
+BUILDER_STDERR_LIMIT_BYTES = 1024 * 1024
+NATIVE_STDOUT_LIMIT_BYTES = 256 * 1024
+NATIVE_STDERR_LIMIT_BYTES = 256 * 1024
+IMAGE_METADATA_OUTPUT_LIMIT_BYTES = 64 * 1024
 ATTACHMENT_VERIFY_TIMEOUT_SECONDS = 10
 REMINDERKIT_REMOVAL_SETTLE_SECONDS = 0.5
 REMINDERKIT_REMOVAL_VERIFY_TIMEOUT_SECONDS = 10
@@ -1584,16 +1594,19 @@ def attachment_dir_for_account(account_uuid: str | None = None) -> Path:
 
 def image_size(path: Path) -> tuple[int, int]:
     try:
-        proc = subprocess.run(
+        proc = run_bounded_process(
             ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+            stdout_limit=IMAGE_METADATA_OUTPUT_LIMIT_BYTES,
+            stderr_limit=IMAGE_METADATA_OUTPUT_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessTimeoutError as exc:
         raise AdapterError("Image metadata inspection timed out", image=path.name) from exc
+    except ProcessLaunchError as exc:
+        raise AdapterError("Image metadata inspection could not start", image=path.name) from exc
+    except ProcessError as exc:
+        raise AdapterError("Image metadata inspection returned invalid output", image=path.name) from exc
     if proc.returncode != 0:
         raise AdapterError(proc.stderr.strip() or "Unable to read image dimensions")
     width = height = None
@@ -1637,7 +1650,7 @@ def reminderkit_attach_helper() -> Path:
         temp_handle.close()
         try:
             try:
-                proc = subprocess.run(
+                proc = run_bounded_process(
                     [
                         clang,
                         "-x",
@@ -1653,14 +1666,17 @@ def reminderkit_attach_helper() -> Path:
                         str(temp_path),
                         str(source),
                     ],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+                    stdout_limit=BUILDER_STDOUT_LIMIT_BYTES,
+                    stderr_limit=BUILDER_STDERR_LIMIT_BYTES,
+                    output="utf8",
                 )
-            except subprocess.TimeoutExpired as exc:
+            except ProcessTimeoutError as exc:
                 raise AdapterError("ReminderKit helper build timed out") from exc
+            except ProcessLaunchError as exc:
+                raise AdapterError("ReminderKit helper build could not start") from exc
+            except ProcessError as exc:
+                raise AdapterError("ReminderKit helper build returned invalid output") from exc
             if proc.returncode != 0:
                 raise AdapterError(
                     (proc.stderr or proc.stdout).strip()
@@ -1702,7 +1718,7 @@ def reminderkit_sections_helper() -> Path:
         temp_handle.close()
         try:
             try:
-                proc = subprocess.run(
+                proc = run_bounded_process(
                     [
                         clang,
                         "-x",
@@ -1716,14 +1732,17 @@ def reminderkit_sections_helper() -> Path:
                         str(temp_path),
                         str(source),
                     ],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+                    stdout_limit=BUILDER_STDOUT_LIMIT_BYTES,
+                    stderr_limit=BUILDER_STDERR_LIMIT_BYTES,
+                    output="utf8",
                 )
-            except subprocess.TimeoutExpired as exc:
+            except ProcessTimeoutError as exc:
                 raise AdapterError("ReminderKit section helper build timed out") from exc
+            except ProcessLaunchError as exc:
+                raise AdapterError("ReminderKit section helper build could not start") from exc
+            except ProcessError as exc:
+                raise AdapterError("ReminderKit section helper build returned invalid output") from exc
             if proc.returncode != 0:
                 raise AdapterError(
                     (proc.stderr or proc.stdout).strip()
@@ -1763,7 +1782,7 @@ def reminderkit_recover_helper() -> Path:
         temp_handle.close()
         try:
             try:
-                proc = subprocess.run(
+                proc = run_bounded_process(
                     [
                         clang,
                         "-x",
@@ -1775,14 +1794,17 @@ def reminderkit_recover_helper() -> Path:
                         str(temp_path),
                         str(source),
                     ],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+                    stdout_limit=BUILDER_STDOUT_LIMIT_BYTES,
+                    stderr_limit=BUILDER_STDERR_LIMIT_BYTES,
+                    output="utf8",
                 )
-            except subprocess.TimeoutExpired as exc:
+            except ProcessTimeoutError as exc:
                 raise AdapterError("ReminderKit recovery helper build timed out") from exc
+            except ProcessLaunchError as exc:
+                raise AdapterError("ReminderKit recovery helper build could not start") from exc
+            except ProcessError as exc:
+                raise AdapterError("ReminderKit recovery helper build returned invalid output") from exc
             if proc.returncode != 0:
                 raise AdapterError(
                     (proc.stderr or proc.stdout).strip()
@@ -1795,22 +1817,53 @@ def reminderkit_recover_helper() -> Path:
     return helper
 
 
+def _prepare_helper_before_mutation(
+    builder: Callable[[], Path],
+    *,
+    label: str,
+    reason_code: str,
+) -> Path:
+    """Resolve/build a helper while no target mutation can have started."""
+
+    try:
+        return builder()
+    except MutationNotStartedError:
+        raise
+    except Exception as exc:
+        raise MutationNotStartedError(
+            f"{label} could not be prepared",
+            code="unexpected_error",
+            reason_code=reason_code,
+        ) from exc
+
+
 def invoke_reminderkit_recovery_guard(reminder_id: str) -> str:
     helper = reminderkit_recover_helper()
     try:
-        proc = subprocess.run(
+        proc = run_bounded_process(
             [str(helper), "guard", normalize_uuid(reminder_id)],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+            stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+            stderr_limit=NATIVE_STDERR_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessTimeoutError as exc:
         raise AdapterError(
             "ReminderKit recovery guard read timed out",
             code="sync_pending",
             reason_code="native_recovery_guard_timeout",
+        ) from exc
+    except ProcessLaunchError as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard could not start",
+            code="unexpected_error",
+            reason_code="native_recovery_guard_launch_failed",
+        ) from exc
+    except ProcessError as exc:
+        raise AdapterError(
+            "ReminderKit recovery guard returned invalid output",
+            code="unexpected_error",
+            reason_code="invalid_native_recovery_guard",
         ) from exc
     raw = (proc.stdout or "").strip()
     try:
@@ -1864,9 +1917,13 @@ def invoke_reminderkit_recovery(
             code="invalid_input",
             reason_code="invalid_native_recovery_guard",
         )
-    helper = reminderkit_recover_helper()
+    helper = _prepare_helper_before_mutation(
+        reminderkit_recover_helper,
+        label="ReminderKit recovery helper",
+        reason_code="native_recovery_helper_build_failed",
+    )
     try:
-        proc = subprocess.run(
+        proc = run_bounded_process(
             [
                 str(helper),
                 "recover",
@@ -1874,18 +1931,31 @@ def invoke_reminderkit_recovery(
                 normalize_uuid(destination_list_id),
                 native_guard_digest,
             ],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+            stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+            stderr_limit=NATIVE_STDERR_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessLaunchError as exc:
+        raise MutationNotStartedError(
+            "ReminderKit recovery could not start",
+            code="unexpected_error",
+            reason_code="native_recovery_launch_failed",
+        ) from exc
+    except ProcessTimeoutError as exc:
         raise AdapterError(
             "ReminderKit recovery timed out after dispatch",
             code="sync_pending",
             partial_failure=True,
             mutation_outcome_unknown=True,
+        ) from exc
+    except ProcessError as exc:
+        raise AdapterError(
+            "ReminderKit recovery returned invalid output after dispatch",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reason_code="invalid_native_recovery_output",
         ) from exc
     raw = (proc.stdout or "").strip()
     try:
@@ -1951,22 +2021,41 @@ def invoke_reminderkit_recovery(
 
 
 def invoke_reminderkit_section(operation: str, *arguments: str) -> dict[str, Any]:
-    helper = reminderkit_sections_helper()
+    helper = _prepare_helper_before_mutation(
+        reminderkit_sections_helper,
+        label="ReminderKit section helper",
+        reason_code="native_section_helper_build_failed",
+    )
     try:
-        proc = subprocess.run(
+        proc = run_bounded_process(
             [str(helper), operation, *arguments],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+            stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+            stderr_limit=NATIVE_STDERR_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessLaunchError as exc:
+        raise MutationNotStartedError(
+            "ReminderKit section operation could not start",
+            code="unexpected_error",
+            reason_code="native_section_launch_failed",
+            operation=operation,
+        ) from exc
+    except ProcessTimeoutError as exc:
         raise AdapterError(
             "ReminderKit section operation timed out",
             code="sync_pending",
             partial_failure=True,
             mutation_outcome_unknown=True,
+            operation=operation,
+        ) from exc
+    except ProcessError as exc:
+        raise AdapterError(
+            "ReminderKit section operation returned invalid output after dispatch",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reason_code="invalid_native_section_output",
             operation=operation,
         ) from exc
     raw = (proc.stdout or "").strip()
@@ -1986,12 +2075,28 @@ def invoke_reminderkit_section(operation: str, *arguments: str) -> dict[str, Any
         message = payload.get("error") or "ReminderKit section operation failed"
         if detail:
             message = f"{message}: {detail}"
-        mutation_attempted = bool(payload.get("mutation_attempted"))
+        # Only an explicit false marker can prove that this launched helper did
+        # not attempt its target mutation. Missing or malformed provenance is
+        # an unknown post-launch outcome.
+        mutation_attempted = payload.get("mutation_attempted") is not False
         raise AdapterError(
             message,
             code="sync_pending" if mutation_attempted else "unexpected_error",
             partial_failure=mutation_attempted,
             mutation_outcome_unknown=mutation_attempted,
+            operation=operation,
+        )
+    if (
+        payload.get("operation") != operation
+        or payload.get("mutation_attempted") is not True
+        or payload.get("saved") is not True
+    ):
+        raise AdapterError(
+            "ReminderKit section operation returned incomplete mutation proof",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reason_code="invalid_native_section_receipt",
             operation=operation,
         )
     return payload
@@ -2021,7 +2126,11 @@ def attach_image_reminderkit_record(
         attachment_ent=IMAGE_ATTACHMENT_ENT,
     )
     before_ids = {row["ZCKIDENTIFIER"] for row in before_rows}
-    helper = reminderkit_attach_helper()
+    helper = _prepare_helper_before_mutation(
+        reminderkit_attach_helper,
+        label="ReminderKit image attachment helper",
+        reason_code="native_image_helper_build_failed",
+    )
     ensure_private_dir(CACHE_DIR)
     suffix = ".png" if validated_image.format == "png" else ".jpg"
     with tempfile.TemporaryDirectory(prefix="attach-image.", dir=CACHE_DIR) as temp_dir:
@@ -2051,21 +2160,36 @@ def attach_image_reminderkit_record(
             "public.png" if validated_image.format == "png" else "public.jpeg"
         )
         try:
-            proc = subprocess.run(
+            proc = run_bounded_process(
                 [str(helper), reminder["ZCKIDENTIFIER"], str(snapshot_path)],
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+                stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+                stderr_limit=NATIVE_STDERR_LIMIT_BYTES,
+                output="utf8",
             )
-        except subprocess.TimeoutExpired as exc:
+        except ProcessLaunchError as exc:
+            raise MutationNotStartedError(
+                "ReminderKit image attachment could not start",
+                code="unexpected_error",
+                reason_code="native_image_attachment_launch_failed",
+                image=image.name,
+            ) from exc
+        except ProcessTimeoutError as exc:
             raise AdapterError(
                 "ReminderKit image attachment timed out",
                 code="sync_pending",
                 image=image.name,
                 partial_failure=True,
                 mutation_outcome_unknown=True,
+            ) from exc
+        except ProcessError as exc:
+            raise AdapterError(
+                "ReminderKit image attachment returned invalid output after dispatch",
+                code="sync_pending",
+                image=image.name,
+                partial_failure=True,
+                mutation_outcome_unknown=True,
+                reason_code="invalid_native_image_attachment_output",
             ) from exc
     raw = (proc.stdout or "").strip()
     try:
@@ -2257,22 +2381,39 @@ def remove_image_reminderkit_record(
     before = attachment_payload(attachment)
     cloud_state_pk = attachment.get("ZCKCLOUDSTATE")
     db_path = Path(db_path).expanduser().resolve()
-    helper = reminderkit_attach_helper()
+    helper = _prepare_helper_before_mutation(
+        reminderkit_attach_helper,
+        label="ReminderKit image removal helper",
+        reason_code="native_image_helper_build_failed",
+    )
     try:
-        proc = subprocess.run(
+        proc = run_bounded_process(
             [str(helper), "remove", reminder_id, attachment_id],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS,
+            stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+            stderr_limit=NATIVE_STDERR_LIMIT_BYTES,
+            output="utf8",
         )
-    except subprocess.TimeoutExpired as exc:
+    except ProcessLaunchError as exc:
+        raise MutationNotStartedError(
+            "ReminderKit image removal could not start",
+            code="unexpected_error",
+            reason_code="native_image_removal_launch_failed",
+        ) from exc
+    except ProcessTimeoutError as exc:
         raise AdapterError(
             "ReminderKit image removal timed out",
             code="sync_pending",
             partial_failure=True,
             mutation_outcome_unknown=True,
+        ) from exc
+    except ProcessError as exc:
+        raise AdapterError(
+            "ReminderKit image removal returned invalid output after dispatch",
+            code="sync_pending",
+            partial_failure=True,
+            mutation_outcome_unknown=True,
+            reason_code="invalid_native_image_removal_output",
         ) from exc
     raw = (proc.stdout or "").strip()
     if not raw:
@@ -3472,6 +3613,16 @@ def cmd_create_section_reminderkit(args: argparse.Namespace) -> int:
         invoke_reminderkit_section("repair", section_id, temporary_name)
         try:
             helper_payload = invoke_reminderkit_section("repair", section_id, args.name)
+        except MutationNotStartedError as exc:
+            raise AdapterError(
+                "Section repair started, but restoring the requested name could not start",
+                code="sync_pending",
+                partial_failure=True,
+                mutation_outcome_unknown=False,
+                reason_code="section_name_restore_not_started",
+                section_id=section_id,
+                recovery="repair_section_display_name",
+            ) from exc
         except AdapterError as exc:
             exc.details.setdefault("section_id", section_id)
             exc.details.setdefault("recovery", "repair_section_display_name")

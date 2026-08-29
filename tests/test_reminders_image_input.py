@@ -24,6 +24,60 @@ GIF_1X1 = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
 
 
 class ReminderImageInputTests(unittest.TestCase):
+    def test_metadata_inspection_uses_explicit_small_output_budgets(self) -> None:
+        completed = mock.Mock(
+            returncode=0,
+            stdout="format: png\npixelWidth: 1\npixelHeight: 1\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            reminders_image_input,
+            "run_bounded_process",
+            return_value=completed,
+        ) as run:
+            result = reminders_image_input._inspect_image(Path("/tmp/image.png"))
+
+        self.assertEqual(result, ("png", 1, 1))
+        self.assertEqual(
+            run.call_args.kwargs,
+            {
+                "timeout_s": reminders_image_input.IMAGE_INSPECTION_TIMEOUT_SECONDS,
+                "stdout_limit": reminders_image_input.IMAGE_INSPECTION_OUTPUT_LIMIT_BYTES,
+                "stderr_limit": reminders_image_input.IMAGE_INSPECTION_OUTPUT_LIMIT_BYTES,
+                "output": "utf8",
+            },
+        )
+
+    def test_metadata_launch_and_postlaunch_failures_are_domain_errors(self) -> None:
+        argv = ("sips",)
+        failures = (
+            reminders_image_input.ProcessLaunchError(
+                argv=argv,
+                cause=FileNotFoundError("synthetic launch failure"),
+            ),
+            reminders_image_input.ProcessError(
+                "synthetic post-launch failure",
+                argv=argv,
+                pid=123,
+                returncode=-15,
+                stdout=b"",
+                stderr=b"",
+            ),
+        )
+        for failure in failures:
+            with (
+                self.subTest(failure=type(failure).__name__),
+                mock.patch.object(
+                    reminders_image_input,
+                    "run_bounded_process",
+                    side_effect=failure,
+                ),
+                self.assertRaises(reminders_image_input.ImageInputError) as raised,
+            ):
+                reminders_image_input._inspect_image(Path("/tmp/image.png"))
+
+            self.assertEqual(raised.exception.reason_code, "image_decode_failed")
+
     def test_accepts_a_decoded_png_even_with_a_misleading_extension(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             image = Path(temp_dir) / "capture.jpg"

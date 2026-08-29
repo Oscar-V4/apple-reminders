@@ -211,6 +211,17 @@ even though optional MCP `outputSchema` descriptors are omitted from
     member. A malformed member anywhere in the backend page fails the complete
     bounded read; it is never preserved, silently filtered, or hidden beyond a
     public page limit and then reported as `verified`.
+32. Every production child process is launched through one bounded process
+    Module. Stdout and stderr are drained concurrently under caller-specific
+    byte limits, UTF-8 text is decoded strictly, one monotonic deadline applies,
+    and the complete process group is terminated while its direct leader is
+    reaped on timeout, overflow, decode failure, or a leader that exits while
+    descendants remain.
+    A typed pre-launch failure may prove no dispatch; timeout, overflow,
+    malformed output, and every other post-launch mutation failure preserve an
+    unknown outcome and require read-before-retry resolution. A later phase's
+    launch failure cannot erase an earlier phase's confirmed mutation, and a
+    launched helper's missing mutation marker is never interpreted as no-write.
 
 ## Deliberately withheld behavior
 

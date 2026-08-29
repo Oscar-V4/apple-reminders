@@ -22,6 +22,35 @@ reminders_adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reminders_adapter)
 
 
+def bounded_timeout(*argv: str) -> Exception:
+    return reminders_adapter.ProcessTimeoutError(
+        timeout_s=1,
+        argv=tuple(argv),
+        pid=123,
+        returncode=None,
+        stdout=b"",
+        stderr=b"",
+    )
+
+
+def bounded_launch_failure(*argv: str) -> Exception:
+    return reminders_adapter.ProcessLaunchError(
+        argv=tuple(argv),
+        cause=FileNotFoundError("synthetic launch failure"),
+    )
+
+
+def bounded_postlaunch_failure(*argv: str) -> Exception:
+    return reminders_adapter.ProcessError(
+        "synthetic post-launch stream failure",
+        argv=tuple(argv),
+        pid=123,
+        returncode=-15,
+        stdout=b"{" * 16,
+        stderr=b"",
+    )
+
+
 def validated_image_fixture(
     path: Path,
     *,
@@ -390,8 +419,8 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_recover"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=completed,
             ),
             self.assertRaises(reminders_adapter.AdapterError) as raised,
@@ -420,8 +449,8 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_recover"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=completed,
             ),
             self.assertRaises(reminders_adapter.AdapterError) as raised,
@@ -435,6 +464,76 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "sync_pending")
         self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
         self.assertTrue(raised.exception.details["partial_failure"])
+
+    def test_native_recovery_launch_failure_proves_mutation_never_started(self) -> None:
+        helper = "/tmp/remkit_recover"
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                side_effect=bounded_launch_failure(helper),
+            ),
+            self.assertRaises(reminders_adapter.MutationNotStartedError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_recovery(
+                self.REMINDER_ID,
+                self.LIST_ID,
+                "c" * 64,
+            )
+
+        self.assertTrue(raised.exception.details["mutation_not_started"])
+        self.assertNotIn("mutation_outcome_unknown", raised.exception.details)
+
+    def test_native_recovery_helper_build_failure_proves_no_dispatch(self) -> None:
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                side_effect=reminders_adapter.AdapterError("synthetic build failure"),
+            ),
+            self.assertRaises(reminders_adapter.MutationNotStartedError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_recovery(
+                self.REMINDER_ID,
+                self.LIST_ID,
+                "c" * 64,
+            )
+
+        self.assertTrue(raised.exception.details["mutation_not_started"])
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "native_recovery_helper_build_failed",
+        )
+
+    def test_native_recovery_postlaunch_failure_preserves_possible_write(self) -> None:
+        helper = "/tmp/remkit_recover"
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_recover_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                side_effect=bounded_postlaunch_failure(helper),
+            ),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_recovery(
+                self.REMINDER_ID,
+                self.LIST_ID,
+                "c" * 64,
+            )
+
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["partial_failure"])
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
 
     def test_native_guard_read_is_bounded_and_never_dispatches_a_write(self) -> None:
         payload = json.dumps(
@@ -453,8 +552,8 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_recover"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=subprocess.CompletedProcess(
                     [], 0, stdout=payload, stderr=""
                 ),
@@ -468,6 +567,15 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             ["/tmp/remkit_recover", "guard", self.REMINDER_ID],
+        )
+        self.assertEqual(
+            run.call_args.kwargs,
+            {
+                "timeout_s": reminders_adapter.SUBPROCESS_TIMEOUT_SECONDS,
+                "stdout_limit": reminders_adapter.NATIVE_STDOUT_LIMIT_BYTES,
+                "stderr_limit": reminders_adapter.NATIVE_STDERR_LIMIT_BYTES,
+                "output": "utf8",
+            },
         )
 
     def test_native_guard_mismatch_is_known_no_write_concurrency(self) -> None:
@@ -485,8 +593,8 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_recover"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=subprocess.CompletedProcess(
                     [], 2, stdout=payload, stderr=""
                 ),
@@ -812,6 +920,134 @@ class RecentlyDeletedRecoveryTests(unittest.TestCase):
             raised.exception.details["reason_code"],
             "deleted_image_bytes_mismatch",
         )
+
+
+class ReminderKitProcessBoundaryTests(unittest.TestCase):
+    def test_section_launch_failure_is_the_only_no_dispatch_process_failure(self) -> None:
+        helper = "/tmp/remkit_sections"
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_sections_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                side_effect=bounded_launch_failure(helper),
+            ),
+            self.assertRaises(reminders_adapter.MutationNotStartedError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_section(
+                "move",
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            )
+
+        self.assertTrue(raised.exception.details["mutation_not_started"])
+
+    def test_section_failure_without_attempt_marker_is_unknown(self) -> None:
+        helper = "/tmp/remkit_sections"
+        completed = subprocess.CompletedProcess(
+            [helper],
+            1,
+            json.dumps({"ok": False, "error": "section_failed"}),
+            "",
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_sections_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                return_value=completed,
+            ),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_section(
+                "move",
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            )
+
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["partial_failure"])
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
+
+    def test_section_success_requires_complete_mutation_proof(self) -> None:
+        helper = "/tmp/remkit_sections"
+        completed = subprocess.CompletedProcess(
+            [helper],
+            0,
+            json.dumps({"ok": True, "operation": "move"}),
+            "",
+        )
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_sections_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                return_value=completed,
+            ),
+            self.assertRaises(reminders_adapter.AdapterError) as raised,
+        ):
+            reminders_adapter.invoke_reminderkit_section(
+                "move",
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            )
+
+        self.assertEqual(raised.exception.code, "sync_pending")
+        self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
+        self.assertEqual(
+            raised.exception.details["reason_code"],
+            "invalid_native_section_receipt",
+        )
+
+    def test_image_attach_launch_failure_proves_no_dispatch(self) -> None:
+        reminder_id = "11111111-1111-4111-8111-111111111111"
+        helper = "/tmp/remkit_attach_image"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = root / "image.png"
+            image.write_bytes(b"synthetic-image-bytes")
+            validated = validated_image_fixture(image)
+            with (
+                mock.patch.object(
+                    reminders_adapter,
+                    "active_attachment_rows",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    reminders_adapter,
+                    "reminderkit_attach_helper",
+                    return_value=Path(helper),
+                ),
+                mock.patch.object(reminders_adapter, "CACHE_DIR", root),
+                mock.patch.object(
+                    reminders_adapter,
+                    "run_bounded_process",
+                    side_effect=bounded_launch_failure(helper),
+                ),
+                self.assertRaises(
+                    reminders_adapter.MutationNotStartedError
+                ) as raised,
+            ):
+                reminders_adapter.attach_image_reminderkit_record(
+                    mock.Mock(),
+                    {"Z_PK": 1, "ZCKIDENTIFIER": reminder_id},
+                    image,
+                    validated_image=validated,
+                )
+
+        self.assertTrue(raised.exception.details["mutation_not_started"])
 
 
 class CrossReminderImageCopyTests(unittest.TestCase):
@@ -1432,8 +1668,8 @@ class AttachmentSyncTests(unittest.TestCase):
                         return_value=helper,
                     ),
                     mock.patch.object(
-                        reminders_adapter.subprocess,
-                        "run",
+                        reminders_adapter,
+                        "run_bounded_process",
                         side_effect=native_remove,
                     ) as run,
                     mock.patch.object(
@@ -1492,9 +1728,9 @@ class AttachmentSyncTests(unittest.TestCase):
                     return_value=helper,
                 ),
                 mock.patch.object(
-                    reminders_adapter.subprocess,
-                    "run",
-                    side_effect=subprocess.TimeoutExpired(str(helper), 1),
+                    reminders_adapter,
+                    "run_bounded_process",
+                    side_effect=bounded_timeout(str(helper)),
                 ),
                 self.assertRaises(reminders_adapter.AdapterError) as raised,
             ):
@@ -1507,6 +1743,49 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "sync_pending")
         self.assertTrue(raised.exception.details["partial_failure"])
         self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
+
+    def test_reminderkit_image_removal_launch_failure_proves_no_dispatch(self) -> None:
+        reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
+        attachment_id = "8718459E-2672-4E99-9E6A-B9AA430E570F"
+        helper = "/tmp/remkit_attach_image"
+        attachment = {
+            "Z_PK": 10,
+            "Z_ENT": reminders_adapter.IMAGE_ATTACHMENT_ENT,
+            "ZCKIDENTIFIER": attachment_id,
+            "ZCKCLOUDSTATE": None,
+            "ZREMINDER2": 1,
+            "Z_FOK_REMINDER1": 1024,
+            "ZFILENAME": "old.png",
+            "ZSHA512SUM": "sha",
+            "ZUTI": "public.png",
+            "ZFILESIZE": 12,
+            "ZWIDTH": 1,
+            "ZHEIGHT": 1,
+            "ZURL": None,
+            "ZHOSTURL": None,
+            "ZMARKEDFORDELETION": 0,
+        }
+
+        with (
+            mock.patch.object(
+                reminders_adapter,
+                "reminderkit_attach_helper",
+                return_value=Path(helper),
+            ),
+            mock.patch.object(
+                reminders_adapter,
+                "run_bounded_process",
+                side_effect=bounded_launch_failure(helper),
+            ),
+            self.assertRaises(reminders_adapter.MutationNotStartedError) as raised,
+        ):
+            reminders_adapter.remove_image_reminderkit_record(
+                Path("/tmp/reminders.sqlite"),
+                {"Z_PK": 1, "ZCKIDENTIFIER": reminder_id},
+                attachment,
+            )
+
+        self.assertTrue(raised.exception.details["mutation_not_started"])
 
     def test_reminderkit_image_removal_empty_output_is_an_unknown_mutation(self) -> None:
         reminder_id = "7718459E-2672-4E99-9E6A-B9AA430E570F"
@@ -1542,8 +1821,8 @@ class AttachmentSyncTests(unittest.TestCase):
                     return_value=helper,
                 ),
                 mock.patch.object(
-                    reminders_adapter.subprocess,
-                    "run",
+                    reminders_adapter,
+                    "run_bounded_process",
                     return_value=subprocess.CompletedProcess(
                         [str(helper), "remove", reminder_id, attachment_id],
                         -9,
@@ -1592,8 +1871,8 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_attach_image"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=subprocess.CompletedProcess(
                     [], 1, stdout=payload, stderr=""
                 ),
@@ -1646,8 +1925,8 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_attach_image"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=subprocess.CompletedProcess(
                     [], 0, stdout=payload, stderr=""
                 ),
@@ -1731,8 +2010,8 @@ class AttachmentSyncTests(unittest.TestCase):
                 return_value=Path("/tmp/remkit_attach_image"),
             ),
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
+                reminders_adapter,
+                "run_bounded_process",
                 return_value=subprocess.CompletedProcess(
                     [], 0, stdout=helper_payload, stderr=""
                 ),
@@ -2281,7 +2560,7 @@ class AttachmentSyncTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(reminders_adapter, "reminderkit_attach_helper", return_value=helper),
-                    mock.patch.object(reminders_adapter.subprocess, "run", return_value=proc),
+                    mock.patch.object(reminders_adapter, "run_bounded_process", return_value=proc),
                     self.assertRaises(reminders_adapter.AdapterError) as raised,
                 ):
                     reminders_adapter.attach_image_reminderkit_record(
@@ -2363,7 +2642,7 @@ class AttachmentSyncTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(reminders_adapter, "reminderkit_attach_helper", return_value=helper),
-                    mock.patch.object(reminders_adapter.subprocess, "run", side_effect=add_unverified_attachment),
+                    mock.patch.object(reminders_adapter, "run_bounded_process", side_effect=add_unverified_attachment),
                     mock.patch.object(reminders_adapter, "ATTACHMENT_VERIFY_TIMEOUT_SECONDS", 0),
                     self.assertRaises(reminders_adapter.AdapterError) as raised,
                 ):
@@ -2460,8 +2739,8 @@ class AttachmentSyncTests(unittest.TestCase):
                     return_value=Path("/tmp/remkit_attach_image"),
                 ),
                 mock.patch.object(
-                    reminders_adapter.subprocess,
-                    "run",
+                    reminders_adapter,
+                    "run_bounded_process",
                     return_value=proc,
                 ),
                 mock.patch.object(
@@ -2600,8 +2879,8 @@ class AttachmentSyncTests(unittest.TestCase):
                             return_value=helper,
                         ),
                         mock.patch.object(
-                            reminders_adapter.subprocess,
-                            "run",
+                            reminders_adapter,
+                            "run_bounded_process",
                             side_effect=add_attachment,
                         ),
                         self.assertRaises(
@@ -2677,7 +2956,7 @@ class AttachmentSyncTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(reminders_adapter, "reminderkit_attach_helper", return_value=helper),
-                    mock.patch.object(reminders_adapter.subprocess, "run", return_value=proc),
+                    mock.patch.object(reminders_adapter, "run_bounded_process", return_value=proc),
                     self.assertRaises(reminders_adapter.AdapterError),
                 ):
                     reminders_adapter.attach_image_reminderkit_record(
@@ -2731,9 +3010,9 @@ class AttachmentSyncTests(unittest.TestCase):
                 with (
                     mock.patch.object(reminders_adapter, "reminderkit_attach_helper", return_value=helper),
                     mock.patch.object(
-                        reminders_adapter.subprocess,
-                        "run",
-                        side_effect=subprocess.TimeoutExpired(str(helper), 1),
+                        reminders_adapter,
+                        "run_bounded_process",
+                        side_effect=bounded_timeout(str(helper)),
                     ),
                     self.assertRaises(reminders_adapter.AdapterError) as raised,
                 ):
@@ -2885,9 +3164,9 @@ class AttachmentSyncTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                reminders_adapter.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired("sips", 1),
+                reminders_adapter,
+                "run_bounded_process",
+                side_effect=bounded_timeout("sips"),
             ),
             self.assertRaises(reminders_adapter.AdapterError) as raised,
         ):

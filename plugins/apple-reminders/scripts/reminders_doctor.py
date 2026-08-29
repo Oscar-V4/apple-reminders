@@ -18,7 +18,6 @@ import plistlib
 import shutil
 import sqlite3
 import stat
-import subprocess
 import sys
 import urllib.parse
 from pathlib import Path
@@ -32,6 +31,13 @@ if str(SCRIPT_DIR) not in sys.path:
 from reminders_contracts import (  # noqa: E402
     REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
     command_schema_requirements,
+)
+from bounded_process import (  # noqa: E402
+    ProcessError,
+    ProcessLaunchError,
+    ProcessResult,
+    ProcessTimeoutError,
+    run as run_bounded_process,
 )
 
 
@@ -62,6 +68,8 @@ CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 CACHE_FILE = CACHE_DIR / "cache.json"
 REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
 COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("diagnostic")
+DOCTOR_STDOUT_LIMIT_BYTES = 256 * 1024
+DOCTOR_STDERR_LIMIT_BYTES = 1024 * 1024
 
 
 def default_paths(
@@ -553,18 +561,17 @@ def aggregate_command_schema(store_check: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def run_static_command(argv: list[str], *, timeout: float = 20.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def run_static_command(argv: list[str], *, timeout: float = 20.0) -> ProcessResult:
+    return run_bounded_process(
         argv,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
+        timeout_s=timeout,
+        stdout_limit=DOCTOR_STDOUT_LIMIT_BYTES,
+        stderr_limit=DOCTOR_STDERR_LIMIT_BYTES,
+        output="utf8",
     )
 
 
-def _diagnostic_metadata(process: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+def _diagnostic_metadata(process: ProcessResult) -> dict[str, Any]:
     diagnostic = f"{process.stdout or ''}\n{process.stderr or ''}".encode(
         "utf-8", errors="replace"
     )
@@ -581,7 +588,7 @@ def inspect_helper_toolchain(
     *,
     syntax_check: bool = True,
     which: Callable[[str], str | None] = shutil.which,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = run_static_command,
+    runner: Callable[..., ProcessResult] = run_static_command,
 ) -> dict[str, Any]:
     home = paths["home"]
     source = paths["helper_source"]
@@ -651,7 +658,7 @@ def inspect_helper_toolchain(
     details["syntax_check"]["mode"] = "compile_only_no_output"
     try:
         process = runner(argv, timeout=20.0)
-    except subprocess.TimeoutExpired as exc:
+    except ProcessTimeoutError as exc:
         error = structured_error(
             "helper_syntax_check_timeout",
             "The non-linking helper syntax check timed out.",
@@ -664,10 +671,23 @@ def inspect_helper_toolchain(
             details=details,
             errors=[error],
         )
-    except OSError as exc:
+    except ProcessLaunchError as exc:
         error = structured_error(
             "clang_invocation_failed",
             "clang could not be invoked for the non-linking helper syntax check.",
+            exception=exc,
+        )
+        return check_result(
+            STATUS_WARNING,
+            error["code"],
+            error["message"],
+            details=details,
+            errors=[error],
+        )
+    except ProcessError as exc:
+        error = structured_error(
+            "helper_syntax_check_failed",
+            "The non-linking helper syntax check returned invalid bounded output.",
             exception=exc,
         )
         return check_result(
@@ -1117,7 +1137,7 @@ def collect_report(
     system_info: dict[str, Any] | None = None,
     syntax_check: bool = True,
     which: Callable[[str], str | None] = shutil.which,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = run_static_command,
+    runner: Callable[..., ProcessResult] = run_static_command,
     connector: Callable[..., sqlite3.Connection] = sqlite3.connect,
 ) -> dict[str, Any]:
     configured = paths or default_paths()
