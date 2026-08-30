@@ -95,6 +95,11 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(self.text.count("gh release create"), 1)
         self.assertIn('--verify-tag', publish)
         self.assertIn('[[ "$current_tag_object" == "$EXPECTED_TAG_OBJECT" ]]', publish)
+        self.assertIn(
+            'workflow_arguments=(--source-commit "$MANIFEST_SOURCE_COMMIT")',
+            verify,
+        )
+        self.assertNotIn("workflow_arguments=()", verify)
         self.assertIn("release_flags=(--verify-tag)", publish)
         self.assertIn('if [[ "$RELEASE_VERSION" == 0.* ]]; then', publish)
         self.assertIn("release_flags+=(--prerelease)", publish)

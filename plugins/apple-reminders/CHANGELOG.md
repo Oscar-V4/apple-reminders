@@ -6,6 +6,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Changed
 
+- Moved release and legacy helper artifact transfers to reviewed immutable
+  `actions/upload-artifact` 7.0.1 and `actions/download-artifact` 8.0.1 commits,
+  both using Node 24. The provenance-bound source-signing workflow retains its
+  reviewed v4 pins until a dedicated bootstrap migration can update that build
+  input without invalidating the committed helper manifest.
 - Reworked the public plugin card around Core-safe meeting-note, screenshot,
   and upcoming-work prompts. It now states the capability-specific dependency
   split: Core, tag assignments, and native URL attachments do not invoke
