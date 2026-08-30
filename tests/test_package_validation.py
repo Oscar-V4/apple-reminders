@@ -46,12 +46,16 @@ class PluginValidationTests(unittest.TestCase):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         quick_start = readme.split("## Quick Start", 1)[1].split("## First permission", 1)[0]
 
+        self.assertIn("# Apple Reminders for Codex", readme)
+        self.assertIn("Turn these meeting notes into separate action items", readme)
+        self.assertIn("Create one reminder per screenshot", readme)
+        self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
         self.assertIn(
             "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0",
             quick_start,
         )
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)
-        self.assertIn("오늘 할 일 보여줘", quick_start)
+        self.assertIn("Show me everything overdue", quick_start)
         self.assertNotIn("doctor", quick_start.casefold())
         self.assertIn("## Upgrade", readme)
         upgrade = readme.split("## Upgrade", 1)[1].split(
@@ -106,6 +110,20 @@ class PluginValidationTests(unittest.TestCase):
             manifest["interface"]["capabilities"],
             ["Interactive", "Read", "Write"],
         )
+
+    def test_manifest_leads_with_realistic_public_workflows(self) -> None:
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        interface = manifest["interface"]
+
+        self.assertEqual(interface["displayName"], "Apple Reminders for Codex")
+        self.assertIn("notes and screenshots", interface["shortDescription"])
+        self.assertIn("meeting notes", interface["defaultPrompt"][0])
+        self.assertIn("screenshot", interface["defaultPrompt"][1])
+        self.assertIn("overdue", interface["defaultPrompt"][2])
 
     def test_issue_templates_match_the_current_public_product_boundaries(self) -> None:
         templates = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
