@@ -34,8 +34,8 @@ withheld operations.
 - Python 3.11 or newer.
 - Reminders permission for Core operations.
 
-Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. Version
-0.5.0 includes a universal EventKit helper that is Developer ID signed,
+Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. The
+plugin includes a universal EventKit helper that is Developer ID signed,
 notarized by Apple, and stapled for offline Gatekeeper verification. Native
 Extension and Recovery features—including sections, tag changes, image or URL
 attachment changes, and Recently Deleted recovery—still compile separate

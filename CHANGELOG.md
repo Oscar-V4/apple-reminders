@@ -6,6 +6,10 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Changed
 
+- Reworked the public plugin card around Core-safe meeting-note, screenshot,
+  and upcoming-work prompts. The card now states that Core runs without Xcode
+  while optional section, tag, attachment, and Recently Deleted features still
+  require Xcode Command Line Tools.
 - Defined writable relative alarms as the faithful bare default-display subset:
   integral `offset_seconds` from `-31536000` through `0`, with the lower bound
   exactly 31,536,000 seconds (365 elapsed days) before due. Existing unsupported

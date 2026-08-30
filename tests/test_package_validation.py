@@ -171,8 +171,27 @@ class PluginValidationTests(unittest.TestCase):
         self.assertEqual(interface["displayName"], "Apple Reminders for Codex")
         self.assertIn("notes and screenshots", interface["shortDescription"])
         self.assertIn("meeting notes", interface["defaultPrompt"][0])
+        self.assertIn("owners and deadlines", interface["defaultPrompt"][0])
         self.assertIn("screenshot", interface["defaultPrompt"][1])
+        self.assertIn("useful details", interface["defaultPrompt"][1])
         self.assertIn("overdue", interface["defaultPrompt"][2])
+        self.assertIn("without Xcode", interface["longDescription"])
+        self.assertIn(
+            "require Xcode Command Line Tools",
+            interface["longDescription"],
+        )
+        for prompt in interface["defaultPrompt"]:
+            normalized = prompt.casefold()
+            for advanced_term in (
+                "link",
+                "section",
+                "tag",
+                "attachment",
+                "recently deleted",
+                "recover",
+            ):
+                with self.subTest(prompt=prompt, advanced_term=advanced_term):
+                    self.assertNotIn(advanced_term, normalized)
 
     def test_issue_templates_match_the_current_public_product_boundaries(self) -> None:
         templates = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
