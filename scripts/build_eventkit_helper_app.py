@@ -41,7 +41,7 @@ BUILD_INPUT_RELATIVE_PATHS = (
     Path("scripts/build_eventkit_helper_app.py"),
     Path("scripts/verify_eventkit_helper.py"),
     Path("scripts/prepare_signed_eventkit_helper.sh"),
-    Path(".github/workflows/prepare-signed-helper.yml"),
+    Path(".github/workflows/prepare-signed-helper-source.yml"),
 )
 
 XCRUN = "/usr/bin/xcrun"

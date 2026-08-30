@@ -157,6 +157,7 @@ class ChangeResult:
 @dataclass(frozen=True)
 class _ReferenceGrant:
     guard: Guard
+    reminder: Mapping[str, Any]
     expires_at: float
 
 
@@ -199,6 +200,15 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
     if isinstance(expected, Mapping):
         if not isinstance(actual, Mapping):
             return False
+        if field.endswith("alarms[]"):
+            if expected.get("_verification_unavailable") is True:
+                return False
+            expected_read_only = expected.get("read_only") is True
+            actual_read_only = actual.get("read_only") is True
+            if expected_read_only != actual_read_only:
+                return False
+            if expected_read_only and expected.get("action") != actual.get("action"):
+                return False
         return all(
             key in actual
             and _requested_value_matches(
@@ -244,13 +254,55 @@ def reminder_matches_fields(
     )
 
 
-def reminder_matches_action(reminder: Mapping[str, Any], action: CoreAction) -> bool:
+def _alarms_contain_relative(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(alarm, Mapping) and alarm.get("kind") == "relative"
+        for alarm in value
+    )
+
+
+def _alarms_contain_read_only(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(alarm, Mapping) and alarm.get("read_only") is True
+        for alarm in value
+    )
+
+
+def reminder_matches_action(
+    reminder: Mapping[str, Any],
+    before: Mapping[str, Any],
+    action: CoreAction,
+) -> bool:
     if isinstance(action, PatchAction):
-        return reminder_matches_fields(reminder, action.patch)
+        expected_fields = dict(action.patch)
+        if {"due", "alarms"}.intersection(action.patch):
+            resulting_due = action.patch.get("due", before.get("due"))
+            resulting_alarms = action.patch.get("alarms", before.get("alarms"))
+            if _alarms_contain_relative(resulting_alarms):
+                expected_fields["due"] = resulting_due
+                expected_fields["alarms"] = resulting_alarms
+        if (
+            "alarms" not in action.patch
+            and _alarms_contain_read_only(before.get("alarms"))
+        ):
+            expected_fields["alarms"] = before.get("alarms")
+        return reminder_matches_fields(reminder, expected_fields)
     if isinstance(action, SetCompletionAction):
-        return reminder.get("completed") is action.completed
+        if reminder.get("completed") is not action.completed:
+            return False
+        before_alarms = before.get("alarms")
+        if _alarms_contain_read_only(before_alarms):
+            return reminder_matches_fields(reminder, {"alarms": before_alarms})
+        return True
     if isinstance(action, MoveToListAction):
-        return reminder.get("list_id") == action.list_id
+        expected_fields: dict[str, Any] = {"list_id": action.list_id}
+        before_alarms = before.get("alarms")
+        if _alarms_contain_relative(before_alarms):
+            expected_fields["due"] = before.get("due")
+            expected_fields["alarms"] = before_alarms
+        elif _alarms_contain_read_only(before_alarms):
+            expected_fields["alarms"] = before_alarms
+        return reminder_matches_fields(reminder, expected_fields)
     return False
 
 
@@ -298,6 +350,7 @@ class CoreModule:
             raise RuntimeError("token_source must return a unique, non-empty token")
         self._references[reference] = _ReferenceGrant(
             guard=snapshot.guard,
+            reminder=copy.deepcopy(dict(snapshot.reminder)),
             expires_at=now + self._reference_ttl_seconds,
         )
         return reference
@@ -375,6 +428,28 @@ class CoreModule:
     def change(self, reference: str, raw_action: Mapping[str, Any]) -> ChangeResult:
         action = self._parse_action(raw_action)
         grant = self._active_grant(reference)
+        if isinstance(action, PatchAction):
+            replacement = action.patch.get("alarms")
+            if (
+                isinstance(replacement, list)
+                and bool(replacement)
+                and _alarms_contain_read_only(grant.reminder.get("alarms"))
+            ):
+                raise ActionRejected(
+                    "A non-empty alarms replacement cannot preserve an existing "
+                    "read-only alarm; omit alarms or explicitly clear the array"
+                )
+            resulting_due = action.patch.get("due", grant.reminder.get("due"))
+            resulting_alarms = action.patch.get(
+                "alarms", grant.reminder.get("alarms")
+            )
+            if resulting_due is None and _alarms_contain_relative(
+                resulting_alarms
+            ):
+                raise ActionRejected(
+                    "A relative alarm requires a due anchor; retain or set due, "
+                    "or clear/replace the relative alarm in the same patch"
+                )
         try:
             outcome = self._adapter.apply_action(grant.guard, action)
         except AdapterConflict as exc:
@@ -423,7 +498,7 @@ class CoreModule:
                 mutation_state=outcome.mutation_state,
                 reference_error="final_read_failed",
             )
-        if not reminder_matches_action(final_snapshot.reminder, action):
+        if not reminder_matches_action(final_snapshot.reminder, grant.reminder, action):
             self._references.pop(reference, None)
             return ChangeResult(
                 receipt=receipt,

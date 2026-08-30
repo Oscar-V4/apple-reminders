@@ -41,6 +41,49 @@ timezone-naive timed values, preserve requested relative offsets against an
 existing or same-request due anchor, support explicit location-alarm
 coordinates, and never infer an alert from a due date.
 
+## Relative alarm safety evidence
+
+The writable EventKit relative-alarm subset is deliberately narrower than the
+readable set. A relative alarm is writable only when it is the bare
+default-display action, has no email address, sound name, URL, procedure, or
+other action metadata, and has an integral offset in `[-31536000, 0]`. The
+lower bound is exactly 31,536,000 seconds (365 elapsed days) before due. A
+positive, fractional, or lower out-of-range offset, any unsupported trigger
+projection, or any unsupported action variant, is still returned but carries `read_only:true` plus bounded `action`
+metadata. The absence of `read_only` is therefore an exact round-trip claim,
+not merely a successful EventKit read.
+
+Supplying `alarms` replaces the complete native alarm array. Omitting the field
+preserves that complete array whenever alarm intent is unchanged and the
+resulting due remains non-null; `null` and `[]` are equivalent explicit requests
+to clear every alarm. Clearing due while retaining a relative alarm is rejected;
+clear the alarms jointly or supply a complete non-relative replacement. When
+the existing array contains a read-only alarm, a
+non-empty replacement is rejected before dispatch because rebuilding the array
+would discard an unsupported offset or action. Explicit clear remains available
+when removing the complete array is the caller's intent. If a native read-only
+trigger cannot be represented losslessly, preservation remains fail-closed:
+the mutation may commit, but the receipt stays verification-pending rather than
+claiming an exact match from a lossy projection.
+
+Due-relative verification treats the anchor and alarm as one semantic unit. If
+the resulting Reminder contains a relative alarm, a due-only or alarm-only
+change compares both `due` and `alarms`; a list/account move compares the
+destination (`calendar_id` natively and `list_id` publicly), `due`, and
+`alarms`. After an EventKit save, the native helper performs a fresh
+`calendarItemWithIdentifier:` lookup and verifies the Reminder returned by that
+lookup instead of refreshing or trusting the pre-save object. The public Core
+Module then performs a separate exact identifier read and repeats the expanded
+comparison before returning a verified final Reminder or fresh Reference. A
+provider transformation observed by either read therefore cannot be reported
+as verified.
+
+The Python normalizer rejects Boolean offsets, and the Objective-C boundary
+independently checks `CFBooleanGetTypeID()` before treating an `NSNumber` as an
+integer. Direct native JSON inputs with either `offset_seconds:false` or
+`offset_seconds:true` fail before mutation instead of becoming zero- or
+one-second offsets.
+
 ## Private store surfaces
 
 The Reminders store is normally under:

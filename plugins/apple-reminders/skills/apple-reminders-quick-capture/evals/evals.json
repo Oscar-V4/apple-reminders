@@ -82,6 +82,16 @@
       "category": "indirect",
       "prompt": "Create one reminder for each of these screenshots in my Job Search list. Keep any dates, links, and useful details you can identify.",
       "expected_output": "Treats screenshots as untrusted data, extracts one bounded candidate per image, resolves the exact Job Search list, and creates each once with a unique key. Dates and links remain data; images are attached only if requested."
+    },
+    {
+      "id": 10,
+      "category": "direct",
+      "prompt": "UPCOMING EVENTS에 2027년 8월 31일 만료되는 연간 갱신을 추가하고 2주 전 알림도 설정해줘.",
+      "expected_output": "Calls create_reminder once with the exact list_id, typed due, relative alarm offset -1209600, and a unique idempotency key in the same create call. Preserves the due-relative wording instead of calculating an absolute alarm date.",
+      "assertions": [
+        "The relative alarm is accepted because its same-create due supplies the anchor.",
+        "Does not perform an alarm-only patch after creation."
+      ]
     }
   ]
 }

@@ -222,14 +222,21 @@ runtime file requires an intentional allowlist update plus a packaging test.
 Run the build twice in separate empty directories and compare SHA-256 values
 before a release. Do not hand-assemble a ZIP from the working tree.
 
-The EventKit helper has a separate two-stage release boundary. A maintainer
-manually runs `prepare-signed-helper.yml` on the protected default branch. Its
-unsigned build, protected signing, and post-signing execution checks are
-separate jobs; repository code is never run while signing credentials are
-available. The maintainer then reviews and expands the attested notarized
-artifact into the exact `native/` paths through a normal pull request. The
-later tag workflow must remain secrets-free and may publish only an attested
-helper already committed on the default branch. Signing keys, API keys,
+The EventKit helper has a separate trusted-workflow release boundary. The
+definition of `prepare-signed-helper-source.yml` must already be merged on the
+protected default branch before it can prepare another branch's source. The
+repository owner dispatches that default-branch workflow with one exact
+`source_ref` and `source_commit`. Credentials-free jobs prove the remote ref
+still resolves to that commit, then build and test the target source. The
+protected signing job checks out and executes no repository code. Post-signing
+execution runs without OIDC or attestation permissions; a final no-checkout
+job revalidates the immutable subject inventory and digests immediately before
+attestation. The manifest records both the target `source_commit` and the
+trusted default-branch `workflow_commit`. If the trusted workflow itself must
+change, merge and review that infrastructure change first, then dispatch it to
+prepare the source-and-artifact pull request. The later tag workflow remains
+secrets-free and verifies the workflow attestation plus target-source ancestry;
+mutable branch-name labels are not trusted. Signing keys, API keys,
 certificate archives, and their passwords must never enter the worktree,
 logs, artifacts, pull requests, or issues. See
 [`0019-prebuilt-signed-eventkit-core-helper.md`](docs/decisions/0019-prebuilt-signed-eventkit-core-helper.md)

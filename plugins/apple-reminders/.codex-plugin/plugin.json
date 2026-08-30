@@ -1,6 +1,6 @@
 {
   "name": "apple-reminders",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Turn meeting notes, screenshots, and plans into organized Apple Reminders from Codex on macOS.",
   "author": {
     "name": "Sungsoo Kim (Oscar-V4)",

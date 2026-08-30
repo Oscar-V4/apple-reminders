@@ -35,8 +35,8 @@ class EventKitHelperDistributionTests(unittest.TestCase):
             ).read_bytes()
         )
 
-        self.assertEqual(payload["CFBundleShortVersionString"], "0.5.0")
-        self.assertEqual(payload["CFBundleVersion"], "0.5.0")
+        self.assertEqual(payload["CFBundleShortVersionString"], "0.5.1")
+        self.assertEqual(payload["CFBundleVersion"], "0.5.1")
         self.assertEqual(
             payload["CFBundleIdentifier"],
             build_eventkit_helper_app.BUNDLE_IDENTIFIER,
@@ -69,6 +69,23 @@ class EventKitHelperDistributionTests(unittest.TestCase):
             Path("scripts/eventkit_helper_app_info.plist"),
             build_paths,
         )
+        self.assertIn(
+            Path(".github/workflows/prepare-signed-helper-source.yml"),
+            build_paths,
+        )
+        self.assertNotIn(
+            Path(".github/workflows/prepare-signed-helper.yml"),
+            build_paths,
+        )
+
+    def test_signed_helper_script_requires_trusted_workflow_commit(self) -> None:
+        script = (REPO_ROOT / "scripts" / "prepare_signed_eventkit_helper.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertGreaterEqual(script.count("--workflow-commit"), 4)
+        self.assertIn('workflow_commit=$2', script)
+        self.assertIn('--workflow-commit "$workflow_commit"', script)
 
     def test_force_build_rejects_output_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -215,7 +232,7 @@ class EventKitHelperDistributionTests(unittest.TestCase):
         probe.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS helper build requires Xcode")
-    def test_manifest_verification_requires_callers_source_commit(self) -> None:
+    def test_manifest_verification_requires_source_and_workflow_commits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = root / build_eventkit_helper_app.APP_NAME
@@ -232,7 +249,9 @@ class EventKitHelperDistributionTests(unittest.TestCase):
                 build_eventkit_helper_app.DEFAULT_PLUGIN_ROOT,
                 actual,
                 source_commit="a" * 40,
+                workflow_commit="c" * 40,
             )
+            self.assertEqual(manifest["workflow_commit"], "c" * 40)
             manifest_path = root / "eventkit-helper-build.json"
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -245,7 +264,73 @@ class EventKitHelperDistributionTests(unittest.TestCase):
                     manifest_path,
                     actual,
                     expected_source_commit="b" * 40,
+                    expected_workflow_commit="c" * 40,
                 )
+
+            with self.assertRaises(build_eventkit_helper_app.BuildFailure):
+                verify_eventkit_helper.verify_manifest(
+                    build_eventkit_helper_app.DEFAULT_PLUGIN_ROOT,
+                    manifest_path,
+                    actual,
+                    expected_source_commit="a" * 40,
+                    expected_workflow_commit="d" * 40,
+                )
+
+            with self.assertRaises(build_eventkit_helper_app.BuildFailure):
+                verify_eventkit_helper.build_manifest(
+                    build_eventkit_helper_app.DEFAULT_PLUGIN_ROOT,
+                    actual,
+                    source_commit="a" * 40,
+                    workflow_commit="not-a-commit",
+                )
+
+    def test_manifest_cli_forwards_the_trusted_workflow_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest_path = root / "eventkit-helper-build.json"
+            verification = {"app_name": build_eventkit_helper_app.APP_NAME}
+            manifest = {
+                "source_commit": "a" * 40,
+                "workflow_commit": "c" * 40,
+            }
+            with (
+                mock.patch.object(
+                    verify_eventkit_helper,
+                    "verify_app",
+                    return_value=verification,
+                ),
+                mock.patch.object(
+                    verify_eventkit_helper,
+                    "build_manifest",
+                    return_value=manifest,
+                ) as build_manifest,
+                mock.patch.object(
+                    verify_eventkit_helper,
+                    "_write_new_manifest",
+                    return_value=manifest_path,
+                ),
+                mock.patch("builtins.print"),
+            ):
+                exit_code = verify_eventkit_helper.main(
+                    [
+                        "--app",
+                        str(root / build_eventkit_helper_app.APP_NAME),
+                        "--write-manifest",
+                        str(manifest_path),
+                        "--source-commit",
+                        "a" * 40,
+                        "--workflow-commit",
+                        "c" * 40,
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        build_manifest.assert_called_once_with(
+            build_eventkit_helper_app.DEFAULT_PLUGIN_ROOT.resolve(),
+            verification,
+            source_commit="a" * 40,
+            workflow_commit="c" * 40,
+        )
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS helper build requires Xcode")
     def test_builder_normalizes_bundle_modes_under_restrictive_umask(self) -> None:

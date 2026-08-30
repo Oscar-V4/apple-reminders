@@ -1,4 +1,5 @@
 #import <CoreLocation/CoreLocation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <EventKit/EventKit.h>
 #import <Foundation/Foundation.h>
@@ -203,15 +204,34 @@ static NSDate *ParseISODate(NSString *value) {
     if (![value isKindOfClass:[NSString class]]) {
         return nil;
     }
-    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
-    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime |
-                              NSISO8601DateFormatWithFractionalSeconds;
-    NSDate *date = [formatter dateFromString:value];
-    if (date == nil) {
-        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-        date = [formatter dateFromString:value];
+    NSRegularExpression *expression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.([0-9]{1,3}))?(Z|[+-][0-9]{2}:[0-9]{2})$"
+                              options:0
+                                error:nil];
+    NSTextCheckingResult *match = [expression firstMatchInString:value
+                                                          options:0
+                                                            range:NSMakeRange(0, value.length)];
+    if (match == nil || !NSEqualRanges(match.range, NSMakeRange(0, value.length))) {
+        return nil;
     }
-    return date;
+    NSString *wholeSeconds = [value substringWithRange:[match rangeAtIndex:1]];
+    NSString *zone = [value substringWithRange:[match rangeAtIndex:3]];
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+    formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ssXXXXX";
+    formatter.lenient = NO;
+    NSDate *date = [formatter dateFromString:
+        [NSString stringWithFormat:@"%@%@", wholeSeconds, zone]];
+    NSRange fractionRange = [match rangeAtIndex:2];
+    if (date == nil || fractionRange.location == NSNotFound) {
+        return date;
+    }
+    NSString *fractionDigits = [value substringWithRange:fractionRange];
+    NSTimeInterval fraction = fractionDigits.doubleValue /
+        pow(10.0, (double)fractionDigits.length);
+    return [date dateByAddingTimeInterval:fraction];
 }
 
 static NSString *ISODateStringInTimeZone(NSDate *date, NSTimeZone *timeZone) {
@@ -297,6 +317,16 @@ static NSDictionary *Capabilities(void) {
             @"relative_alarm_writes" : @YES,
             @"single_typed_recurrence_rule" : @YES,
         },
+        @"alarm_write_contract" : @{
+            @"alarms_replace_complete_array" : @YES,
+            @"omitted_alarms_are_preserved" : @YES,
+            @"null_or_empty_alarms_clear_all" : @YES,
+            @"relative_due_anchor_required" : @YES,
+            @"relative_default_display_action_only" : @YES,
+            @"relative_integer_offset_minimum_seconds" : @(-31536000),
+            @"relative_integer_offset_maximum_seconds" : @0,
+            @"unsupported_existing_alarms_are_read_only" : @YES,
+        },
         @"safety" : @{
             @"bounded_fetch_required" : @YES,
             @"exact_calendar_and_item_ids_required" : @YES,
@@ -320,7 +350,8 @@ static NSDictionary *Capabilities(void) {
             @"EventKit item and calendar identifiers are not guaranteed to survive a full account sync.",
             @"Location alarm support depends on the destination account and calendar; save may fail with a structured EventKit error.",
             @"Only one recurrence rule is accepted because multi-rule Reminder semantics are not reliably represented by the Reminders UI.",
-            @"Relative alarm writes require an existing or same-request typed due date and accept offsets from one year before through the due instant.",
+            @"Relative alarm writes support only a default-display action with an integer offset from -31,536,000 through 0 seconds (365 elapsed days) and require an existing or same-request typed due anchor.",
+            @"Alarm writes replace the complete array; omit alarms to preserve it, use null or an empty array to clear it, and do not submit a non-empty replacement when an existing alarm is read-only.",
             @"Create idempotency must be supplied by the calling adapter because EventKit exposes no safe reminder field for an idempotency key.",
         ],
     };
@@ -687,39 +718,281 @@ static EKRecurrenceRule *RecurrenceFromJSON(NSDictionary *value) {
                                 end:end];
 }
 
+static NSString *AlarmActionTypeName(EKAlarmType type) {
+    switch (type) {
+        case EKAlarmTypeDisplay:
+            return @"display";
+        case EKAlarmTypeAudio:
+            return @"audio";
+        case EKAlarmTypeProcedure:
+            return @"procedure";
+        case EKAlarmTypeEmail:
+            return @"email";
+    }
+    return @"unknown";
+}
+
+static NSDictionary *AlarmActionJSON(EKAlarm *alarm) {
+    NSMutableDictionary *action = [@{
+        @"type" : AlarmActionTypeName(alarm.type),
+    } mutableCopy];
+    if (alarm.emailAddress != nil) {
+        action[@"email_address"] = alarm.emailAddress;
+    }
+    if (alarm.soundName != nil) {
+        action[@"sound_name"] = alarm.soundName;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (alarm.url != nil) {
+        action[@"url"] = alarm.url.absoluteString ?: @"";
+    }
+#pragma clang diagnostic pop
+    return action;
+}
+
+static BOOL AlarmHasFaithfullyWritableAction(EKAlarm *alarm) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL writable =
+        alarm.type == EKAlarmTypeDisplay &&
+        alarm.emailAddress == nil &&
+        alarm.soundName == nil &&
+        alarm.url == nil;
+#pragma clang diagnostic pop
+    return writable;
+}
+
+static BOOL RelativeOffsetIsFaithfullyWritable(NSTimeInterval offset) {
+    return isfinite(offset) &&
+        floor(offset) == offset &&
+        offset >= -31536000 &&
+        offset <= 0;
+}
+
+static BOOL AbsoluteDateProjectionIsExact(NSDate *date) {
+    if (date == nil) {
+        return NO;
+    }
+    double milliseconds = date.timeIntervalSinceReferenceDate * 1000.0;
+    if (!isfinite(milliseconds) || fabs(milliseconds - round(milliseconds)) > 0.001) {
+        return NO;
+    }
+    NSDate *roundTrip = ParseISODate(ISODateString(date));
+    return roundTrip != nil &&
+        fabs([roundTrip timeIntervalSinceDate:date]) <= 0.000001;
+}
+
+static BOOL LocationTitleIsFaithfullyWritable(NSString *title) {
+    if (title == nil) {
+        return NO;
+    }
+    NSCharacterSet *nonWhitespace =
+        [[NSCharacterSet whitespaceAndNewlineCharacterSet] invertedSet];
+    if ([title rangeOfCharacterFromSet:nonWhitespace].location == NSNotFound) {
+        return NO;
+    }
+    NSData *UTF32 = [title dataUsingEncoding:NSUTF32LittleEndianStringEncoding
+                        allowLossyConversion:NO];
+    return UTF32 != nil && UTF32.length <= 1000 * sizeof(uint32_t);
+}
+
+static BOOL LocationTriggerIsFaithfullyWritable(EKAlarm *alarm) {
+    if (alarm.structuredLocation == nil ||
+        (alarm.proximity != EKAlarmProximityEnter &&
+         alarm.proximity != EKAlarmProximityLeave)) {
+        return NO;
+    }
+    EKStructuredLocation *location = alarm.structuredLocation;
+    CLLocation *geo = location.geoLocation;
+    CLLocationCoordinate2D coordinate = geo == nil
+        ? CLLocationCoordinate2DMake(NAN, NAN)
+        : geo.coordinate;
+    CLLocationDistance radius = location.radius;
+    return LocationTitleIsFaithfullyWritable(location.title) &&
+        geo != nil &&
+        isfinite(coordinate.latitude) &&
+        isfinite(coordinate.longitude) &&
+        coordinate.latitude >= -90 && coordinate.latitude <= 90 &&
+        coordinate.longitude >= -180 && coordinate.longitude <= 180 &&
+        isfinite(radius) && radius >= 0 && radius <= 100000;
+}
+
+static BOOL AlarmIsFaithfullyWritable(EKAlarm *alarm) {
+    if (!AlarmHasFaithfullyWritableAction(alarm)) {
+        return NO;
+    }
+    if (alarm.absoluteDate != nil) {
+        return alarm.structuredLocation == nil &&
+            alarm.proximity == EKAlarmProximityNone &&
+            AbsoluteDateProjectionIsExact(alarm.absoluteDate);
+    }
+    if (alarm.structuredLocation != nil || alarm.proximity != EKAlarmProximityNone) {
+        return LocationTriggerIsFaithfullyWritable(alarm);
+    }
+    return RelativeOffsetIsFaithfullyWritable(alarm.relativeOffset);
+}
+
+static BOOL AlarmsContainReadOnly(NSArray<EKAlarm *> *alarms) {
+    for (EKAlarm *alarm in alarms ?: @[]) {
+        if (!AlarmIsFaithfullyWritable(alarm)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL AlarmActionProjectionIsExact(EKAlarm *alarm) {
+    switch (alarm.type) {
+        case EKAlarmTypeDisplay:
+            break;
+        case EKAlarmTypeAudio:
+            if (alarm.soundName == nil) {
+                return NO;
+            }
+            break;
+        case EKAlarmTypeProcedure:
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            if (alarm.url == nil) {
+                return NO;
+            }
+#pragma clang diagnostic pop
+            break;
+        case EKAlarmTypeEmail:
+            if (alarm.emailAddress == nil) {
+                return NO;
+            }
+            break;
+        default:
+            return NO;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL URLIsExact = alarm.url == nil || alarm.url.absoluteString != nil;
+#pragma clang diagnostic pop
+    return URLIsExact;
+}
+
+static BOOL AlarmTriggerProjectionIsExact(EKAlarm *alarm) {
+    BOOL activeLocation =
+        alarm.structuredLocation != nil &&
+        alarm.proximity != EKAlarmProximityNone;
+    if (activeLocation) {
+        EKStructuredLocation *location = alarm.structuredLocation;
+        CLLocation *geo = location.geoLocation;
+        CLLocationCoordinate2D coordinate = geo == nil
+            ? CLLocationCoordinate2DMake(NAN, NAN)
+            : geo.coordinate;
+        return alarm.absoluteDate == nil &&
+            (alarm.proximity == EKAlarmProximityEnter ||
+             alarm.proximity == EKAlarmProximityLeave) &&
+            location.title != nil &&
+            geo != nil &&
+            isfinite(coordinate.latitude) &&
+            isfinite(coordinate.longitude) &&
+            isfinite(location.radius) &&
+            location.radius >= 0;
+    }
+    if (alarm.absoluteDate != nil) {
+        return alarm.structuredLocation == nil &&
+            alarm.proximity == EKAlarmProximityNone &&
+            AbsoluteDateProjectionIsExact(alarm.absoluteDate);
+    }
+    return alarm.structuredLocation == nil &&
+        alarm.proximity == EKAlarmProximityNone &&
+        isfinite(alarm.relativeOffset);
+}
+
+static BOOL AlarmProjectionIsExact(EKAlarm *alarm) {
+    return AlarmActionProjectionIsExact(alarm) &&
+        AlarmTriggerProjectionIsExact(alarm);
+}
+
+static NSDictionary *AlarmJSONWithCapability(EKAlarm *alarm,
+                                             NSDictionary *base) {
+    if (AlarmIsFaithfullyWritable(alarm)) {
+        return base;
+    }
+    NSMutableDictionary *result = [base mutableCopy];
+    result[@"read_only"] = @YES;
+    result[@"action"] = AlarmActionJSON(alarm);
+    if (!AlarmProjectionIsExact(alarm)) {
+        result[@"_verification_unavailable"] = @YES;
+    }
+    return result;
+}
+
 static NSDictionary *AlarmJSON(EKAlarm *alarm) {
     if (alarm.structuredLocation != nil && alarm.proximity != EKAlarmProximityNone) {
         EKStructuredLocation *location = alarm.structuredLocation;
         CLLocation *geo = location.geoLocation;
+        CLLocationDegrees latitude = geo == nil ? NAN : geo.coordinate.latitude;
+        CLLocationDegrees longitude = geo == nil ? NAN : geo.coordinate.longitude;
         NSMutableDictionary *locationValue = [@{
             @"title" : location.title ?: @"",
-            @"latitude" : geo == nil ? (id)[NSNull null] : @(geo.coordinate.latitude),
-            @"longitude" : geo == nil ? (id)[NSNull null] : @(geo.coordinate.longitude),
+            @"latitude" : geo != nil && isfinite(latitude)
+                ? @(latitude)
+                : (id)[NSNull null],
+            @"longitude" : geo != nil && isfinite(longitude)
+                ? @(longitude)
+                : (id)[NSNull null],
         } mutableCopy];
-        if (location.radius > 0) {
+        if (isfinite(location.radius) && location.radius > 0) {
             locationValue[@"radius_meters"] = @(location.radius);
         }
-        return @{
+        return AlarmJSONWithCapability(alarm, @{
             @"kind" : @"location",
             @"proximity" : alarm.proximity == EKAlarmProximityEnter ? @"enter" : @"leave",
             @"location" : locationValue,
-        };
+        });
     }
     if (alarm.absoluteDate != nil) {
-        return @{
+        return AlarmJSONWithCapability(alarm, @{
             @"kind" : @"absolute",
             @"date_time" : ISODateString(alarm.absoluteDate),
-        };
+        });
     }
-    return @{
+    NSTimeInterval offset = alarm.relativeOffset;
+    return AlarmJSONWithCapability(alarm, @{
         @"kind" : @"relative",
-        @"offset_seconds" : @(alarm.relativeOffset),
-    };
+        @"offset_seconds" : isfinite(offset) ? @(offset) : (id)[NSNull null],
+    });
+}
+
+static void RequireExactAlarmKeys(NSDictionary *value,
+                                  NSArray<NSString *> *allowedKeys) {
+    NSSet *actual = [NSSet setWithArray:value.allKeys];
+    NSSet *allowed = [NSSet setWithArray:allowedKeys];
+    if (![actual isEqualToSet:allowed]) {
+        RaiseRequest(@"invalid_alarm",
+                     @"Alarm contains unsupported fields",
+                     @"invalid_request",
+                     @{});
+    }
+}
+
+static void RejectUnsupportedAlarmKeys(NSDictionary *value,
+                                       NSArray<NSString *> *allowedKeys) {
+    NSSet *actual = [NSSet setWithArray:value.allKeys];
+    NSSet *allowed = [NSSet setWithArray:allowedKeys];
+    if (![actual isSubsetOfSet:allowed]) {
+        RaiseRequest(@"invalid_alarm",
+                     @"Alarm contains unsupported fields",
+                     @"invalid_request",
+                     @{});
+    }
+}
+
+static BOOL NumberIsJSONBoolean(id value) {
+    return [value isKindOfClass:[NSNumber class]] &&
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
 }
 
 static EKAlarm *AlarmFromJSON(NSDictionary *value) {
     NSString *kind = RequiredString(value, @"kind");
     if ([kind isEqualToString:@"absolute"]) {
+        RequireExactAlarmKeys(value, @[ @"kind", @"date_time" ]);
         NSDate *date = ParseISODate(RequiredString(value, @"date_time"));
         if (date == nil) {
             RaiseRequest(@"invalid_alarm", @"Absolute alarm date is invalid", @"invalid_request", @{});
@@ -727,21 +1000,38 @@ static EKAlarm *AlarmFromJSON(NSDictionary *value) {
         return [EKAlarm alarmWithAbsoluteDate:date];
     }
     if ([kind isEqualToString:@"location"]) {
+        RequireExactAlarmKeys(value, @[ @"kind", @"proximity", @"location" ]);
         NSString *proximity = RequiredString(value, @"proximity");
         NSDictionary *locationValue = RequiredDictionary(value, @"location");
+        RejectUnsupportedAlarmKeys(
+            locationValue,
+            @[ @"title", @"latitude", @"longitude", @"radius_meters" ]);
         NSString *title = RequiredString(locationValue, @"title");
         NSNumber *latitude = locationValue[@"latitude"];
         NSNumber *longitude = locationValue[@"longitude"];
-        if (![latitude isKindOfClass:[NSNumber class]] || ![longitude isKindOfClass:[NSNumber class]]) {
-            RaiseRequest(@"invalid_alarm", @"Location coordinates must be numbers", @"invalid_request", @{});
+        if (![latitude isKindOfClass:[NSNumber class]] ||
+            ![longitude isKindOfClass:[NSNumber class]] ||
+            NumberIsJSONBoolean(latitude) || NumberIsJSONBoolean(longitude)) {
+            RaiseRequest(@"invalid_alarm", @"Location coordinates must be finite numbers", @"invalid_request", @{});
+        }
+        double latitudeValue = latitude.doubleValue;
+        double longitudeValue = longitude.doubleValue;
+        if (!LocationTitleIsFaithfullyWritable(title) ||
+            !isfinite(latitudeValue) || !isfinite(longitudeValue) ||
+            latitudeValue < -90 || latitudeValue > 90 ||
+            longitudeValue < -180 || longitudeValue > 180) {
+            RaiseRequest(@"invalid_alarm", @"Location title and coordinates are invalid", @"invalid_request", @{});
         }
         EKStructuredLocation *location = [EKStructuredLocation locationWithTitle:title];
-        location.geoLocation = [[CLLocation alloc] initWithLatitude:latitude.doubleValue
-                                                         longitude:longitude.doubleValue];
+        location.geoLocation = [[CLLocation alloc] initWithLatitude:latitudeValue
+                                                         longitude:longitudeValue];
         NSNumber *radius = locationValue[@"radius_meters"];
         if (radius != nil) {
-            if (![radius isKindOfClass:[NSNumber class]] || radius.doubleValue <= 0) {
-                RaiseRequest(@"invalid_alarm", @"Location radius must be positive", @"invalid_request", @{});
+            if (![radius isKindOfClass:[NSNumber class]] ||
+                NumberIsJSONBoolean(radius) ||
+                !isfinite(radius.doubleValue) ||
+                radius.doubleValue <= 0 || radius.doubleValue > 100000) {
+                RaiseRequest(@"invalid_alarm", @"Location radius must be greater than 0 and at most 100000 meters", @"invalid_request", @{});
             }
             location.radius = radius.doubleValue;
         }
@@ -757,8 +1047,11 @@ static EKAlarm *AlarmFromJSON(NSDictionary *value) {
         return alarm;
     }
     if ([kind isEqualToString:@"relative"]) {
+        RequireExactAlarmKeys(value, @[ @"kind", @"offset_seconds" ]);
         NSNumber *offset = value[@"offset_seconds"];
         if (![offset isKindOfClass:[NSNumber class]] ||
+            NumberIsJSONBoolean(offset) ||
+            !isfinite(offset.doubleValue) ||
             offset.doubleValue < -31536000 || offset.doubleValue > 0 ||
             floor(offset.doubleValue) != offset.doubleValue) {
             RaiseRequest(@"invalid_alarm",
@@ -787,10 +1080,24 @@ static BOOL AlarmValuesContainRelative(id values) {
     return NO;
 }
 
+static BOOL AlarmValuesContainReadOnly(id values) {
+    if (![values isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+    for (id raw in (NSArray *)values) {
+        if ([raw isKindOfClass:[NSDictionary class]] &&
+            [[(NSDictionary *)raw objectForKey:@"read_only"] isEqual:@YES]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static BOOL ReminderHasRelativeAlarm(EKReminder *reminder) {
     for (EKAlarm *alarm in reminder.alarms ?: @[]) {
         if (alarm.absoluteDate == nil &&
-            (alarm.structuredLocation == nil || alarm.proximity == EKAlarmProximityNone)) {
+            (alarm.structuredLocation == nil ||
+             alarm.proximity == EKAlarmProximityNone)) {
             return YES;
         }
     }
@@ -860,11 +1167,34 @@ static NSDictionary *UnchangedMutationReceipt(NSString *operation,
         nil);
 }
 
+static BOOL AlarmArraysMatch(id requested, id actual) {
+    if (![requested isKindOfClass:[NSArray class]] ||
+        ![actual isKindOfClass:[NSArray class]]) {
+        return [requested isEqual:actual];
+    }
+    NSMutableArray *unmatched = [(NSArray *)actual mutableCopy];
+    for (id expected in (NSArray *)requested) {
+        if ([expected isKindOfClass:[NSDictionary class]] &&
+            [[(NSDictionary *)expected objectForKey:@"_verification_unavailable"] isEqual:@YES]) {
+            return NO;
+        }
+        NSUInteger index = [unmatched indexOfObject:expected];
+        if (index == NSNotFound) {
+            return NO;
+        }
+        [unmatched removeObjectAtIndex:index];
+    }
+    return unmatched.count == 0;
+}
+
 static BOOL ProjectionMatches(NSDictionary *requested, NSDictionary *actual) {
     for (NSString *key in requested) {
         id expected = requested[key] ?: (id)[NSNull null];
         id observed = actual[key] ?: (id)[NSNull null];
-        if (![expected isEqual:observed]) {
+        BOOL matched = [key isEqualToString:@"alarms"]
+            ? AlarmArraysMatch(expected, observed)
+            : [expected isEqual:observed];
+        if (!matched) {
             return NO;
         }
     }
@@ -880,7 +1210,10 @@ static BOOL RequestedFieldsAlreadyMatch(NSDictionary *requested, NSDictionary *a
             [observed isKindOfClass:[NSArray class]] && [(NSArray *)observed count] == 0) {
             continue;
         }
-        if (![expected isEqual:observed]) {
+        BOOL matched = [key isEqualToString:@"alarms"]
+            ? AlarmArraysMatch(expected, observed)
+            : [expected isEqual:observed];
+        if (!matched) {
             return NO;
         }
     }
@@ -892,12 +1225,107 @@ static NSDictionary *ProjectionForKeys(NSDictionary *source, NSArray<NSString *>
     for (NSString *key in keys) {
         projection[key] = source[key] ?: (id)[NSNull null];
     }
+    BOOL touchesRelativeAlarmDependency =
+        [keys containsObject:@"due"] ||
+        [keys containsObject:@"alarms"] ||
+        [keys containsObject:@"calendar_id"];
+    BOOL containsReadOnlyAlarm = AlarmValuesContainReadOnly(source[@"alarms"]);
+    if ((touchesRelativeAlarmDependency || containsReadOnlyAlarm) &&
+        AlarmValuesContainRelative(source[@"alarms"])) {
+        projection[@"due"] = source[@"due"] ?: (id)[NSNull null];
+        projection[@"alarms"] = source[@"alarms"] ?: @[];
+    } else if (containsReadOnlyAlarm) {
+        projection[@"alarms"] = source[@"alarms"] ?: @[];
+    }
     return projection;
+}
+
+static id CanonicalDueVerificationValue(id raw) {
+    if (raw == [NSNull null]) {
+        return [NSNull null];
+    }
+    if (![raw isKindOfClass:[NSDictionary class]]) {
+        RaiseRequest(@"invalid_due", @"due must be an object or null", @"invalid_request", @{});
+    }
+    return DateComponentsJSON(ComponentsFromDueJSON((NSDictionary *)raw));
+}
+
+static NSArray *CanonicalAlarmVerificationValues(id raw) {
+    if (raw == [NSNull null]) {
+        return @[];
+    }
+    if (![raw isKindOfClass:[NSArray class]]) {
+        RaiseRequest(@"invalid_alarm", @"alarms must be an array or null", @"invalid_request", @{});
+    }
+    NSMutableArray *values = [NSMutableArray array];
+    for (id entry in (NSArray *)raw) {
+        if (![entry isKindOfClass:[NSDictionary class]]) {
+            RaiseRequest(@"invalid_alarm", @"Alarm entries must be objects", @"invalid_request", @{});
+        }
+        NSDictionary *alarm = (NSDictionary *)entry;
+        (void)AlarmFromJSON(alarm);
+        NSString *kind = alarm[@"kind"];
+        if ([kind isEqualToString:@"absolute"]) {
+            [values addObject:@{
+                @"kind" : @"absolute",
+                @"date_time" : ISODateString(ParseISODate(alarm[@"date_time"])),
+            }];
+        } else if ([kind isEqualToString:@"relative"]) {
+            [values addObject:@{
+                @"kind" : @"relative",
+                @"offset_seconds" : alarm[@"offset_seconds"],
+            }];
+        } else {
+            NSDictionary *location = alarm[@"location"];
+            NSMutableDictionary *canonicalLocation = [@{
+                @"title" : location[@"title"],
+                @"latitude" : @([location[@"latitude"] doubleValue]),
+                @"longitude" : @([location[@"longitude"] doubleValue]),
+            } mutableCopy];
+            if (location[@"radius_meters"] != nil) {
+                canonicalLocation[@"radius_meters"] =
+                    @([location[@"radius_meters"] doubleValue]);
+            }
+            [values addObject:@{
+                @"kind" : @"location",
+                @"proximity" : alarm[@"proximity"],
+                @"location" : canonicalLocation,
+            }];
+        }
+    }
+    return values;
+}
+
+static NSDictionary *VerificationSource(NSDictionary *before,
+                                        NSDictionary *desired,
+                                        NSDictionary *requestedFields) {
+    NSMutableDictionary *source = [desired mutableCopy];
+    id due = requestedFields[@"due"];
+    if (due != nil) {
+        source[@"due"] = CanonicalDueVerificationValue(due);
+    } else if (before[@"due"] != nil) {
+        source[@"due"] = before[@"due"];
+    }
+    id alarms = requestedFields[@"alarms"];
+    if (alarms != nil) {
+        source[@"alarms"] = CanonicalAlarmVerificationValues(alarms);
+    } else if (before[@"alarms"] != nil) {
+        source[@"alarms"] = before[@"alarms"];
+    }
+    return source;
 }
 
 static void ApplyMutableFields(EKReminder *reminder, NSDictionary *fields) {
     id due = fields[@"due"];
     id alarms = fields[@"alarms"];
+    if ([alarms isKindOfClass:[NSArray class]] &&
+        [(NSArray *)alarms count] > 0 &&
+        AlarmsContainReadOnly(reminder.alarms)) {
+        RaiseRequest(@"read_only_alarm_replace",
+                     @"A non-empty alarms replacement cannot preserve an existing read-only alarm; omit alarms or explicitly clear the array",
+                     @"invalid_request",
+                     @{});
+    }
     BOOL dueWillExist = due == nil ? reminder.dueDateComponents != nil : due != [NSNull null];
     BOOL relativeAlarmWillExist = alarms == nil
         ? ReminderHasRelativeAlarm(reminder)
@@ -1063,17 +1491,35 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
                                    NSDictionary *before,
                                    NSDictionary *expectedProjection,
                                    BOOL created) {
+    NSDictionary *fallbackTarget = @{
+        @"id" : before[@"id"] ?: @"",
+        @"calendar_id" : reminder.calendar.calendarIdentifier
+            ?: before[@"calendar_id"]
+            ?: @"",
+    };
     NSError *error = nil;
     if (![store saveReminder:reminder commit:YES error:&error]) {
         return EventKitFailure(operation, error ?: [NSError errorWithDomain:EKErrorDomain code:EKErrorInternalFailure userInfo:nil]);
     }
     @try {
-        BOOL refreshed = [reminder refresh];
-        NSDictionary *actual = ReminderJSON(reminder);
-        BOOL matched = refreshed && ProjectionMatches(expectedProjection, actual);
+        NSString *identifier = [reminder.calendarItemIdentifier copy];
+        fallbackTarget = @{
+            @"id" : identifier.length > 0 ? identifier : fallbackTarget[@"id"],
+            @"calendar_id" : fallbackTarget[@"calendar_id"],
+        };
+        [store reset];
+        EKCalendarItem *item = identifier.length == 0
+            ? nil
+            : [store calendarItemWithIdentifier:identifier];
+        EKReminder *readBack = [item isKindOfClass:[EKReminder class]]
+            ? (EKReminder *)item
+            : nil;
+        NSDictionary *actual = readBack == nil ? @{} : ReminderJSON(readBack);
+        BOOL matched = readBack != nil && ProjectionMatches(expectedProjection, actual);
         NSDictionary *verification = @{
             @"state" : matched ? @"read_back" : @"pending",
-            @"read_back" : @(refreshed),
+            @"read_back" : @(readBack != nil),
+            @"final_read" : @(readBack != nil),
             @"matched" : @(matched),
             @"write_performed" : @YES,
             @"target_fields" : expectedProjection.allKeys,
@@ -1090,7 +1536,7 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
                 operation,
                 operationID,
                 @"committed_verification_pending",
-                ReminderTarget(reminder),
+                readBack == nil ? fallbackTarget : ReminderTarget(readBack),
                 before,
                 actual,
                 verification,
@@ -1105,7 +1551,7 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
         return MutationReceipt(operation,
                                operationID,
                                @"verified",
-                               ReminderTarget(reminder),
+                               ReminderTarget(readBack),
                                before,
                                actual,
                                verification,
@@ -1116,6 +1562,7 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
         NSDictionary *verification = @{
             @"state" : @"pending",
             @"read_back" : @NO,
+            @"final_read" : @NO,
             @"matched" : @NO,
             @"write_performed" : @YES,
             @"target_fields" : expectedProjection.allKeys,
@@ -1131,7 +1578,7 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
             operation,
             operationID,
             @"committed_verification_pending",
-            ReminderTarget(reminder),
+            fallbackTarget,
             before,
             @{},
             verification,
@@ -1791,12 +2238,14 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
                 [keys addObject:key];
             }
         }
+        NSDictionary *verificationSource =
+            VerificationSource(nil, desired, request);
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              nil,
-                             ProjectionForKeys(desired, keys),
+                             ProjectionForKeys(verificationSource, keys),
                              YES);
     }
     if ([operation isEqualToString:@"delete_reminder"]) {
@@ -1816,12 +2265,14 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         }
         ApplyMutableFields(reminder, patch);
         NSDictionary *desired = ReminderJSON(reminder);
+        NSDictionary *verificationSource =
+            VerificationSource(before, desired, patch);
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             ProjectionForKeys(desired, patch.allKeys),
+                             ProjectionForKeys(verificationSource, patch.allKeys),
                              NO);
     }
     if ([operation isEqualToString:@"complete_reminder"] ||
@@ -1834,12 +2285,14 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         }
         reminder.completed = target;
         NSDictionary *desired = @{ @"completed" : @(target) };
+        NSDictionary *verificationSource =
+            VerificationSource(before, desired, @{});
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             desired,
+                             ProjectionForKeys(verificationSource, @[ @"completed" ]),
                              NO);
     }
     if ([operation isEqualToString:@"move_reminder"]) {
@@ -1850,12 +2303,15 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
             return UnchangedMutationReceipt(operation, operationID, reminder, before);
         }
         reminder.calendar = calendar;
+        NSDictionary *desired = ReminderJSON(reminder);
+        NSDictionary *verificationSource =
+            VerificationSource(before, desired, @{});
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             @{ @"calendar_id" : calendar.calendarIdentifier },
+                             ProjectionForKeys(verificationSource, @[ @"calendar_id" ]),
                              NO);
     }
     RaiseRequest(@"unsupported_operation", @"Operation is not implemented", @"unsupported", @{});
@@ -1873,7 +2329,452 @@ static int ExitCodeForResponse(NSDictionary *response) {
     return 2;
 }
 
-#if defined(APPLE_REMINDERS_ACCESS_CLASSIFICATION_TEST)
+#if defined(APPLE_REMINDERS_ALARM_ROUNDTRIP_TEST)
+@interface AlarmRoundTripFixture : NSObject
+@property(nonatomic) NSTimeInterval relativeOffset;
+@property(nonatomic, copy, nullable) NSDate *absoluteDate;
+@property(nonatomic, copy, nullable) EKStructuredLocation *structuredLocation;
+@property(nonatomic) EKAlarmProximity proximity;
+@property(nonatomic) EKAlarmType type;
+@property(nonatomic, copy, nullable) NSString *emailAddress;
+@property(nonatomic, copy, nullable) NSString *soundName;
+@property(nonatomic, copy, nullable) NSURL *url;
+@end
+
+@implementation AlarmRoundTripFixture
+@end
+
+@interface ReminderRoundTripFixture : NSObject
+@property(nonatomic, copy) NSArray<EKAlarm *> *alarms;
+@property(nonatomic, copy, nullable) NSDateComponents *dueDateComponents;
+@property(nonatomic, copy) NSArray<EKRecurrenceRule *> *recurrenceRules;
+@end
+
+@implementation ReminderRoundTripFixture
+@end
+
+static AlarmRoundTripFixture *AlarmFixture(NSTimeInterval offset,
+                                           EKAlarmType type,
+                                           NSString *emailAddress,
+                                           NSString *soundName,
+                                           NSURL *URL) {
+    AlarmRoundTripFixture *fixture = [[AlarmRoundTripFixture alloc] init];
+    fixture.relativeOffset = offset;
+    fixture.type = type;
+    fixture.emailAddress = emailAddress;
+    fixture.soundName = soundName;
+    fixture.url = URL;
+    fixture.proximity = EKAlarmProximityNone;
+    return fixture;
+}
+
+int main(void) {
+    @autoreleasepool {
+        AlarmRoundTripFixture *locationMissingGeo =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        locationMissingGeo.structuredLocation =
+            [EKStructuredLocation locationWithTitle:@""];
+        locationMissingGeo.proximity = EKAlarmProximityEnter;
+        AlarmRoundTripFixture *locationInfiniteRadius =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        EKStructuredLocation *infiniteRadiusLocation =
+            [EKStructuredLocation locationWithTitle:@"Office"];
+        infiniteRadiusLocation.geoLocation =
+            [[CLLocation alloc] initWithLatitude:37.5665 longitude:126.9780];
+        infiniteRadiusLocation.radius = INFINITY;
+        locationInfiniteRadius.structuredLocation = infiniteRadiusLocation;
+        locationInfiniteRadius.proximity = EKAlarmProximityLeave;
+        AlarmRoundTripFixture *locationOverlongTitle =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        NSString *overlongLocationTitle = [@"L" stringByPaddingToLength:1001
+                                                              withString:@"L"
+                                                         startingAtIndex:0];
+        EKStructuredLocation *overlongTitleLocation =
+            [EKStructuredLocation locationWithTitle:overlongLocationTitle];
+        overlongTitleLocation.geoLocation =
+            [[CLLocation alloc] initWithLatitude:37.5665 longitude:126.9780];
+        locationOverlongTitle.structuredLocation = overlongTitleLocation;
+        locationOverlongTitle.proximity = EKAlarmProximityEnter;
+        AlarmRoundTripFixture *locationWhitespaceTitle =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        EKStructuredLocation *whitespaceTitleLocation =
+            [EKStructuredLocation locationWithTitle:@" \t\n "];
+        whitespaceTitleLocation.geoLocation =
+            [[CLLocation alloc] initWithLatitude:37.5665 longitude:126.9780];
+        locationWhitespaceTitle.structuredLocation = whitespaceTitleLocation;
+        locationWhitespaceTitle.proximity = EKAlarmProximityEnter;
+        AlarmRoundTripFixture *dormantLocation =
+            AlarmFixture(-900, EKAlarmTypeDisplay, nil, nil, nil);
+        EKStructuredLocation *dormantLocationValue =
+            [EKStructuredLocation locationWithTitle:@"Dormant"];
+        dormantLocationValue.geoLocation =
+            [[CLLocation alloc] initWithLatitude:37.5665 longitude:126.9780];
+        dormantLocation.structuredLocation = dormantLocationValue;
+        AlarmRoundTripFixture *absoluteMillisecond =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        absoluteMillisecond.absoluteDate =
+            [NSDate dateWithTimeIntervalSince1970:1800000000.123];
+        AlarmRoundTripFixture *absoluteSubmillisecond =
+            AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil);
+        absoluteSubmillisecond.absoluteDate =
+            [NSDate dateWithTimeIntervalSince1970:1800000000.1234];
+        NSDictionary *fixtures = @{
+            @"safe" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"zero" : AlarmJSON((EKAlarm *)AlarmFixture(0, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"lower_bound" : AlarmJSON((EKAlarm *)AlarmFixture(-31536000, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"positive" : AlarmJSON((EKAlarm *)AlarmFixture(1, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"fractional" : AlarmJSON((EKAlarm *)AlarmFixture(-0.5, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"out_of_range" : AlarmJSON((EKAlarm *)AlarmFixture(-31536001, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"not_a_number" : AlarmJSON((EKAlarm *)AlarmFixture(NAN, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"infinite" : AlarmJSON((EKAlarm *)AlarmFixture(INFINITY, EKAlarmTypeDisplay, nil, nil, nil)),
+            @"audio" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeAudio, nil, @"Glass", nil)),
+            @"email" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeEmail, @"alerts@example.com", nil, nil)),
+            @"procedure" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeProcedure, nil, nil, [NSURL URLWithString:@"example:run"])),
+            @"procedure_hidden_url" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeProcedure, nil, nil, nil)),
+            @"display_with_sound" : AlarmJSON((EKAlarm *)AlarmFixture(-900, EKAlarmTypeDisplay, nil, @"Glass", nil)),
+            @"absolute_millisecond" : AlarmJSON((EKAlarm *)absoluteMillisecond),
+            @"absolute_submillisecond" : AlarmJSON((EKAlarm *)absoluteSubmillisecond),
+            @"location_missing_geo" : AlarmJSON((EKAlarm *)locationMissingGeo),
+            @"location_infinite_radius" : AlarmJSON((EKAlarm *)locationInfiniteRadius),
+            @"location_overlong_title" : AlarmJSON((EKAlarm *)locationOverlongTitle),
+            @"location_whitespace_title" : AlarmJSON((EKAlarm *)locationWhitespaceTitle),
+            @"dormant_location" : AlarmJSON((EKAlarm *)dormantLocation),
+        };
+        NSDictionary *safe = @{ @"kind" : @"relative", @"offset_seconds" : @(-900) };
+        NSDictionary *roundTrip = AlarmJSON(AlarmFromJSON(safe));
+        BOOL unsafeReinputRejected = NO;
+        @try {
+            (void)AlarmFromJSON(fixtures[@"audio"]);
+        } @catch (NSException *exception) {
+            unsafeReinputRejected = [exception.name isEqualToString:@"EventKitBridgeRequestError"];
+        }
+        ReminderRoundTripFixture *(^reminderWithReadOnlyAlarm)(void) = ^{
+            ReminderRoundTripFixture *reminder = [[ReminderRoundTripFixture alloc] init];
+            reminder.dueDateComponents = [[NSDateComponents alloc] init];
+            reminder.recurrenceRules = @[];
+            reminder.alarms = @[
+                (EKAlarm *)AlarmFixture(-900, EKAlarmTypeAudio, nil, @"Glass", nil),
+            ];
+            return reminder;
+        };
+        NSDictionary *replacement = @{
+            @"alarms" : @[ @{ @"kind" : @"relative", @"offset_seconds" : @(-1800) } ],
+        };
+        BOOL nonemptyReplacementRejected = NO;
+        @try {
+            ApplyMutableFields((EKReminder *)reminderWithReadOnlyAlarm(), replacement);
+        } @catch (NSException *exception) {
+            nonemptyReplacementRejected =
+                [exception.userInfo[@"code"] isEqualToString:@"read_only_alarm_replace"];
+        }
+        BOOL emptyArrayAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithReadOnlyAlarm(),
+                @{ @"alarms" : @[] });
+        } @catch (NSException *exception) {
+            emptyArrayAllowed = NO;
+        }
+        BOOL nullClearAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithReadOnlyAlarm(),
+                @{ @"alarms" : [NSNull null] });
+        } @catch (NSException *exception) {
+            nullClearAllowed = NO;
+        }
+        ReminderRoundTripFixture *(^reminderWithDueAndRelativeAlarm)(void) = ^{
+            ReminderRoundTripFixture *reminder = [[ReminderRoundTripFixture alloc] init];
+            reminder.dueDateComponents = [[NSDateComponents alloc] init];
+            reminder.recurrenceRules = @[];
+            reminder.alarms = @[
+                (EKAlarm *)AlarmFixture(-900, EKAlarmTypeDisplay, nil, nil, nil),
+            ];
+            return reminder;
+        };
+        BOOL clearDueRetainingRelativeRejected = NO;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithDueAndRelativeAlarm(),
+                @{ @"due" : [NSNull null] });
+        } @catch (NSException *exception) {
+            clearDueRetainingRelativeRejected =
+                [exception.userInfo[@"code"] isEqualToString:@"relative_alarm_requires_due"];
+        }
+        ReminderRoundTripFixture *dormantLocationReminder =
+            [[ReminderRoundTripFixture alloc] init];
+        dormantLocationReminder.dueDateComponents = [[NSDateComponents alloc] init];
+        dormantLocationReminder.recurrenceRules = @[];
+        dormantLocationReminder.alarms = @[(EKAlarm *)dormantLocation];
+        BOOL clearDueRetainingDormantLocationRejected = NO;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)dormantLocationReminder,
+                @{ @"due" : [NSNull null] });
+        } @catch (NSException *exception) {
+            clearDueRetainingDormantLocationRejected =
+                [exception.userInfo[@"code"] isEqualToString:@"relative_alarm_requires_due"];
+        }
+        BOOL clearDueReplacingAbsoluteAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithDueAndRelativeAlarm(),
+                @{
+                    @"due" : [NSNull null],
+                    @"alarms" : @[@{
+                        @"kind" : @"absolute",
+                        @"date_time" : @"2027-09-30T09:00:00Z",
+                    }],
+                });
+        } @catch (NSException *exception) {
+            clearDueReplacingAbsoluteAllowed = NO;
+        }
+        BOOL clearDueAndNullAlarmsAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithDueAndRelativeAlarm(),
+                @{ @"due" : [NSNull null], @"alarms" : [NSNull null] });
+        } @catch (NSException *exception) {
+            clearDueAndNullAlarmsAllowed = NO;
+        }
+        BOOL clearDueAndEmptyAlarmsAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)reminderWithDueAndRelativeAlarm(),
+                @{ @"due" : [NSNull null], @"alarms" : @[] });
+        } @catch (NSException *exception) {
+            clearDueAndEmptyAlarmsAllowed = NO;
+        }
+        ReminderRoundTripFixture *existingDue = [[ReminderRoundTripFixture alloc] init];
+        existingDue.dueDateComponents = [[NSDateComponents alloc] init];
+        existingDue.recurrenceRules = @[];
+        existingDue.alarms = @[];
+        BOOL addRelativeToExistingDueAllowed = YES;
+        @try {
+            ApplyMutableFields(
+                (EKReminder *)existingDue,
+                @{ @"alarms" : @[@{
+                    @"kind" : @"relative",
+                    @"offset_seconds" : @(-900),
+                }] });
+        } @catch (NSException *exception) {
+            addRelativeToExistingDueAllowed = NO;
+        }
+        NSDictionary *payload = @{
+            @"fixtures" : fixtures,
+            @"safe_round_trip" : roundTrip,
+            @"unsafe_reinput_rejected" : @(unsafeReinputRejected),
+            @"nonempty_replacement_rejected" : @(nonemptyReplacementRejected),
+            @"empty_array_allowed" : @(emptyArrayAllowed),
+            @"null_clear_allowed" : @(nullClearAllowed),
+            @"nonfinite_drift_matched" : @(AlarmArraysMatch(
+                @[ fixtures[@"not_a_number"] ],
+                @[ fixtures[@"infinite"] ])),
+            @"hidden_procedure_stable_matched" : @(AlarmArraysMatch(
+                @[ fixtures[@"procedure_hidden_url"] ],
+                @[ fixtures[@"procedure_hidden_url"] ])),
+            @"clear_due_retaining_relative_rejected" : @(clearDueRetainingRelativeRejected),
+            @"clear_due_retaining_dormant_location_rejected" : @(clearDueRetainingDormantLocationRejected),
+            @"clear_due_replacing_absolute_allowed" : @(clearDueReplacingAbsoluteAllowed),
+            @"clear_due_and_null_alarms_allowed" : @(clearDueAndNullAlarmsAllowed),
+            @"clear_due_and_empty_alarms_allowed" : @(clearDueAndEmptyAlarmsAllowed),
+            @"add_relative_to_existing_due_allowed" : @(addRelativeToExistingDueAllowed),
+        };
+        NSData *output = [NSJSONSerialization dataWithJSONObject:payload
+                                                         options:NSJSONWritingSortedKeys
+                                                           error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        [[NSFileHandle fileHandleWithStandardOutput]
+            writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        return 0;
+    }
+}
+#elif defined(APPLE_REMINDERS_ALARM_VALIDATION_TEST)
+int main(void) {
+    @autoreleasepool {
+        NSDictionary *response = nil;
+        @try {
+            NSData *input = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+            NSError *JSONError = nil;
+            id raw = [NSJSONSerialization JSONObjectWithData:input options:0 error:&JSONError];
+            if (![raw isKindOfClass:[NSDictionary class]]) {
+                RaiseRequest(@"invalid_json",
+                             JSONError.localizedDescription ?: @"Alarm must be a JSON object",
+                             @"invalid_request",
+                             @{});
+            }
+            NSArray *canonical = CanonicalAlarmVerificationValues(@[ raw ]);
+            response = BridgeResponse(@"alarm_validation",
+                                      @"verified",
+                                      @{ @"alarm" : canonical[0] },
+                                      nil);
+        } @catch (NSException *exception) {
+            response = Failure(@"alarm_validation",
+                               exception.userInfo[@"code"] ?: @"native_exception",
+                               exception.reason ?: @"Invalid alarm",
+                               exception.userInfo[@"category"] ?: @"runtime",
+                               exception.userInfo[@"details"] ?: @{});
+        }
+        NSData *output = [NSJSONSerialization dataWithJSONObject:response
+                                                         options:NSJSONWritingSortedKeys
+                                                           error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        [[NSFileHandle fileHandleWithStandardOutput]
+            writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        return ExitCodeForResponse(response);
+    }
+}
+#elif defined(APPLE_REMINDERS_VERIFICATION_PROJECTION_TEST)
+int main(void) {
+    @autoreleasepool {
+        NSDictionary *desired = @{
+            @"calendar_id" : @"CALENDAR-2",
+            @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-09-30" },
+            @"alarms" : @[ @{ @"kind" : @"relative", @"offset_seconds" : @(-1209600) } ],
+        };
+        NSDictionary *dueProjection = ProjectionForKeys(desired, @[ @"due" ]);
+        NSDictionary *alarmProjection = ProjectionForKeys(desired, @[ @"alarms" ]);
+        NSDictionary *moveProjection = ProjectionForKeys(desired, @[ @"calendar_id" ]);
+        NSDictionary *providerDrift = @{
+            @"calendar_id" : @"CALENDAR-2",
+            @"due" : desired[@"due"],
+            @"alarms" : @[],
+        };
+        NSDictionary *providerDueDrift = @{
+            @"calendar_id" : @"CALENDAR-2",
+            @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-10-01" },
+            @"alarms" : desired[@"alarms"],
+        };
+        NSDictionary *before = @{
+            @"calendar_id" : @"CALENDAR-1",
+            @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-08-31" },
+            @"alarms" : desired[@"alarms"],
+        };
+        NSDictionary *setterDriftDesired = @{
+            @"calendar_id" : @"CALENDAR-1",
+            @"due" : desired[@"due"],
+            @"alarms" : @[],
+        };
+        NSDictionary *setterDriftSource = VerificationSource(
+            before,
+            setterDriftDesired,
+            @{ @"due" : desired[@"due"] });
+        NSDictionary *setterDriftProjection =
+            ProjectionForKeys(setterDriftSource, @[ @"due" ]);
+        NSDictionary *permutedAlarms = @{
+            @"alarms" : @[
+                @{ @"kind" : @"absolute", @"date_time" : @"2027-08-17T00:00:00.000Z" },
+                desired[@"alarms"][0],
+            ],
+        };
+        NSDictionary *requestedAlarmOrder = @{
+            @"alarms" : @[
+                desired[@"alarms"][0],
+                @{ @"kind" : @"absolute", @"date_time" : @"2027-08-17T00:00:00.000Z" },
+            ],
+        };
+        NSDictionary *readOnlySource = @{
+            @"calendar_id" : @"CALENDAR-2",
+            @"completed" : @YES,
+            @"due" : [NSNull null],
+            @"alarms" : @[@{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+                @"read_only" : @YES,
+                @"action" : @{
+                    @"type" : @"procedure",
+                    @"url" : @"example:before",
+                },
+            }],
+        };
+        NSDictionary *readOnlyMoveProjection =
+            ProjectionForKeys(readOnlySource, @[ @"calendar_id" ]);
+        NSDictionary *readOnlyCompletionProjection =
+            ProjectionForKeys(readOnlySource, @[ @"completed" ]);
+        NSDictionary *readOnlyActionDrift = @{
+            @"calendar_id" : @"CALENDAR-2",
+            @"completed" : @YES,
+            @"due" : [NSNull null],
+            @"alarms" : @[@{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+                @"read_only" : @YES,
+                @"action" : @{
+                    @"type" : @"procedure",
+                    @"url" : @"example:after",
+                },
+            }],
+        };
+        NSDictionary *timedDueSource = VerificationSource(
+            nil,
+            @{},
+            @{ @"due" : @{
+                @"kind" : @"timed",
+                @"date_time" : @"2027-01-15T08:00:00.123+09:00",
+                @"time_zone" : @"Asia/Seoul",
+            } });
+        NSDictionary *fractionalAlarmRequest = @{
+            @"alarms" : @[@{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-01-15T08:00:00.123+09:00",
+            }],
+        };
+        NSDictionary *fractionalAlarmSetterDrift = @{
+            @"alarms" : @[@{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-01-14T23:00:00.000Z",
+            }],
+        };
+        NSDictionary *fractionalAlarmSource = VerificationSource(
+            nil,
+            fractionalAlarmSetterDrift,
+            fractionalAlarmRequest);
+        NSDictionary *fractionalAlarmProjection =
+            ProjectionForKeys(fractionalAlarmSource, @[ @"alarms" ]);
+        NSDictionary *timedDueSetterDrift = @{
+            @"due" : @{
+                @"kind" : @"timed",
+                @"date_time" : @"2027-01-15T08:00:00.000+09:00",
+                @"time_zone" : @"Asia/Seoul",
+            },
+        };
+        NSDate *parsedFractionalDate =
+            ParseISODate(@"2027-01-15T08:00:00.123+09:00");
+        NSDictionary *fixtures = @{
+            @"due_projection" : dueProjection,
+            @"alarm_projection" : alarmProjection,
+            @"move_projection" : moveProjection,
+            @"due_drift_matched" : @(ProjectionMatches(dueProjection, providerDrift)),
+            @"alarm_drift_matched" : @(ProjectionMatches(alarmProjection, providerDueDrift)),
+            @"move_drift_matched" : @(ProjectionMatches(moveProjection, providerDrift)),
+            @"setter_drift_matched" : @(ProjectionMatches(setterDriftProjection, setterDriftDesired)),
+            @"permuted_alarms_matched" : @(ProjectionMatches(requestedAlarmOrder, permutedAlarms)),
+            @"read_only_move_projection" : readOnlyMoveProjection,
+            @"read_only_completion_projection" : readOnlyCompletionProjection,
+            @"read_only_move_drift_matched" : @(ProjectionMatches(readOnlyMoveProjection, readOnlyActionDrift)),
+            @"read_only_completion_drift_matched" : @(ProjectionMatches(readOnlyCompletionProjection, readOnlyActionDrift)),
+            @"timed_due" : timedDueSource[@"due"],
+            @"fractional_alarm_projection" : fractionalAlarmProjection,
+            @"fractional_alarm_setter_drift_matched" : @(
+                ProjectionMatches(fractionalAlarmProjection, fractionalAlarmSetterDrift)),
+            @"timed_due_setter_drift_matched" : @(
+                ProjectionMatches(@{ @"due" : timedDueSource[@"due"] }, timedDueSetterDrift)),
+            @"parsed_fractional_date" : ISODateString(parsedFractionalDate),
+            @"parsed_fractional_seconds" : @(
+                parsedFractionalDate.timeIntervalSince1970 -
+                floor(parsedFractionalDate.timeIntervalSince1970)),
+            @"before" : before,
+        };
+        NSData *output = [NSJSONSerialization dataWithJSONObject:fixtures
+                                                         options:NSJSONWritingSortedKeys
+                                                           error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        [[NSFileHandle fileHandleWithStandardOutput]
+            writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        return 0;
+    }
+}
+#elif defined(APPLE_REMINDERS_ACCESS_CLASSIFICATION_TEST)
 int main(void) {
     @autoreleasepool {
         NSError *authorizationError =

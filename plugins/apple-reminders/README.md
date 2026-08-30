@@ -59,10 +59,10 @@ installation, and restart Codex. You can skip this for Core reminders.
 
 ## Quick Start
 
-Install the pinned 0.5.0 repo-marketplace release:
+Install the pinned 0.5.1 repo-marketplace release:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 

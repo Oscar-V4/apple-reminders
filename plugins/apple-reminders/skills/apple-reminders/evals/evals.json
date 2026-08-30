@@ -16,10 +16,6 @@
     "expected_behavior": "Searches bounded candidates, disambiguates duplicates, reads the exact Reminder for a fresh opaque reference, calls delete_reminder with that reference, never falls back to AppleScript or the private DB, and requires local-absence evidence."
   },
   {
-    "prompt": "첨부파일이 아이폰에 안 뜨는 미리알림들을 찾아서 고칠 수 있는지 봐줘.",
-    "expected_behavior": "Runs bounded native attachment inspection and diagnosis, presents local-only or uncertain evidence, and explains that bulk repair apply remains withheld without confusing exact Recently Deleted recovery with general attachment repair."
-  },
-  {
     "prompt": "화면 위 4개를 지웠다가 복구하고 사진을 하나의 미리알림에 모아줘.",
     "expected_behavior": "Treats top four as literal current UI identity, maps every observed row to one exact ID, and stops rather than substituting API order unless the user explicitly approves that reinterpretation. It confirms that one Reminder with separate copied images is intended, completes and verifies every copy before any separately authorized deletion, and if sources are already deleted follows snapshot-bound discovery plus fresh del1 recovery one item at a time."
   },
@@ -30,5 +26,17 @@
   {
     "prompt": "지난주 완료한 일 브리핑을 우선순위까지 사람이 읽기 쉽게 보여줘.",
     "expected_behavior": "Routes to the daily-brief workflow, fetches completed reminders with explicit completion_start and completion_end bounds no wider than 90 days, renders a separate Completed section, preserves timed timezone semantics, and labels Apple/EventKit priorities as high, medium, or low with their numeric values rather than bare pN markers."
+  },
+  {
+    "prompt": "기존 '연간 갱신' 미리알림의 마감일은 그대로 두고 알람만 2주 전으로 바꿔줘.",
+    "expected_behavior": "Performs an exact pre-read immediately before mutation, confirms the existing due and complete current alarm array, and uses the returned fresh reference. Treats alarms as a complete-array replacement. If any existing alarm is read_only:true, stops and reports that the requested non-empty replacement is unsafe instead of issuing an alarm mutation. Omission preserves alarms whenever alarm-array intent is unchanged and the resulting due remains non-null; null/[] is used only when the user explicitly requests clearing all alarms."
+  },
+  {
+    "prompt": "상대 알람이 있는 '연간 갱신' 미리알림을 업무 목록으로 옮겨줘.",
+    "expected_behavior": "Reads the exact Reminder for a fresh reference, performs the exact-list move, and accepts verified only when a fresh identifier-based read matches the destination plus the due and complete alarms array. Reports committed_verification_pending if any dependent state drifts."
+  },
+  {
+    "prompt": "상대 알람이 있는 '연간 갱신' 미리알림의 마감일만 없애고 알람은 그대로 둬.",
+    "expected_behavior": "Reads the exact Reminder and recognizes that retaining a relative alarm while setting due:null is invalid. Does not dispatch that patch. Explains that the user must retain or replace the due anchor, explicitly clear alarms with null/[], or provide a complete non-relative alarm replacement; never silently removes the alarm."
   }
 ]

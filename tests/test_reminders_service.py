@@ -148,6 +148,47 @@ class InMemoryAdapter:
         )
 
 
+class ReadOnlyProcedureAlarmAdapter(InMemoryAdapter):
+    def __init__(self, *, drift_action_metadata: bool = False) -> None:
+        super().__init__()
+        self._drift_action_metadata = drift_action_metadata
+        current = self._reminders["reminder-1"]
+        self._reminders["reminder-1"] = Snapshot(
+            reminder={
+                **dict(current.reminder),
+                "alarms": [
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-08-17T00:00:00.000Z",
+                        "read_only": True,
+                        "action": {
+                            "type": "procedure",
+                            "url": "example:before",
+                        },
+                    }
+                ],
+            },
+            guard=current.guard,
+        )
+
+    def apply_action(
+        self,
+        guard: Guard,
+        action: PatchAction | SetCompletionAction | MoveToListAction,
+    ) -> MutationOutcome:
+        outcome = super().apply_action(guard, action)
+        if not self._drift_action_metadata:
+            return outcome
+        current = self._reminders[guard.reminder_id]
+        after = deepcopy(dict(current.reminder))
+        after["alarms"][0]["action"]["url"] = "example:after"
+        self._reminders[guard.reminder_id] = Snapshot(
+            reminder=after,
+            guard=current.guard,
+        )
+        return outcome
+
+
 class CoreModuleTests(unittest.TestCase):
     def test_field_matcher_accepts_equivalent_timezones_and_alarm_order(self) -> None:
         expected = {
@@ -181,6 +222,188 @@ class CoreModuleTests(unittest.TestCase):
                 {"alarms": None, "recurrence_rules": None},
             )
         )
+
+    def test_relative_alarm_action_drift_never_matches_display_write(self) -> None:
+        expected = {
+            "alarms": [{"kind": "relative", "offset_seconds": -900}]
+        }
+        actual = {
+            "alarms": [
+                {
+                    "kind": "relative",
+                    "offset_seconds": -900,
+                    "read_only": True,
+                    "action": {"type": "audio", "sound_name": "Glass"},
+                }
+            ]
+        }
+
+        self.assertFalse(reminder_matches_fields(actual, expected))
+
+    def test_lossy_read_only_alarm_projection_is_never_verifiable(self) -> None:
+        alarm = {
+            "kind": "relative",
+            "offset_seconds": None,
+            "read_only": True,
+            "_verification_unavailable": True,
+            "action": {"type": "display"},
+        }
+
+        self.assertFalse(
+            reminder_matches_fields(
+                {"alarms": [deepcopy(alarm)]},
+                {"alarms": [deepcopy(alarm)]},
+            )
+        )
+
+    def test_nonempty_alarm_replacement_rejects_existing_read_only_alarm(self) -> None:
+        class ReadOnlyAlarmAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.apply_calls = 0
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "alarms": [
+                            {
+                                "kind": "relative",
+                                "offset_seconds": -900,
+                                "read_only": True,
+                                "action": {
+                                    "type": "audio",
+                                    "sound_name": "Glass",
+                                },
+                            }
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                self.apply_calls += 1
+                return super().apply_action(guard, action)
+
+        adapter = ReadOnlyAlarmAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        with self.assertRaises(ActionRejected):
+            module.change(
+                initial.reference,
+                {
+                    "kind": "patch",
+                    "patch": {
+                        "alarms": [
+                            {"kind": "relative", "offset_seconds": -1_800}
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(adapter.apply_calls, 0)
+
+    def test_due_clear_requires_joint_relative_alarm_clear_or_replacement(self) -> None:
+        class RelativeAlarmAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.apply_calls = 0
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "alarms": [
+                            {"kind": "relative", "offset_seconds": -900}
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                self.apply_calls += 1
+                return super().apply_action(guard, action)
+
+        adapter = RelativeAlarmAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        with self.assertRaises(ActionRejected):
+            module.change(
+                initial.reference,
+                {"kind": "patch", "patch": {"due": None}},
+            )
+
+        self.assertEqual(adapter.apply_calls, 0)
+
+        preserving_adapter = RelativeAlarmAdapter()
+        preserving_module = CoreModule(
+            preserving_adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        preserving_initial = preserving_module.read_exact("reminder-1")
+        preserving_result = preserving_module.change(
+            preserving_initial.reference,
+            {
+                "kind": "patch",
+                "patch": {
+                    "due": {"kind": "all_day", "date": "2027-09-30"}
+                },
+            },
+        )
+        self.assertEqual(preserving_result.receipt["status"], "verified")
+        self.assertEqual(
+            preserving_result.final_reminder["alarms"],
+            [{"kind": "relative", "offset_seconds": -900}],
+        )
+
+        allowed_alarm_values = (
+            None,
+            [],
+            [
+                {
+                    "kind": "absolute",
+                    "date_time": "2027-09-30T09:00:00.000Z",
+                }
+            ],
+        )
+        for alarms in allowed_alarm_values:
+            with self.subTest(alarms=alarms):
+                allowed_adapter = RelativeAlarmAdapter()
+                allowed_module = CoreModule(
+                    allowed_adapter,
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                allowed_initial = allowed_module.read_exact("reminder-1")
+                result = allowed_module.change(
+                    allowed_initial.reference,
+                    {
+                        "kind": "patch",
+                        "patch": {"due": None, "alarms": alarms},
+                    },
+                )
+
+                self.assertEqual(result.receipt["status"], "verified")
+                self.assertEqual(allowed_adapter.apply_calls, 1)
 
     def test_adapter_exception_after_dispatch_consumes_the_reference(self) -> None:
         class ThrowingAdapter(InMemoryAdapter):
@@ -381,6 +604,266 @@ class CoreModuleTests(unittest.TestCase):
         self.assertEqual(result.reference_error, "final_state_mismatch")
         with self.assertRaises(ReferenceRejected):
             module.revalidate_reference(initial.reference)
+
+    def test_due_only_change_rejects_final_read_that_loses_relative_alarm(self) -> None:
+        class RelativeAlarmDriftingAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "list_id": "list-alpha",
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "alarms": [
+                            {"kind": "relative", "offset_seconds": -1_209_600}
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                current = self._reminders[guard.reminder_id]
+                self._reminders[guard.reminder_id] = Snapshot(
+                    reminder={**dict(current.reminder), "alarms": []},
+                    guard=current.guard,
+                )
+                return outcome
+
+        module = CoreModule(
+            RelativeAlarmDriftingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {
+                "kind": "patch",
+                "patch": {"due": {"kind": "all_day", "date": "2027-09-30"}},
+            },
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_alarm_only_change_rejects_final_read_that_moves_due_anchor(self) -> None:
+        class DueAnchorDriftingAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "list_id": "list-alpha",
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "alarms": [
+                            {"kind": "relative", "offset_seconds": -1_209_600}
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                current = self._reminders[guard.reminder_id]
+                self._reminders[guard.reminder_id] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "due": {"kind": "all_day", "date": "2027-09-01"},
+                    },
+                    guard=current.guard,
+                )
+                return outcome
+
+        module = CoreModule(
+            DueAnchorDriftingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {
+                "kind": "patch",
+                "patch": {
+                    "alarms": [
+                        {"kind": "relative", "offset_seconds": -604_800}
+                    ]
+                },
+            },
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_move_rejects_final_read_that_converts_relative_alarm(self) -> None:
+        class MoveDriftingAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "list_id": "list-alpha",
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "alarms": [
+                            {"kind": "relative", "offset_seconds": -1_209_600}
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                current = self._reminders[guard.reminder_id]
+                self._reminders[guard.reminder_id] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-17T00:00:00.000Z",
+                            }
+                        ],
+                    },
+                    guard=current.guard,
+                )
+                return outcome
+
+        module = CoreModule(
+            MoveDriftingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "move_to_list", "list_id": "list-beta"},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_move_rejects_read_only_procedure_alarm_metadata_drift(self) -> None:
+        module = CoreModule(
+            ReadOnlyProcedureAlarmAdapter(drift_action_metadata=True),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "move_to_list", "list_id": "list-beta"},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_unrelated_patch_rejects_read_only_procedure_alarm_metadata_drift(
+        self,
+    ) -> None:
+        module = CoreModule(
+            ReadOnlyProcedureAlarmAdapter(drift_action_metadata=True),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "patch", "patch": {"title": "Changed title"}},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_completion_rejects_read_only_procedure_alarm_metadata_drift(
+        self,
+    ) -> None:
+        module = CoreModule(
+            ReadOnlyProcedureAlarmAdapter(drift_action_metadata=True),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "set_completion", "completed": True},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_explicit_alarm_clear_does_not_preserve_a_read_only_alarm(self) -> None:
+        for cleared in (None, []):
+            with self.subTest(cleared=cleared):
+                module = CoreModule(
+                    ReadOnlyProcedureAlarmAdapter(),
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                initial = module.read_exact("reminder-1")
+
+                result = module.change(
+                    initial.reference,
+                    {"kind": "patch", "patch": {"alarms": cleared}},
+                )
+
+                self.assertEqual(result.reference, "rev1.opaque-2")
+                self.assertIsNotNone(result.final_reminder)
+                self.assertEqual(result.final_reminder["alarms"], cleared)
+
+    def test_implicit_alarm_preservation_accepts_unchanged_read_only_metadata(
+        self,
+    ) -> None:
+        actions = (
+            {"kind": "patch", "patch": {"title": "Changed title"}},
+            {"kind": "set_completion", "completed": True},
+            {"kind": "move_to_list", "list_id": "list-beta"},
+        )
+
+        for action in actions:
+            with self.subTest(action=action):
+                module = CoreModule(
+                    ReadOnlyProcedureAlarmAdapter(),
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                initial = module.read_exact("reminder-1")
+
+                result = module.change(initial.reference, action)
+
+                self.assertEqual(result.reference, "rev1.opaque-2")
+                self.assertIsNotNone(result.final_reminder)
+                self.assertEqual(
+                    result.final_reminder["alarms"][0]["action"],
+                    {"type": "procedure", "url": "example:before"},
+                )
 
     def test_closed_completion_and_list_move_actions_reach_the_adapter(self) -> None:
         cases = (

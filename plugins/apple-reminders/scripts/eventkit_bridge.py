@@ -138,7 +138,7 @@ BUNDLED_HELPER_SOURCE_RELATIVE_PATHS = (
 )
 BUNDLED_HELPER_BUILD_INPUT_RELATIVE_PATHS = frozenset(
     (
-        ".github/workflows/prepare-signed-helper.yml",
+        ".github/workflows/prepare-signed-helper-source.yml",
         "scripts/build_eventkit_helper_app.py",
         "scripts/eventkit_helper_app_info.plist",
         "scripts/prepare_signed_eventkit_helper.sh",
@@ -168,6 +168,7 @@ BUNDLED_HELPER_MANIFEST_KEYS = frozenset(
         "source_commit",
         "source_files",
         "team_id",
+        "workflow_commit",
     )
 )
 
@@ -1391,6 +1392,13 @@ def _load_bundled_helper_manifest(
     ):
         raise BundledHelperUnavailable(
             "bundled helper source commit provenance is invalid"
+        )
+    workflow_commit = manifest.get("workflow_commit")
+    if not isinstance(workflow_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", workflow_commit
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper workflow commit provenance is invalid"
         )
     return manifest, hashlib.sha256(raw).hexdigest(), source_files
 

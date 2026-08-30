@@ -38,7 +38,9 @@ even though optional MCP `outputSchema` descriptors are omitted from
 5. Timed and all-day due values remain distinct from alarms. Time zones,
    recurrence, absolute/due-anchored relative/coordinate-backed location
    alarms, and priority keep typed contracts. Relative alarms preserve their
-   signed offset and require an existing or same-request due value.
+   signed offset and require an existing or same-request due value. The public
+   writable relative subset is an integral offset from `-31536000` through `0`,
+   exactly 31,536,000 seconds (365 elapsed days) before due at the lower bound.
 6. A non-null URL create/change preserves EventKit metadata, verifies the
    user-visible native URL attachment, and then performs a final exact EventKit
    read. An unavailable final read remains verification-pending; a failed
@@ -236,6 +238,34 @@ even though optional MCP `outputSchema` descriptors are omitted from
     unknown outcome and require read-before-retry resolution. A later phase's
     launch failure cannot erase an earlier phase's confirmed mutation, and a
     launched helper's missing mutation marker is never interpreted as no-write.
+33. Due-relative verification expands semantic dependencies at both write
+    boundaries. If the resulting Reminder contains a relative alarm, changing
+    either `due` or `alarms` verifies both fields. Moving such a Reminder
+    verifies the destination (`calendar_id` at the native boundary and
+    `list_id` at the public boundary), `due`, and `alarms`. The EventKit helper
+    looks the saved Reminder up again by `calendarItemIdentifier` rather than
+    trusting the in-memory object, and the public Core Module independently
+    performs a fresh exact read with the same expanded comparison before it can
+    report `verified` or issue a fresh `rev1`. Provider removal, clamping, or
+    conversion of the alarm therefore leaves verification pending and issues
+    no writable Reference.
+34. A relative alarm is presented without `read_only` only when it is exactly
+    round-trippable as the public bare default-display form: no email, sound,
+    URL, procedure, or other action metadata, and an integral offset in
+    `[-31536000, 0]`. Positive, fractional, and lower out-of-range offsets, plus
+    unsupported trigger projections, non-display actions, or display alarms carrying action metadata, remain
+    readable as `read_only:true` and include bounded `action` metadata. Supplying
+    `alarms` is a complete-array replacement; omitting it preserves the complete
+    existing array whenever alarm intent is unchanged and the resulting due is
+    non-null, while `null` or `[]` explicitly clears every alarm. Clearing due
+    while retaining a relative alarm is rejected and must be paired with a
+    complete alarm clear or non-relative replacement. A
+    non-empty replacement against an existing read-only alarm is rejected
+    before mutation rather than silently discarding unsupported semantics.
+35. Both normalization layers reject native JSON Booleans for
+    `offset_seconds`. In particular, direct helper inputs using either `false`
+    or `true` fail before mutation; Foundation's Boolean `NSNumber` bridge is
+    never accepted as the integer zero or one.
 
 ## Deliberately withheld behavior
 

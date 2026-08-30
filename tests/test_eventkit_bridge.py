@@ -693,6 +693,455 @@ class EventKitRequestValidationTests(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS EventKit")
+    def test_native_verification_projection_tracks_relative_alarm_dependencies(
+        self,
+    ) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "relative-alarm-contract"
+            compiled = subprocess.run(
+                [
+                    "clang",
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-DAPPLE_REMINDERS_VERIFICATION_PROJECTION_TEST",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "EventKit",
+                    "-framework",
+                    "CoreLocation",
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            completed = subprocess.run(
+                [str(binary)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        payload = json.loads(completed.stdout)
+        expected_due = {"kind": "all_day", "date": "2027-09-30"}
+        expected_alarms = [
+            {"kind": "relative", "offset_seconds": -1_209_600}
+        ]
+        self.assertEqual(
+            payload["due_projection"],
+            {"due": expected_due, "alarms": expected_alarms},
+        )
+        self.assertEqual(
+            payload["alarm_projection"],
+            {"due": expected_due, "alarms": expected_alarms},
+        )
+        self.assertEqual(
+            payload["move_projection"],
+            {
+                "calendar_id": "CALENDAR-2",
+                "due": expected_due,
+                "alarms": expected_alarms,
+            },
+        )
+        self.assertIs(payload["due_drift_matched"], False)
+        self.assertIs(payload["alarm_drift_matched"], False)
+        self.assertIs(payload["move_drift_matched"], False)
+        self.assertIs(payload["setter_drift_matched"], False)
+        self.assertIs(payload["permuted_alarms_matched"], True)
+        read_only_alarm = {
+            "kind": "absolute",
+            "date_time": "2027-08-17T00:00:00.000Z",
+            "read_only": True,
+            "action": {"type": "procedure", "url": "example:before"},
+        }
+        self.assertEqual(
+            payload["read_only_move_projection"],
+            {"calendar_id": "CALENDAR-2", "alarms": [read_only_alarm]},
+        )
+        self.assertEqual(
+            payload["read_only_completion_projection"],
+            {"completed": True, "alarms": [read_only_alarm]},
+        )
+        self.assertIs(payload["read_only_move_drift_matched"], False)
+        self.assertIs(payload["read_only_completion_drift_matched"], False)
+        self.assertEqual(
+            payload["timed_due"],
+            {
+                "kind": "timed",
+                "date_time": "2027-01-15T08:00:00.123+09:00",
+                "time_zone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
+            payload["fractional_alarm_projection"],
+            {
+                "alarms": [
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-01-14T23:00:00.123Z",
+                    }
+                ]
+            },
+        )
+        self.assertIs(payload["fractional_alarm_setter_drift_matched"], False)
+        self.assertIs(payload["timed_due_setter_drift_matched"], False)
+        self.assertEqual(
+            payload["parsed_fractional_date"],
+            "2027-01-14T23:00:00.123Z",
+        )
+
+    def test_native_save_verifies_through_a_fresh_identifier_lookup(self) -> None:
+        source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
+            encoding="utf-8"
+        )
+        save_and_verify = source.split(
+            "static NSDictionary *SaveAndVerify", 1
+        )[1].split("static NSDictionary *DeleteAndVerify", 1)[0]
+
+        self.assertIn("calendarItemWithIdentifier", save_and_verify)
+        self.assertIn("[store reset]", save_and_verify)
+        self.assertLess(
+            save_and_verify.index("[store reset]"),
+            save_and_verify.index("calendarItemWithIdentifier"),
+        )
+        self.assertNotIn("[reminder refresh]", save_and_verify)
+        self.assertNotIn("ReminderTarget(reminder)", save_and_verify)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS EventKit")
+    def test_native_alarm_validation_rejects_boolean_and_invalid_location_numbers(
+        self,
+    ) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "alarm-validation"
+            compiled = subprocess.run(
+                [
+                    "clang",
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-DAPPLE_REMINDERS_ALARM_VALIDATION_TEST",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "EventKit",
+                    "-framework",
+                    "CoreLocation",
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+
+            for offset in (False, True):
+                with self.subTest(offset=offset):
+                    completed = subprocess.run(
+                        [str(binary)],
+                        input=json.dumps(
+                            {"kind": "relative", "offset_seconds": offset}
+                        ),
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=10,
+                        check=False,
+                    )
+                    payload = json.loads(completed.stdout)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertEqual(payload["status"], "failed_no_mutation")
+                    self.assertEqual(payload["error"]["code"], "invalid_input")
+                    self.assertEqual(
+                        payload["error"]["reason_code"], "invalid_alarm"
+                    )
+
+            location_base = {
+                "kind": "location",
+                "proximity": "enter",
+                "location": {
+                    "title": "Office",
+                    "latitude": 37.5665,
+                    "longitude": 126.978,
+                    "radius_meters": 150,
+                },
+            }
+            invalid_locations = (
+                {"title": ""},
+                {"title": " \t\n "},
+                {"title": "L" * 1_001},
+                {"latitude": True},
+                {"longitude": False},
+                {"latitude": None},
+                {"latitude": []},
+                {"latitude": {}},
+                {"latitude": "37.5665"},
+                {"longitude": None},
+                {"latitude": 91},
+                {"longitude": 181},
+                {"radius_meters": True},
+                {"radius_meters": 100_001},
+                {"bogus": "must not be ignored"},
+            )
+            for changed in invalid_locations:
+                with self.subTest(location_change=changed):
+                    request = json.loads(json.dumps(location_base))
+                    request["location"].update(changed)
+                    completed = subprocess.run(
+                        [str(binary)],
+                        input=json.dumps(request),
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=10,
+                        check=False,
+                    )
+                    payload = json.loads(completed.stdout)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertEqual(payload["status"], "failed_no_mutation")
+                    self.assertEqual(
+                        payload["error"]["reason_code"],
+                        "invalid_type" if changed == {"title": ""} else "invalid_alarm",
+                    )
+
+            fractional_absolute = subprocess.run(
+                [str(binary)],
+                input=json.dumps(
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-01-15T08:00:00.123+09:00",
+                    }
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(
+                fractional_absolute.returncode,
+                0,
+                fractional_absolute.stderr,
+            )
+            self.assertEqual(
+                json.loads(fractional_absolute.stdout)["data"]["alarm"],
+                {
+                    "kind": "absolute",
+                    "date_time": "2027-01-14T23:00:00.123Z",
+                },
+            )
+            overprecise_absolute = subprocess.run(
+                [str(binary)],
+                input=json.dumps(
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-01-15T08:00:00.1234+09:00",
+                    }
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertNotEqual(overprecise_absolute.returncode, 0)
+            self.assertEqual(
+                json.loads(overprecise_absolute.stdout)["error"]["reason_code"],
+                "invalid_alarm",
+            )
+
+            accepted = subprocess.run(
+                [str(binary)],
+                input=json.dumps({"kind": "relative", "offset_seconds": 0}),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(json.loads(accepted.stdout)["status"], "verified")
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS EventKit")
+    def test_native_alarm_json_exposes_only_faithful_writable_subset(self) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "alarm-round-trip"
+            compiled = subprocess.run(
+                [
+                    "clang",
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-DAPPLE_REMINDERS_ALARM_ROUNDTRIP_TEST",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "EventKit",
+                    "-framework",
+                    "CoreLocation",
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            completed = subprocess.run(
+                [str(binary)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        payload = json.loads(completed.stdout)
+        fixtures = payload["fixtures"]
+        for name, offset in (
+            ("safe", -900),
+            ("zero", 0),
+            ("lower_bound", -31_536_000),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    fixtures[name],
+                    {"kind": "relative", "offset_seconds": offset},
+                )
+
+        for name in ("positive", "fractional", "out_of_range"):
+            with self.subTest(name=name):
+                self.assertIs(fixtures[name]["read_only"], True)
+                self.assertEqual(fixtures[name]["action"], {"type": "display"})
+
+        for name in ("not_a_number", "infinite"):
+            with self.subTest(name=name):
+                self.assertIsNone(fixtures[name]["offset_seconds"])
+                self.assertIs(fixtures[name]["read_only"], True)
+                self.assertEqual(fixtures[name]["action"], {"type": "display"})
+                self.assertIs(
+                    fixtures[name]["_verification_unavailable"], True
+                )
+
+        self.assertEqual(
+            fixtures["audio"]["action"],
+            {"type": "audio", "sound_name": "Glass"},
+        )
+        self.assertEqual(
+            fixtures["email"]["action"],
+            {"type": "email", "email_address": "alerts@example.com"},
+        )
+        self.assertEqual(
+            fixtures["procedure"]["action"],
+            {"type": "procedure", "url": "example:run"},
+        )
+        self.assertEqual(
+            fixtures["procedure_hidden_url"]["action"],
+            {"type": "procedure"},
+        )
+        self.assertIs(fixtures["procedure_hidden_url"]["read_only"], True)
+        self.assertIs(
+            fixtures["procedure_hidden_url"]["_verification_unavailable"],
+            True,
+        )
+        self.assertEqual(
+            fixtures["display_with_sound"]["action"],
+            {"type": "display", "sound_name": "Glass"},
+        )
+        for name in ("audio", "email", "procedure", "display_with_sound"):
+            with self.subTest(name=name):
+                self.assertIs(fixtures[name]["read_only"], True)
+
+        self.assertEqual(
+            fixtures["absolute_millisecond"],
+            {
+                "kind": "absolute",
+                "date_time": "2027-01-15T08:00:00.123Z",
+            },
+        )
+        self.assertEqual(
+            fixtures["absolute_submillisecond"]["date_time"],
+            "2027-01-15T08:00:00.123Z",
+        )
+        self.assertIs(fixtures["absolute_submillisecond"]["read_only"], True)
+        self.assertIs(
+            fixtures["absolute_submillisecond"]["_verification_unavailable"],
+            True,
+        )
+
+        self.assertEqual(
+            fixtures["location_missing_geo"]["location"],
+            {
+                "title": "",
+                "latitude": None,
+                "longitude": None,
+            },
+        )
+        self.assertIs(fixtures["location_missing_geo"]["read_only"], True)
+        self.assertIs(
+            fixtures["location_missing_geo"]["_verification_unavailable"],
+            True,
+        )
+        self.assertNotIn(
+            "radius_meters", fixtures["location_infinite_radius"]["location"]
+        )
+        self.assertIs(
+            fixtures["location_infinite_radius"]["read_only"], True
+        )
+        self.assertEqual(
+            len(fixtures["location_overlong_title"]["location"]["title"]),
+            1_001,
+        )
+        self.assertIs(fixtures["location_overlong_title"]["read_only"], True)
+        self.assertIs(
+            fixtures["location_whitespace_title"]["read_only"], True
+        )
+        self.assertIs(fixtures["dormant_location"]["read_only"], True)
+        self.assertIs(
+            fixtures["dormant_location"]["_verification_unavailable"], True
+        )
+
+        self.assertEqual(
+            payload["safe_round_trip"],
+            {"kind": "relative", "offset_seconds": -900},
+        )
+        self.assertIs(payload["unsafe_reinput_rejected"], True)
+        self.assertIs(payload["nonempty_replacement_rejected"], True)
+        self.assertIs(payload["empty_array_allowed"], True)
+        self.assertIs(payload["null_clear_allowed"], True)
+        self.assertIs(payload["nonfinite_drift_matched"], False)
+        self.assertIs(payload["hidden_procedure_stable_matched"], False)
+        self.assertIs(payload["clear_due_retaining_relative_rejected"], True)
+        self.assertIs(
+            payload["clear_due_retaining_dormant_location_rejected"], True
+        )
+        self.assertIs(payload["clear_due_replacing_absolute_allowed"], True)
+        self.assertIs(payload["clear_due_and_null_alarms_allowed"], True)
+        self.assertIs(payload["clear_due_and_empty_alarms_allowed"], True)
+        self.assertIs(payload["add_relative_to_existing_due_allowed"], True)
+
     def test_access_request_timeout_is_inside_both_transport_timeouts(self) -> None:
         native_source = (PLUGIN_ROOT / "scripts" / "reminders_eventkit.m").read_text(
             encoding="utf-8"
@@ -812,6 +1261,135 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
 
 class EventKitContractTests(unittest.TestCase):
+    def test_runtime_trust_accepts_main_owned_workflow_provenance_shape(self) -> None:
+        app_files = {
+            (
+                f"{eventkit_bridge.BUNDLED_HELPER_APP_NAME}/Contents/MacOS/"
+                f"{eventkit_bridge.BUNDLED_HELPER_EXECUTABLE_NAME}"
+            ): "e" * 64,
+        }
+        source_files = {
+            relative: "a" * 64
+            for relative in eventkit_bridge.BUNDLED_HELPER_SOURCE_RELATIVE_PATHS
+        }
+        build_inputs = {
+            relative: "b" * 64
+            for relative in eventkit_bridge.BUNDLED_HELPER_BUILD_INPUT_RELATIVE_PATHS
+        }
+        manifest = {
+            "app_files": app_files,
+            "app_name": eventkit_bridge.BUNDLED_HELPER_APP_NAME,
+            "architectures": sorted(eventkit_bridge.BUNDLED_HELPER_ARCHITECTURES),
+            "binary_sha256": "e" * 64,
+            "build_environment": {
+                "clang": "fixture clang",
+                "linker": "fixture linker",
+                "macos_sdk": "15.0",
+                "xcode_path": "/Applications/Xcode.app/Contents/Developer",
+            },
+            "build_inputs": build_inputs,
+            "bundle_identifier": eventkit_bridge.BUNDLED_HELPER_BUNDLE_IDENTIFIER,
+            "executable": eventkit_bridge.BUNDLED_HELPER_EXECUTABLE_NAME,
+            "minimum_macos": eventkit_bridge.BUNDLED_HELPER_MINIMUM_MACOS,
+            "minimum_macos_by_architecture": {
+                architecture: eventkit_bridge.BUNDLED_HELPER_MINIMUM_MACOS
+                for architecture in sorted(eventkit_bridge.BUNDLED_HELPER_ARCHITECTURES)
+            },
+            "notarization_checked": True,
+            "notarized": True,
+            "plugin_version": "0.5.1",
+            "schema_version": 1,
+            "signature": "developer-id",
+            "source_commit": "a" * 40,
+            "source_files": source_files,
+            "team_id": eventkit_bridge.BUNDLED_HELPER_TEAM_IDENTIFIER,
+            "workflow_commit": "c" * 40,
+        }
+        raw = json.dumps(manifest, sort_keys=True).encode()
+
+        with (
+            mock.patch.object(eventkit_bridge, "_read_regular_file", return_value=raw),
+            mock.patch.object(
+                eventkit_bridge,
+                "_sha256_regular_file",
+                return_value="a" * 64,
+            ),
+        ):
+            loaded, manifest_hash, loaded_source_files = (
+                eventkit_bridge._load_bundled_helper_manifest(app_files, "0.5.1")
+            )
+
+        self.assertEqual(loaded, manifest)
+        self.assertRegex(manifest_hash, r"^[0-9a-f]{64}$")
+        self.assertEqual(loaded_source_files, source_files)
+        self.assertIn(
+            ".github/workflows/prepare-signed-helper-source.yml",
+            build_inputs,
+        )
+        self.assertNotIn(".github/workflows/prepare-signed-helper.yml", build_inputs)
+
+    def test_relative_alarm_schema_describes_safe_writes_and_replace_all(self) -> None:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+        relative = next(
+            branch
+            for branch in schema["$defs"]["alarm"]["oneOf"]
+            if branch["properties"]["kind"].get("const") == "relative"
+        )
+        self.assertEqual(
+            set(relative["properties"]),
+            {"kind", "offset_seconds"},
+        )
+        self.assertIn("due anchor", relative["description"])
+        self.assertIn("bare default-display form only", relative["description"])
+        self.assertIn("action metadata", relative["description"])
+
+        offset = relative["properties"]["offset_seconds"]
+        self.assertEqual(offset["type"], "integer")
+        self.assertEqual(offset["minimum"], -31_536_000)
+        self.assertEqual(offset["maximum"], 0)
+        self.assertIn("inclusive", offset["description"].lower())
+        self.assertIn("-31,536,000 through 0", offset["description"])
+        self.assertIn(
+            "31,536,000 seconds (365 elapsed days)",
+            offset["description"],
+        )
+        location_alarm = next(
+            branch
+            for branch in schema["$defs"]["alarm"]["oneOf"]
+            if branch["properties"]["kind"].get("const") == "location"
+        )
+        self.assertEqual(
+            location_alarm["properties"]["location"]["properties"]["title"][
+                "maxLength"
+            ],
+            1_000,
+        )
+
+        create_alarms = schema["properties"]["alarms"]["description"]
+        self.assertIn("complete alarm array", create_alarms.lower())
+        self.assertIn("relative alarm requires due in the same create", create_alarms)
+
+        patch_alarms = schema["properties"]["patch"]["properties"]["alarms"][
+            "description"
+        ]
+        for phrase in (
+            "complete-array replace-all",
+            "Omission preserves",
+            "null or [] explicitly clears",
+            "alarm-only patch against existing state",
+            "exact read",
+            "due anchor",
+            "complete current alarms",
+            "read_only:true",
+            "non-empty replacement is rejected before mutation",
+            "explicit clear-all request",
+            "resulting due remains non-null",
+            "Setting due:null while retaining a relative alarm is rejected",
+            "complete non-relative replacement",
+        ):
+            self.assertIn(phrase, patch_alarms)
+
     def test_schema_declares_only_core_receipt_statuses(self) -> None:
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -1466,6 +2044,19 @@ class EventKitContractTests(unittest.TestCase):
                     self.assertIs(
                         payload["data"]["fields"]["relative_alarm_writes"],
                         True,
+                    )
+                    self.assertEqual(
+                        payload["data"]["alarm_write_contract"],
+                        {
+                            "alarms_replace_complete_array": True,
+                            "omitted_alarms_are_preserved": True,
+                            "null_or_empty_alarms_clear_all": True,
+                            "relative_due_anchor_required": True,
+                            "relative_default_display_action_only": True,
+                            "relative_integer_offset_minimum_seconds": -31_536_000,
+                            "relative_integer_offset_maximum_seconds": 0,
+                            "unsupported_existing_alarms_are_read_only": True,
+                        },
                     )
                     self.assertNotIn(
                         "early_reminder_relative_alarm_writes",

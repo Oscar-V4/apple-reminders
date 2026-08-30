@@ -404,6 +404,7 @@
           "alarms": {
             "type": "array",
             "maxItems": 20,
+            "description": "The complete alarm array for the new Reminder. A relative alarm requires due in the same create; omit alarms to create none.",
             "items": {
               "$ref": "#/$defs/alarm"
             }
@@ -534,6 +535,7 @@
               },
               {
                 "type": "object",
+                "description": "Requires a due anchor. Writable input is the bare default-display form only: kind and offset_seconds; action metadata and read_only are not accepted.",
                 "properties": {
                   "kind": {
                     "const": "relative"
@@ -541,7 +543,8 @@
                   "offset_seconds": {
                     "type": "integer",
                     "minimum": -31536000,
-                    "maximum": 0
+                    "maximum": 0,
+                    "description": "Inclusive due-relative offset from -31,536,000 through 0 seconds. The maximum lead is 31,536,000 seconds (365 elapsed days)."
                   }
                 },
                 "required": [
@@ -934,6 +937,7 @@
               },
               {
                 "type": "object",
+                "description": "Requires a due anchor. Writable input is the bare default-display form only: kind and offset_seconds; action metadata and read_only are not accepted.",
                 "properties": {
                   "kind": {
                     "const": "relative"
@@ -941,7 +945,8 @@
                   "offset_seconds": {
                     "type": "integer",
                     "minimum": -31536000,
-                    "maximum": 0
+                    "maximum": 0,
+                    "description": "Inclusive due-relative offset from -31,536,000 through 0 seconds. The maximum lead is 31,536,000 seconds (365 elapsed days)."
                   }
                 },
                 "required": [
@@ -1187,6 +1192,7 @@
                 ]
               },
               "alarms": {
+                "description": "The `alarms` patch is complete-array replace-all: when present, it replaces every current alarm. Omission preserves all current alarms whenever alarm-array intent is unchanged and the resulting due remains non-null; null or [] explicitly clears them. Setting due:null while retaining a relative alarm is rejected: pair it with alarms:null, alarms:[], or a complete non-relative replacement. If the exact existing array contains any alarm with read_only:true, a non-empty replacement is rejected before mutation; omit alarms to preserve them, or use null/[] only for an explicit clear-all request. A relative alarm requires a due anchor from the same patch or a fresh exact read. An alarm-only patch against existing state requires that exact read to prove the due anchor and the complete current alarms.",
                 "oneOf": [
                   {
                     "type": "null"

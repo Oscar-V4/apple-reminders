@@ -17,12 +17,22 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 
 ```json
 {"kind":"patch","patch":{"title":"…","notes":"…","url":"…","priority":5,"due":null,"alarms":[],"recurrence_rules":[]}}
-{"kind":"patch","patch":{"alarms":[{"kind":"relative","offset_seconds":-1209600}]}}
 {"kind":"set_completion","completed":true}
 {"kind":"move_to_list","list_id":"EXACT-LIST-ID"}
 ```
 
-Omitted patch fields remain unchanged. `null` clears only fields whose input schema permits null; inspect the live tool schema instead of assuming clear behavior.
+Alarm-only relative patch sequence:
+
+1. Call `read_reminder {"reminder_id":"EXACT-REMINDER-ID"}` immediately before the write and confirm that its exact result has a non-null `due`.
+2. Call `change_reminder` with the returned fresh reference and the complete intended alarm array:
+
+   ```json
+   {"reference":"rev1.…","action":{"kind":"patch","patch":{"alarms":[{"kind":"relative","offset_seconds":-1209600}]}}}
+   ```
+
+`alarms` is a complete-array replacement. Omitting `alarms` preserves every current alarm whenever alarm-array intent is unchanged and the resulting due remains non-null; `null` or `[]` explicitly clears all alarms. Setting `due:null` while retaining a relative alarm is rejected, so pair it with `alarms:null`, `alarms:[]`, or a complete non-relative replacement. Other omitted patch fields remain unchanged; `null` clears only fields whose input schema permits it.
+
+A returned relative alarm without `read_only:true` is in the faithful writable subset. `read_only:true` exposes an existing unsupported trigger, offset, or action and its bounded action metadata for inspection; that alarm cannot be resubmitted as part of a non-empty replacement. For an unrelated patch, preserve the complete alarm array by omitting `alarms`. If EventKit contains trigger state that cannot be represented losslessly, the write may commit but Core refuses to claim exact preservation and returns a pending verification result. If the user asks to change alarms while a read-only alarm is present, stop and report that the replacement is unsafe; clear with `null` or `[]` only when the user explicitly requests removing every alarm. Writable relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant.
 
 ## Selection and destructive composition
 
@@ -78,6 +88,8 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 `diagnose_reminders {scope?, detail_level?}` runs one content-free diagnosis and reports the requested area. Use it only after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, and `packaging`.
 
 ## Receipt rules
+
+Core mutation verification uses a fresh identifier-based read. When the resulting Reminder has a relative alarm, changing `due` or `alarms` verifies the dependent `due` and complete `alarms` array together; moving it also verifies the destination list. Dependency drift cannot produce `verified`.
 
 - `unchanged`: no mutation was needed; a fresh reference may be returned.
 - `verified`: the final exact read matched; a fresh reference may be returned for an existing/created reminder.

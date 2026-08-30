@@ -18,6 +18,9 @@ PUBLIC_INTERFACE = (
     PLUGIN / "skills" / "apple-reminders" / "references" / "public-interface.md"
 )
 PRIMARY_EVALS = PLUGIN / "skills" / "apple-reminders" / "evals" / "evals.json"
+QUICK_CAPTURE_EVALS = (
+    PLUGIN / "skills" / "apple-reminders-quick-capture" / "evals" / "evals.json"
+)
 SCHEMA = PLUGIN / "schemas" / "mcp-tools.json"
 CORE_RUNTIME = PLUGIN / "mcp" / "v2_core.py"
 MATRIX = ROOT / "docs" / "workflow-capability-matrix.md"
@@ -224,6 +227,86 @@ class WorkflowHardeningTests(unittest.TestCase):
         self.assertIn("fresh del1", top_four[0]["expected_behavior"])
         self.assertIn("same-account", recovery[0]["expected_behavior"])
         self.assertIn("high, medium, or low", completed[0]["expected_behavior"])
+
+    def test_alarm_only_relative_patch_requires_exact_due_pre_read(self) -> None:
+        primary = read(PRIMARY_SKILL)
+        public_interface = read(PUBLIC_INTERFACE)
+        evals = json.loads(read(PRIMARY_EVALS))
+
+        self.assertIn("alarm-only relative patch", primary)
+        self.assertIn("confirm its current `due`", primary)
+
+        sequence_start = public_interface.index("Alarm-only relative patch")
+        pre_read = public_interface.index("`read_reminder {", sequence_start)
+        patch = public_interface.index("`change_reminder`", sequence_start)
+        self.assertLess(pre_read, patch)
+        self.assertIn("confirm that its exact result has a non-null `due`", public_interface)
+
+        alarm_patch = [item for item in evals if "알람만" in item["prompt"]]
+        self.assertEqual(len(alarm_patch), 1)
+        expected = alarm_patch[0]["expected_behavior"]
+        for phrase in (
+            "exact pre-read",
+            "existing due",
+            "complete-array replacement",
+            "read_only:true",
+            "non-empty replacement",
+        ):
+            self.assertIn(phrase, expected)
+
+    def test_alarm_array_and_dependency_verification_contracts_are_explicit(self) -> None:
+        primary = read(PRIMARY_SKILL)
+        public_interface = read(PUBLIC_INTERFACE)
+        evals = json.loads(read(PRIMARY_EVALS))
+        combined = primary + "\n" + public_interface
+
+        for phrase in (
+            "complete-array replacement",
+            "Omitting `alarms` preserves",
+            "`null` or `[]` explicitly clears",
+            "non-empty replacement",
+            "`read_only:true`",
+            "fresh identifier-based read",
+            "dependent `due` and complete `alarms` array",
+            "31,536,000 seconds (365 elapsed days)",
+            "Setting `due:null` while retaining a relative alarm is rejected",
+            "complete non-relative replacement",
+        ):
+            self.assertIn(phrase, combined)
+
+        self.assertIn("cannot be resubmitted", combined)
+        dependency_eval = [
+            item for item in evals if "업무 목록으로 옮겨줘" in item["prompt"]
+        ]
+        self.assertEqual(len(dependency_eval), 1)
+        self.assertIn("fresh identifier-based read", dependency_eval[0]["expected_behavior"])
+        self.assertIn("due and complete alarms array", dependency_eval[0]["expected_behavior"])
+        due_clear_eval = [
+            item for item in evals if "마감일만 없애고" in item["prompt"]
+        ]
+        self.assertEqual(len(due_clear_eval), 1)
+        for phrase in (
+            "due:null",
+            "Does not dispatch",
+            "clear alarms with null/[]",
+            "complete non-relative alarm replacement",
+        ):
+            self.assertIn(phrase, due_clear_eval[0]["expected_behavior"])
+
+    def test_quick_capture_relative_alarm_requires_same_create_due(self) -> None:
+        quick_capture = read(QUICK_CAPTURE_SKILL)
+        evals = json.loads(read(QUICK_CAPTURE_EVALS))["evals"]
+
+        self.assertIn("same-create due", quick_capture)
+        self.assertNotIn("existing or same-create due", quick_capture)
+        self.assertIn("31,536,000 seconds (365 elapsed days)", quick_capture)
+
+        relative_capture = [
+            item for item in evals if "2주 전" in item["prompt"]
+        ]
+        self.assertEqual(len(relative_capture), 1)
+        self.assertIn("same create call", relative_capture[0]["expected_output"])
+        self.assertIn("same-create due", " ".join(relative_capture[0]["assertions"]))
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ NATIVE_HELPER_SOURCE_FILES = {
     "scripts/reminders_eventkit.m",
 }
 NATIVE_HELPER_BUILD_INPUT_FILES = {
-    ".github/workflows/prepare-signed-helper.yml",
+    ".github/workflows/prepare-signed-helper-source.yml",
     "scripts/build_eventkit_helper_app.py",
     "scripts/eventkit_helper_app_info.plist",
     "scripts/prepare_signed_eventkit_helper.sh",
@@ -433,6 +433,7 @@ def _validate_native_helper_manifest(root: Path) -> list[str]:
         "source_commit",
         "source_files",
         "team_id",
+        "workflow_commit",
     }
     if set(manifest) != expected_top_level_keys:
         errors.append("native helper manifest top-level key inventory drift")
@@ -516,6 +517,11 @@ def _validate_native_helper_manifest(root: Path) -> list[str]:
         r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit
     ):
         errors.append("native helper manifest source_commit is not a full commit hash")
+    workflow_commit = manifest.get("workflow_commit")
+    if not isinstance(workflow_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", workflow_commit
+    ):
+        errors.append("native helper manifest workflow_commit is not a full commit hash")
     return errors
 
 
