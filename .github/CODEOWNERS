@@ -2,6 +2,7 @@
 /.gitattributes @Oscar-V4
 /.github/CODEOWNERS @Oscar-V4
 /.github/workflows/prepare-signed-helper.yml @Oscar-V4
+/.github/workflows/prepare-signed-helper-source.yml @Oscar-V4
 /.github/workflows/release.yml @Oscar-V4
 /plugins/apple-reminders/.codex-plugin/plugin.json @Oscar-V4
 /plugins/apple-reminders/native/** @Oscar-V4

@@ -136,11 +136,33 @@ jobs:
           print(value)
           PY
           )"
+          workflow_commit="$(
+            python3 - "$manifest_path" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          value = payload.get("workflow_commit")
+          if value is None:
+              print("")
+          elif isinstance(value, str) and re.fullmatch(
+              r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value
+          ):
+              print(value)
+          else:
+              raise SystemExit("helper manifest workflow_commit is invalid")
+          PY
+          )"
           [[ "$source_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
           git cat-file -e "$source_commit^{commit}"
           git merge-base --is-ancestor "$source_commit" "$TAG_COMMIT"
           git merge-base --is-ancestor "$source_commit" "refs/remotes/origin/main"
-          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          {
+            printf 'source_commit=%s\n' "$source_commit"
+            printf 'workflow_commit=%s\n' "$workflow_commit"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate the complete public source
         run: |
@@ -154,6 +176,7 @@ jobs:
       - name: Bind the expanded helper bytes to the manifest
         env:
           MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}
+          MANIFEST_WORKFLOW_COMMIT: ${{ steps.helper_source.outputs.workflow_commit }}
           RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
         run: |
           set -euo pipefail
@@ -225,10 +248,19 @@ jobs:
                       raise SystemExit(f"manifest/app byte drift: {relative}")
           if manifest.get("source_commit") != os.environ["MANIFEST_SOURCE_COMMIT"]:
               raise SystemExit("helper manifest source commit drift")
+          workflow_commit = os.environ["MANIFEST_WORKFLOW_COMMIT"]
+          if workflow_commit and manifest.get("workflow_commit") != workflow_commit:
+              raise SystemExit("helper manifest workflow commit drift")
+          if os.environ["RELEASE_VERSION"] != "0.5.0" and not workflow_commit:
+              raise SystemExit("helper manifest workflow commit is required")
           if manifest.get("plugin_version") != os.environ["RELEASE_VERSION"]:
               raise SystemExit("helper manifest release version drift")
           PY
 
+          workflow_arguments=()
+          if [[ -n "$MANIFEST_WORKFLOW_COMMIT" ]]; then
+            workflow_arguments+=(--workflow-commit "$MANIFEST_WORKFLOW_COMMIT")
+          fi
           python3 scripts/verify_eventkit_helper.py \
             --plugin-root "$PLUGIN_ROOT" \
             --app "$PLUGIN_ROOT/native/AppleRemindersEventKitHelper.app" \
@@ -237,37 +269,160 @@ jobs:
             --require-notarized \
             --run-protocol-probes \
             --manifest "$PLUGIN_ROOT/native/eventkit-helper-build.json" \
-            --source-commit "$MANIFEST_SOURCE_COMMIT"
+            --source-commit "$MANIFEST_SOURCE_COMMIT" \
+            "${workflow_arguments[@]}"
 
       - name: Independently verify helper manifest provenance
+        id: helper_provenance
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}
+          MANIFEST_WORKFLOW_COMMIT: ${{ steps.helper_source.outputs.workflow_commit }}
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+          TAG_COMMIT: ${{ steps.release_identity.outputs.tag_commit }}
         run: |
           set -euo pipefail
           manifest_path="$PLUGIN_ROOT/native/eventkit-helper-build.json"
           attestation_result="$RUNNER_TEMP/eventkit-helper-manifest-attestation.json"
-          gh attestation verify "$manifest_path" \
-            --repo "Oscar-V4/apple-reminders" \
-            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/prepare-signed-helper.yml" \
-            --signer-digest "$MANIFEST_SOURCE_COMMIT" \
-            --source-digest "$MANIFEST_SOURCE_COMMIT" \
-            --source-ref "refs/heads/main" \
-            --predicate-type "https://slsa.dev/provenance/v1" \
-            --deny-self-hosted-runners \
-            --format json > "$attestation_result"
-          python3 - "$attestation_result" <<'PY'
+          if [[ "$RELEASE_VERSION" == "0.5.0" ]]; then
+            [[ -z "$MANIFEST_WORKFLOW_COMMIT" ]]
+            gh attestation verify "$manifest_path" \
+              --repo "Oscar-V4/apple-reminders" \
+              --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/prepare-signed-helper.yml" \
+              --signer-digest "$MANIFEST_SOURCE_COMMIT" \
+              --source-digest "$MANIFEST_SOURCE_COMMIT" \
+              --source-ref "refs/heads/main" \
+              --predicate-type "https://slsa.dev/provenance/v1" \
+              --deny-self-hosted-runners \
+              --format json > "$attestation_result"
+            python3 - "$attestation_result" <<'PY'
           import json
           import sys
           from pathlib import Path
 
           results = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           if not isinstance(results, list) or not results:
-              raise SystemExit("gh returned no verified helper manifest attestation")
+              raise SystemExit("gh returned no verified legacy helper manifest attestation")
           if not all(isinstance(item, dict) for item in results):
-              raise SystemExit("gh returned malformed attestation verification results")
+              raise SystemExit("gh returned malformed legacy attestation results")
           PY
+            {
+              printf 'provenance_mode=legacy-main-source\n'
+              printf 'workflow_commit=%s\n' "$MANIFEST_SOURCE_COMMIT"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          [[ "$MANIFEST_WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          gh attestation verify "$manifest_path" \
+            --repo "Oscar-V4/apple-reminders" \
+            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/prepare-signed-helper-source.yml" \
+            --signer-digest "$MANIFEST_WORKFLOW_COMMIT" \
+            --source-digest "$MANIFEST_WORKFLOW_COMMIT" \
+            --source-ref "refs/heads/main" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$attestation_result"
+          workflow_commit="$(
+            python3 - \
+              "$attestation_result" \
+              "$MANIFEST_WORKFLOW_COMMIT" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          results = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          manifest_workflow_commit = sys.argv[2]
+          if not isinstance(results, list) or not results:
+              raise SystemExit("gh returned no verified main-owned helper attestation")
+          expected_uri = (
+              "https://github.com/Oscar-V4/apple-reminders/.github/workflows/"
+              "prepare-signed-helper-source.yml@refs/heads/main"
+          )
+          expected_subjects = {
+              "AppleRemindersEventKitHelper-notarized.zip",
+              "eventkit-helper-build.json",
+              "SHA256SUMS",
+          }
+          workflow_commits = set()
+          for item in results:
+              if not isinstance(item, dict):
+                  raise SystemExit("gh returned a malformed attestation result")
+              try:
+                  verification = item["verificationResult"]
+                  certificate = verification["signature"]["certificate"]
+                  statement = verification["statement"]
+                  workflow = statement["predicate"]["buildDefinition"][
+                      "externalParameters"
+                  ]["workflow"]
+              except (KeyError, TypeError) as exc:
+                  raise SystemExit(
+                      "gh omitted required main-owned attestation evidence"
+                  ) from exc
+              workflow_commit = certificate.get("githubWorkflowSHA")
+              if not isinstance(workflow_commit, str) or not re.fullmatch(
+                  r"[0-9a-f]{40}(?:[0-9a-f]{24})?", workflow_commit
+              ):
+                  raise SystemExit("attested workflow commit is invalid")
+              for field in (
+                  "buildConfigDigest",
+                  "buildSignerDigest",
+                  "sourceRepositoryDigest",
+              ):
+                  if certificate.get(field) != workflow_commit:
+                      raise SystemExit(f"attested {field} does not match workflow commit")
+              expected_certificate = {
+                  "buildConfigURI": expected_uri,
+                  "buildSignerURI": expected_uri,
+                  "githubWorkflowRef": "refs/heads/main",
+                  "githubWorkflowRepository": "Oscar-V4/apple-reminders",
+                  "githubWorkflowTrigger": "workflow_dispatch",
+                  "runnerEnvironment": "github-hosted",
+                  "sourceRepositoryRef": "refs/heads/main",
+                  "sourceRepositoryURI": "https://github.com/Oscar-V4/apple-reminders",
+                  "subjectAlternativeName": expected_uri,
+              }
+              for field, expected in expected_certificate.items():
+                  if certificate.get(field) != expected:
+                      raise SystemExit(f"attested {field} drift")
+              if workflow != {
+                  "path": ".github/workflows/prepare-signed-helper-source.yml",
+                  "ref": "refs/heads/main",
+                  "repository": "https://github.com/Oscar-V4/apple-reminders",
+              }:
+                  raise SystemExit("attested external workflow parameters drift")
+              subjects = statement.get("subject")
+              if not isinstance(subjects, list) or {
+                  subject.get("name")
+                  for subject in subjects
+                  if isinstance(subject, dict)
+              } != expected_subjects:
+                  raise SystemExit("attested helper subject inventory drift")
+              for subject in subjects:
+                  digest = subject.get("digest") if isinstance(subject, dict) else None
+                  value = digest.get("sha256") if isinstance(digest, dict) else None
+                  if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                      raise SystemExit("attested helper subject digest is invalid")
+              workflow_commits.add(workflow_commit)
+          if len(workflow_commits) != 1:
+              raise SystemExit("verified attestations disagree on workflow commit")
+          workflow_commit = workflow_commits.pop()
+          if manifest_workflow_commit and manifest_workflow_commit != workflow_commit:
+              raise SystemExit("manifest workflow_commit does not match attestation")
+          print(workflow_commit)
+          PY
+          )"
+          [[ "$workflow_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          git cat-file -e "$workflow_commit^{commit}"
+          git merge-base --is-ancestor "$workflow_commit" "$MANIFEST_SOURCE_COMMIT"
+          git merge-base --is-ancestor "$workflow_commit" "$TAG_COMMIT"
+          git merge-base --is-ancestor "$workflow_commit" "refs/remotes/origin/main"
+          {
+            printf 'provenance_mode=main-owned-source-data\n'
+            printf 'workflow_commit=%s\n' "$workflow_commit"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build the deterministic release package twice
         id: release_artifacts
