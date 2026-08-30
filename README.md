@@ -1,23 +1,25 @@
-# Apple Reminders Codex Plugin
+# Apple Reminders for Codex
 
 [![CI](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml)
 
-Plan, capture, organize, and safely update Apple Reminders from Codex on your
-Mac. The plugin can brief due work, add reminders to an exact list, and make
-guarded changes with explicit read-back results.
+Turn meeting notes, screenshots, and everyday plans into organized Apple
+Reminders—right from Codex on your Mac.
 
-Try prompts such as:
+With this plugin, Codex can extract action items and dates, create reminders in
+the right lists, brief upcoming work, and safely organize or update reminders
+with verified read-backs.
 
-- `오늘 마감이거나 기한이 지난 리마인더를 보여줘.`
-- `쇼핑 목록에 우유 사기를 추가해줘.`
-- `이 리마인더를 완료하고 다시 읽어서 확인해줘.`
-- `최근 삭제된 '치과 예약'을 정확히 찾아 원래 계정의 쇼핑 목록으로 복구해줘.`
-- `이 네 미리알림의 사진을 하나의 미리알림에 각각 복사해줘.`
+Try prompts like:
 
-This repository hosts the Apple Reminders community plugin. The MCP and adapters run locally,
-but results are returned to Codex as described in [PRIVACY.md](PRIVACY.md).
-This is an independent community project, not an Apple or OpenAI product or
-endorsed integration.
+- `Turn these meeting notes into separate action items and deadlines, then add them to my Project list.`
+- `Create one reminder per screenshot in my Job Search list. Keep any dates, links, and useful details you find.`
+- `Show me everything overdue, due today, and coming up this week.`
+- `Organize my Inbox reminders into sensible sections. Show me the plan before changing anything.`
+
+This repository hosts an independent, open-source community plugin for Apple
+Reminders. Its MCP server and macOS adapters run locally, while tool results
+return to Codex as described in [PRIVACY.md](PRIVACY.md). This is not an Apple
+or OpenAI product or endorsed integration.
 
 See the [workflow capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
 for supported journeys, explicit evidence boundaries, and deliberately
@@ -58,8 +60,8 @@ codex plugin add apple-reminders@oscar-v4-reminders
 Start a new Codex task so that it loads the installed skills and tools, then try:
 
 ```text
-오늘 할 일 보여줘.
-쇼핑 목록에 우유 사기를 추가해줘.
+Show me everything overdue, due today, and coming up this week.
+Add "Submit expense report" to my Work list for Friday at 3 PM.
 ```
 
 Current-Mac Reminders and iCloud attachment checks pass. Fresh-profile
