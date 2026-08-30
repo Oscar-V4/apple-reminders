@@ -6,6 +6,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Changed
 
+- Reworked the public plugin card around Core-safe meeting-note, screenshot,
+  and upcoming-work prompts. It now states the capability-specific dependency
+  split: Core, tag assignments, and native URL attachments do not invoke
+  `clang`; section writes, image-attachment changes, and exact Recently Deleted
+  inspection or recovery require Xcode Command Line Tools.
 - Defined writable relative alarms as the faithful bare default-display subset:
   integral `offset_seconds` from `-31536000` through `0`, with the lower bound
   exactly 31,536,000 seconds (365 elapsed days) before due. Existing unsupported
@@ -56,10 +61,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   compiling a replacement. Runtime trust checks parse Mach-O architecture and
   minimum-version metadata directly and use only the macOS system `codesign`
   tool; explicit contributor builds retain the legacy source path.
-- Kept Xcode Command Line Tools as a clearly separated dependency for Native
-  Extension and Recovery features that still compile private helpers locally,
-  including sections, tag changes, image or URL attachment changes, and
-  Recently Deleted recovery.
+- Kept Xcode Command Line Tools as a capability-specific dependency for section
+  writes, image-attachment changes, and exact Recently Deleted inspection or
+  recovery, which compile three private Objective-C helpers locally. Tag
+  assignments and native URL attachment operations remain guarded
+  Python/SQLite paths and do not invoke `clang`.
 - Migrated the Core helper once from its legacy ad-hoc signing identity to the
   stable Developer ID signing identity used by project releases. macOS may ask
   for Reminders access again at this upgrade boundary.

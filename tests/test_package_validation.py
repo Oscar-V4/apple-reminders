@@ -91,10 +91,17 @@ class PluginValidationTests(unittest.TestCase):
             readme,
         )
         self.assertIn(
-            "Extension and Recovery features",
+            "Tag assignments and native URL attachment operations",
+            " ".join(readme.split()),
+        )
+        self.assertIn("do not invoke `clang`", readme)
+        self.assertIn("compile three private Objective-C helpers", readme)
+        self.assertIn("therefore require Xcode Command Line Tools", readme)
+        self.assertIn(
+            "End users do not need an Apple Developer Program membership",
             readme,
         )
-        self.assertIn("therefore require Xcode Command Line Tools", readme)
+        self.assertNotIn("revoke Reminders and Automation access", readme)
         self.assertNotIn("two source-runtime prerequisites", readme)
 
     def test_public_release_version_is_coherent(self) -> None:
@@ -171,8 +178,40 @@ class PluginValidationTests(unittest.TestCase):
         self.assertEqual(interface["displayName"], "Apple Reminders for Codex")
         self.assertIn("notes and screenshots", interface["shortDescription"])
         self.assertIn("meeting notes", interface["defaultPrompt"][0])
+        self.assertIn("owners and deadlines", interface["defaultPrompt"][0])
         self.assertIn("screenshot", interface["defaultPrompt"][1])
+        self.assertIn("useful details", interface["defaultPrompt"][1])
         self.assertIn("overdue", interface["defaultPrompt"][2])
+        self.assertIn("without Xcode", interface["longDescription"])
+        self.assertIn(
+            "Tag assignments and native URL attachments",
+            interface["longDescription"],
+        )
+        self.assertIn("avoid compilation", interface["longDescription"])
+        self.assertIn(
+            "Section writes, image-attachment changes",
+            interface["longDescription"],
+        )
+        self.assertIn(
+            "require Xcode Command Line Tools",
+            interface["longDescription"],
+        )
+        self.assertNotIn(
+            "Optional section, tag, attachment",
+            interface["longDescription"],
+        )
+        for prompt in interface["defaultPrompt"]:
+            normalized = prompt.casefold()
+            for advanced_term in (
+                "link",
+                "section",
+                "tag",
+                "attachment",
+                "recently deleted",
+                "recover",
+            ):
+                with self.subTest(prompt=prompt, advanced_term=advanced_term):
+                    self.assertNotIn(advanced_term, normalized)
 
     def test_issue_templates_match_the_current_public_product_boundaries(self) -> None:
         templates = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
@@ -183,6 +222,22 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("        - Recovery", feature)
         self.assertNotIn("Optional Maintenance", feature)
         self.assertIn("Recently Deleted or recovery", bug)
+
+    def test_native_syntax_checks_cover_every_runtime_helper_source(self) -> None:
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+        for source in (
+            "remkit_attach_image.m",
+            "remkit_sections.m",
+            "remkit_recover.m",
+            "reminders_eventkit.m",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(source, ci)
+                self.assertIn(source, contributing)
 
     def test_substantive_mcp_requires_manifest_declaration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

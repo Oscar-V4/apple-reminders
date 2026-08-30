@@ -50,7 +50,9 @@ Depending on the commands used, operational files may be created under:
   - idempotency metadata and lock;
   - temporary or legacy version/schema capability records.
 - `~/Library/Caches/apple-reminders-codex/`
-  - locally compiled advanced ReminderKit helpers and build locks;
+  - the three locally compiled advanced ReminderKit helpers for section writes,
+    image-attachment changes, and exact Recently Deleted inspection or
+    recovery, plus their build locks;
   - legacy or explicit contributor EventKit builds.
 
 The current runtime does not create a reminder metadata cache or backup archive.
@@ -95,7 +97,8 @@ Advanced features can use:
 - Apple's private ReminderKit framework for native image attachments, sections,
   and exact Recently Deleted recovery;
 - direct, schema-gated access to the private Reminders SQLite store for fields
-  not exposed by public APIs.
+  not exposed by public APIs, including tag assignments and native URL
+  attachments.
 
 These private interfaces are undocumented and version-sensitive. They are not
 suitable for App Store application code and may fail or change semantics after
@@ -148,8 +151,9 @@ other data that could identify the user or their task history.
   metadata caches, or legacy/explicit-path backups when they are no longer
   needed and no operation is running. The current runtime does not manage the
   retention of backup files produced by older builds.
-- Revoke Reminders or Automation access in macOS settings to disable the
-  associated public integration path.
+- Revoke Reminders access in macOS settings to disable the associated public
+  integration path. The 0.5 runtime does not use macOS Automation or Apple
+  Events.
 
 Removing plugin-owned files does not undo changes already made to Apple
 Reminders or synced through iCloud.

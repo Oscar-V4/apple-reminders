@@ -34,16 +34,21 @@ withheld operations.
 - Python 3.11 or newer.
 - Reminders permission for Core operations.
 
-Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. Version
-0.5.0 includes a universal EventKit helper that is Developer ID signed,
-notarized by Apple, and stapled for offline Gatekeeper verification. Native
-Extension and Recovery features—including sections, tag changes, image or URL
-attachment changes, and Recently Deleted recovery—still compile separate
-private helpers locally and therefore require Xcode Command Line Tools.
+Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. The
+plugin includes a universal EventKit helper that is Developer ID signed,
+notarized by Apple, and stapled for offline Gatekeeper verification. Tag
+assignments and native URL attachment operations also avoid runtime
+compilation, but remain version-sensitive guarded private-store paths. Section
+creation or moves, image-attachment changes, and exact Recently Deleted
+inspection or recovery compile three private Objective-C helpers locally and
+therefore require Xcode Command Line Tools.
 
-Finder-launched Codex checks `PATH` plus standard Homebrew and python.org
-locations. Availability is capability-specific, so Core remains usable when an
-advanced Native or Recovery capability is unavailable.
+End users do not need an Apple Developer Program membership. Maintainers use it
+only to sign and notarize the bundled Core release helper.
+
+For Python, Finder-launched Codex checks `PATH` plus standard Homebrew and
+python.org locations. Availability is capability-specific, so Core remains
+usable when an advanced Native or Recovery capability is unavailable.
 
 ## 60-second setup check
 
@@ -53,9 +58,11 @@ Before the first install, confirm Python:
 python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 ```
 
-If you plan to use Native Extension or Recovery features, also run
-`xcode-select -p`. If that command fails, run `xcode-select --install`, finish
-installation, and restart Codex. You can skip this for Core reminders.
+If you plan to create or move sections, change image attachments, or inspect or
+recover one exact Recently Deleted item, also run `xcode-select -p`. If that
+command fails, run `xcode-select --install`, finish installation, and restart
+Codex. Core, tag assignments, native URL attachment operations, and read-only
+section or attachment inspection do not invoke `clang`.
 
 ## Quick Start
 
@@ -73,9 +80,9 @@ Show me everything overdue, due today, and coming up this week.
 Add "Submit expense report" to my Work list for Friday at 3 PM.
 ```
 
-Version 0.5.0 changes Core from a locally compiled ad-hoc helper to the stable
-signed helper above. macOS may ask for Reminders access again after this upgrade
-because the helper's code-signing identity changed.
+Starting with 0.5.0, Core uses the stable signed helper above instead of a
+locally compiled ad-hoc helper. macOS may ask for Reminders access again after
+this upgrade because the helper's code-signing identity changed.
 
 ## First permission
 
@@ -114,8 +121,10 @@ named read-back evidence, not convergence to every device or shared-list member.
 Skills grant no macOS permission. The local MCP validates inputs and Receipts;
 Core launches only the reviewed helper bundled in the installed plugin and does
 not download or automatically compile a fallback. A missing or invalid bundle
-fails before mutation. Version-sensitive Native and Recovery paths remain
-behind exact read-back gates and retain their separate local-build dependency.
+fails before mutation. Version-sensitive private paths remain behind exact
+read-back gates. Only section writes, image-attachment changes, and exact
+Recently Deleted inspection or recovery retain a separate local-build
+dependency.
 
 ## Diagnosis and troubleshooting
 
@@ -135,7 +144,7 @@ Common cases:
 - **Bundled Core helper unavailable:** reinstall the same reviewed release tag,
   then run targeted diagnosis if the failure persists. Core does not silently
   compile or download a replacement.
-- **Advanced Native/Recovery build failure:** run targeted diagnosis; for a
+- **Section/image/Recovery helper build failure:** run targeted diagnosis; for a
   missing compiler run `xcode-select --install`, finish installation, and
   restart Codex. Core remains independently usable.
 - **Plugin changes are not visible:** start a new Codex task after install,
@@ -198,9 +207,10 @@ new Codex task, and confirm that no Reminders operation is running. In Finder,
 use **Go → Go to Folder…** for each exact path, then move only its
 `apple-reminders-codex` folder to Trash—never a parent directory. This clears
 local support data but does not undo Reminders or iCloud changes.
-For a full uninstall, also revoke Reminders and Automation access in **System
-Settings → Privacy & Security**, and separately inspect any custom external
-legacy backup directory that you explicitly configured.
+For a full uninstall, also revoke Reminders access in **System Settings →
+Privacy & Security**, and separately inspect any custom external legacy backup
+directory that you explicitly configured. The 0.5 runtime does not use macOS
+Automation or Apple Events.
 
 ## License and contributions
 

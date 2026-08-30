@@ -2,7 +2,7 @@
 
 ## Before filing an issue
 
-Confirm that you are using the latest tagged release on macOS with Apple Reminders available. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run summary diagnosis only when the operation returns an environment or Native Extension failure.
+Confirm that you are using the latest tagged release on macOS with Apple Reminders available. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure.
 
 ## What to include
 
