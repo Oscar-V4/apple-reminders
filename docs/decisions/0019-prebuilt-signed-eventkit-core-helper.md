@@ -1,6 +1,6 @@
 # 0019 — Ship a signed, notarized EventKit Core helper
 
-**Status:** Accepted — implemented in 0.5.0
+**Status:** Accepted — implemented in 0.5.0; atomic update path revised in 0.5.1
 
 ## Context
 
@@ -32,9 +32,9 @@ ticket cannot be stapled for offline Gatekeeper verification.
 
 ## Decision
 
-Choose option 4 for the public EventKit Core helper. Use a two-pull-request
-rollout so the source-built runtime keeps working until the notarized app is
-ready, then switch runtime and artifact atomically.
+Choose option 4 for the public EventKit Core helper. The initial rollout used
+two pull requests so the source-built runtime kept working until the notarized
+app was ready, then switched runtime and artifact atomically.
 
 The release bundle is
 `native/AppleRemindersEventKitHelper.app`, with bundle identifier
@@ -61,6 +61,21 @@ not change. A missing or invalid bundle fails before mutation as
 fallback. Contributor source compilation remains an explicit development
 operation using the legacy plist and identity.
 
+Later helper updates use a default-branch-owned preparation workflow and one
+atomic source-and-artifact pull request. The workflow definition must be merged
+and reviewed on the protected default branch before the repository owner
+dispatches it with an explicit target `source_ref` and `source_commit`.
+Credentials-free jobs prove the selected remote ref resolves to that commit and
+build and test the target source. The signing job checks out no repository code
+and executes no candidate while credentials exist. Post-signing execution has
+no OIDC or attestation permission. A final no-checkout job uses only trusted
+inline validation immediately before attesting immutable subjects. The manifest
+binds the target `source_commit` separately from the trusted
+`workflow_commit`. If the workflow must change, that infrastructure change is a
+separate prerequisite pull request. The signed helper, manifest, and runtime
+source then stay together on the target branch, whose exact source commit must
+become an ancestor of the default branch through normal review before release.
+
 The bundle identifier intentionally migrates once from the existing
 `com.codex` ad-hoc identity to the repository owner's namespace. Both identities
 remain separate during the rollout and the signed identity must remain stable
@@ -69,9 +84,11 @@ boundary.
 
 Release preparation is separate from release publication:
 
-1. A secret-free job tests the exact default-branch commit, builds and executes
-   an ad-hoc universal candidate, records source and build-input hashes, checks
-   the ZIP central directory, and uploads an immutable unsigned artifact.
+1. The owner dispatches the trusted workflow on the default branch. A
+   credentials-free job checks out the exact target source commit, proves its
+   remote ref still agrees, builds and executes an ad-hoc universal candidate,
+   records source and build-input hashes, checks the ZIP central directory, and
+   uploads an immutable unsigned artifact.
 2. A protected job checks that artifact's digest, validates it before
    extraction, and uses only macOS system tools plus short inline checks while
    signing credentials exist. It never checks out repository code or executes
@@ -79,13 +96,20 @@ Release preparation is separate from release publication:
    checksums, destroys credentials, and only then uploads the signed artifact.
 3. A second secret-free job downloads the exact signed bytes, verifies their
    digests, runs the full repository verifier including schema and capability
-   probes, validates Developer ID, ticket, Gatekeeper, source hashes, and
-   modes, then attests and uploads those exact reviewed files.
-4. The expanded bundle and provenance manifest enter the repository through a
-   normal reviewed pull request.
-5. The secrets-free tag workflow verifies the committed artifact's attestation,
-   requires its source commit to be on the default branch, and verifies the
-   deterministic plugin ZIP before publication.
+   probes, validates Developer ID, ticket, Gatekeeper, source hashes, and modes,
+   and uploads immutable verified subjects plus their digests.
+4. A no-checkout job with OIDC and attestation permissions downloads those
+   exact subjects, validates their closed inventory and job-output digests with
+   trusted inline code, and immediately attests them. It never runs target
+   source or the signed helper.
+5. The expanded bundle and provenance manifest enter the repository with the
+   exact source changes through a normal reviewed pull request.
+6. The secrets-free tag workflow verifies that the signer workflow and its
+   digest match the manifest's default-branch `workflow_commit`, requires the
+   target `source_commit` to be an ancestor of the default branch and tag, and
+   verifies the deterministic plugin ZIP before publication. Digest and
+   ancestry checks are authoritative; a mutable branch-name label is not part
+   of the trust decision.
 
 The repository ruleset permits creation of `v*` tags but blocks their update or
 deletion without a bypass actor. Publication rechecks the exact tag object at

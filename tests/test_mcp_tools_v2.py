@@ -166,7 +166,10 @@ class McpToolsV2SchemaTests(unittest.TestCase):
             )
             self.assertIs(relative["additionalProperties"], False, tool_name)
             self.assertEqual(
-                relative["properties"]["offset_seconds"],
+                {
+                    key: relative["properties"]["offset_seconds"][key]
+                    for key in ("type", "minimum", "maximum")
+                },
                 {
                     "type": "integer",
                     "minimum": -31_536_000,
@@ -174,6 +177,53 @@ class McpToolsV2SchemaTests(unittest.TestCase):
                 },
                 tool_name,
             )
+            self.assertIn("due anchor", relative["description"], tool_name)
+            self.assertIn(
+                "bare default-display form only",
+                relative["description"],
+                tool_name,
+            )
+            self.assertIn("action metadata", relative["description"], tool_name)
+
+            offset_description = relative["properties"]["offset_seconds"][
+                "description"
+            ]
+            self.assertIn("inclusive", offset_description.lower(), tool_name)
+            self.assertIn("-31,536,000 through 0", offset_description, tool_name)
+            self.assertIn(
+                "31,536,000 seconds (365 elapsed days)",
+                offset_description,
+                tool_name,
+            )
+
+    def test_alarm_array_contract_describes_create_and_replace_all_updates(
+        self,
+    ) -> None:
+        create_alarms = self.by_name["create_reminder"]["inputSchema"][
+            "properties"
+        ]["alarms"]["description"]
+        self.assertIn("complete alarm array", create_alarms.lower())
+        self.assertIn("relative alarm requires due in the same create", create_alarms)
+
+        change_alarms = self.by_name["change_reminder"]["inputSchema"]["$defs"][
+            "patch"
+        ]["properties"]["alarms"]["description"]
+        for phrase in (
+            "complete-array replace-all",
+            "Omission preserves",
+            "null or [] explicitly clears",
+            "alarm-only patch against existing state",
+            "exact read",
+            "due anchor",
+            "complete current alarms",
+            "read_only:true",
+            "non-empty replacement is rejected before mutation",
+            "explicit clear-all request",
+            "resulting due remains non-null",
+            "Setting due:null while retaining a relative alarm is rejected",
+            "complete non-relative replacement",
+        ):
+            self.assertIn(phrase, change_alarms)
 
     def test_every_public_tool_has_a_human_readable_title(self) -> None:
         self.assertEqual(

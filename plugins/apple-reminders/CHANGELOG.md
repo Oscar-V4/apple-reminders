@@ -2,7 +2,37 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## Unreleased
+## 0.5.1 — 2026-08-31
+
+### Changed
+
+- Defined writable relative alarms as the faithful bare default-display subset:
+  integral `offset_seconds` from `-31536000` through `0`, with the lower bound
+  exactly 31,536,000 seconds (365 elapsed days) before due. Existing unsupported
+  trigger, offset, or action variants remain readable as `read_only:true` with bounded
+  action metadata.
+- Made the complete-array contract explicit: supplying `alarms` replaces every
+  alarm, omitting it preserves the array, and `null` or `[]` explicitly clears
+  it. A non-empty replacement is rejected before mutation when an existing
+  read-only alarm could not be reconstructed faithfully.
+
+### Fixed
+
+- Expanded verification dependencies for due-relative alarms. When the
+  resulting Reminder contains a relative alarm, due-only and alarm-only changes
+  now verify both `due` and `alarms`; list/account moves verify the destination
+  (`calendar_id` natively and `list_id` publicly), `due`, and `alarms`. Native
+  verification performs a fresh identifier lookup after save, and public
+  verification repeats the expanded comparison against a separate exact read.
+- Rejected JSON `false` and `true` as relative `offset_seconds` at the native
+  helper boundary, closing the Foundation Boolean-as-`NSNumber` bypass before
+  mutation.
+- Preserved read-only alarm action metadata across moves, completion changes,
+  and unrelated patches. Lossy native trigger state can no longer compare equal
+  by accident; such a committed write remains verification-pending.
+- Bound refreshed signed-helper provenance to a separately recorded,
+  default-branch-owned workflow commit, with no target-controlled code executed
+  inside the signing or attestation permission boundaries.
 
 ## 0.5.0 — 2026-08-31
 

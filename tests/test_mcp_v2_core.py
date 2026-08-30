@@ -1045,6 +1045,83 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertTrue(callable(subject.reference_port.revalidate_reference))
         self.assertTrue(callable(subject.reference_port.invalidate_reference))
 
+    def test_exact_read_bounds_read_only_alarm_action_metadata(self) -> None:
+        eventkit = FakeEventKit()
+        reminder = native_reminder()
+        reminder["alarms"] = [
+            {
+                "kind": "relative",
+                "offset_seconds": -900,
+                "read_only": True,
+                "_verification_unavailable": True,
+                "action": {
+                    "type": "audio" * 20,
+                    "email_address": "e" * 2_000,
+                    "sound_name": "s" * 1_000,
+                    "url": "u" * 10_000,
+                },
+            }
+        ]
+        eventkit.queue("read_reminder", read_receipt(reminder))
+
+        result = facade(eventkit).read_reminder({"reminder_id": "REMINDER-1"})
+
+        action = result["data"]["reminder"]["alarms"][0]["action"]
+        self.assertNotIn(
+            "_verification_unavailable",
+            result["data"]["reminder"]["alarms"][0],
+        )
+        self.assertEqual(len(action["type"]), 16)
+        self.assertEqual(len(action["email_address"]), 1_000)
+        self.assertEqual(len(action["sound_name"]), 512)
+        self.assertEqual(len(action["url"]), 8_192)
+
+    def test_final_verification_keeps_full_alarm_action_metadata(self) -> None:
+        eventkit = FakeEventKit()
+        before = native_reminder()
+        before["due"] = {"kind": "all_day", "date": "2027-08-31"}
+        before["alarms"] = [
+            {
+                "kind": "relative",
+                "offset_seconds": -900,
+                "read_only": True,
+                "action": {
+                    "type": "audio",
+                    "sound_name": "s" * 512 + "A",
+                },
+            }
+        ]
+        committed = copy.deepcopy(before)
+        committed["due"] = {"kind": "all_day", "date": "2027-09-30"}
+        final = copy.deepcopy(committed)
+        final["alarms"][0]["action"]["sound_name"] = "s" * 512 + "B"
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue(
+            "update_reminder",
+            mutation_receipt("update_reminder", before, committed),
+            mutation=True,
+        )
+        eventkit.queue("read_reminder", read_receipt(final))
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})[
+            "data"
+        ]["reminder"]["reference"]
+
+        result = subject.change_reminder(
+            {
+                "reference": reference,
+                "action": {
+                    "kind": "patch",
+                    "patch": {
+                        "due": {"kind": "all_day", "date": "2027-09-30"}
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertEqual(result["error"]["reason_code"], "final_state_mismatch")
+
     def test_exact_read_does_not_invent_a_reference_without_last_modified(self) -> None:
         eventkit = FakeEventKit()
         reminder = native_reminder()
@@ -1148,6 +1225,55 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(summary["alarm_count"], 10)
         self.assertNotIn("external_id", summary)
         self.assertNotIn("created", summary)
+
+    def test_fetch_preserves_read_only_relative_alarm_action_metadata(self) -> None:
+        eventkit = FakeEventKit()
+        reminder = native_reminder()
+        reminder["alarms"] = [
+            {
+                "kind": "relative",
+                "offset_seconds": -900,
+                "read_only": True,
+                "action": {
+                    "type": "audio",
+                    "sound_name": "Glass",
+                    "email_address": "alerts@example.com",
+                    "url": "example:run",
+                },
+            }
+        ]
+        eventkit.queue(
+            "fetch_reminders",
+            fetch_receipt(
+                [reminder],
+                total_matched=1,
+                offset=0,
+                has_more=False,
+                next_offset=None,
+                snapshot_fingerprint=None,
+            ),
+        )
+
+        result = facade(eventkit).fetch_reminders(
+            {"list_ids": ["LIST-1"], "limit": 1}
+        )
+
+        self.assertEqual(
+            result["data"]["items"][0]["alarms"],
+            [
+                {
+                    "kind": "relative",
+                    "offset_seconds": -900,
+                    "read_only": True,
+                    "action": {
+                        "type": "audio",
+                        "sound_name": "Glass",
+                        "email_address": "alerts@example.com",
+                        "url": "example:run",
+                    },
+                }
+            ],
+        )
 
     def test_fetch_cursor_keeps_the_ordered_snapshot_private_across_pages(self) -> None:
         eventkit = FakeEventKit()
@@ -1357,6 +1483,87 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["error"]["reason_code"], "final_state_mismatch")
         self.assertNotIn("rev1.", repr(result))
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
+
+    def test_relative_alarm_dependencies_must_match_the_public_final_read(self) -> None:
+        before = native_reminder()
+        before["due"] = {"kind": "all_day", "date": "2027-08-31"}
+        before["alarms"] = [
+            {"kind": "relative", "offset_seconds": -1_209_600}
+        ]
+
+        due_after = copy.deepcopy(before)
+        due_after["due"] = {"kind": "all_day", "date": "2027-09-30"}
+        due_drift = copy.deepcopy(due_after)
+        due_drift["alarms"] = []
+
+        alarm_after = copy.deepcopy(before)
+        alarm_after["alarms"] = [
+            {"kind": "relative", "offset_seconds": -604_800}
+        ]
+        alarm_drift = copy.deepcopy(alarm_after)
+        alarm_drift["due"] = {"kind": "all_day", "date": "2027-09-01"}
+
+        move_after = copy.deepcopy(before)
+        move_after["calendar_id"] = "LIST-2"
+        move_after["calendar_title"] = "Work"
+        move_drift = copy.deepcopy(move_after)
+        move_drift["alarms"] = [
+            {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+            }
+        ]
+
+        cases = (
+            (
+                "due-only patch",
+                "update_reminder",
+                {"kind": "patch", "patch": {"due": due_after["due"]}},
+                due_after,
+                due_drift,
+            ),
+            (
+                "alarm-only patch",
+                "update_reminder",
+                {"kind": "patch", "patch": {"alarms": alarm_after["alarms"]}},
+                alarm_after,
+                alarm_drift,
+            ),
+            (
+                "list move",
+                "move_reminder",
+                {"kind": "move_to_list", "list_id": "LIST-2"},
+                move_after,
+                move_drift,
+            ),
+        )
+
+        for label, operation, action, committed, final in cases:
+            with self.subTest(label=label):
+                eventkit = FakeEventKit()
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue(
+                    operation,
+                    mutation_receipt(operation, before, committed),
+                    mutation=True,
+                )
+                eventkit.queue("read_reminder", read_receipt(final))
+                subject = facade(eventkit)
+                reference = subject.read_reminder(
+                    {"reminder_id": "REMINDER-1"}
+                )["data"]["reminder"]["reference"]
+
+                result = subject.change_reminder(
+                    {"reference": reference, "action": action}
+                )
+
+                self.assertEqual(result["status"], "committed_verification_pending")
+                self.assertIsNone(result["verification"]["matched"])
+                self.assertFalse(result["verification"]["final_read"])
+                self.assertEqual(
+                    result["error"]["reason_code"], "final_state_mismatch"
+                )
+                self.assertNotIn("rev1.", repr(result))
 
     def test_unchanged_receipt_with_mismatched_final_state_preserves_uncertainty(self) -> None:
         eventkit = FakeEventKit()

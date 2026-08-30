@@ -57,7 +57,7 @@ class PluginValidationTests(unittest.TestCase):
         self.assertNotIn("links", featured_examples.casefold())
         self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
         self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.0",
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.1",
             quick_start,
         )
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)
@@ -130,7 +130,7 @@ class PluginValidationTests(unittest.TestCase):
         self.assertEqual(server_versions, [version])
         self.assertIn(f"--ref v{version}", readme)
         self.assertIn(f"## {version} —", changelog)
-        self.assertIn(f"implemented in {version}", decision)
+        self.assertIn("implemented in 0.5.0", decision)
 
     def test_manifest_reuses_one_reviewed_brand_asset(self) -> None:
         manifest = json.loads(

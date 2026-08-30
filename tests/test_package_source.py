@@ -372,7 +372,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.0")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.1")
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -651,8 +651,8 @@ class SourcePackagePolicyTests(unittest.TestCase):
             info_payload = plistlib.loads(
                 (REPO_ROOT / "scripts" / "eventkit_helper_app_info.plist").read_bytes()
             )
-            info_payload["CFBundleShortVersionString"] = "0.5.0"
-            info_payload["CFBundleVersion"] = "0.5.0"
+            info_payload["CFBundleShortVersionString"] = "0.5.1"
+            info_payload["CFBundleVersion"] = "0.5.1"
             info.write_bytes(plistlib.dumps(info_payload, sort_keys=True))
             executable.write_bytes(b"\xca\xfe\xba\xbe" + b"universal-helper")
             executable.chmod(0o755)
@@ -672,6 +672,14 @@ class SourcePackagePolicyTests(unittest.TestCase):
                     audit_source_package.NATIVE_HELPER_BUILD_INPUT_FILES
                 )
             }
+            self.assertIn(
+                ".github/workflows/prepare-signed-helper-source.yml",
+                build_inputs,
+            )
+            self.assertNotIn(
+                ".github/workflows/prepare-signed-helper.yml",
+                build_inputs,
+            )
             app_files = {
                 relative.relative_to("native").as_posix(): hashlib.sha256(
                     (plugin / relative).read_bytes()
@@ -681,6 +689,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
             manifest = {
                 "schema_version": 1,
                 "source_commit": "a" * 40,
+                "workflow_commit": "c" * 40,
                 "source_files": source_files,
                 "build_inputs": build_inputs,
                 "build_environment": {
@@ -702,7 +711,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
                 "notarization_checked": True,
                 "notarized": True,
-                "plugin_version": "0.5.0",
+                "plugin_version": "0.5.1",
                 "signature": "developer-id",
                 "team_id": "V8347N9346",
             }
@@ -735,6 +744,15 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             minos_errors = audit_source_package.audit_source(plugin).errors
+            manifest["minimum_macos_by_architecture"]["x86_64"] = "14.0"
+            manifest.pop("workflow_commit")
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            missing_workflow_commit_errors = audit_source_package.audit_source(
+                plugin
+            ).errors
 
         self.assertEqual(
             info_by_name[executable_member].external_attr >> 16,
@@ -747,6 +765,10 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertIn(
             "native helper manifest minimum_macos_by_architecture drift",
             minos_errors,
+        )
+        self.assertIn(
+            "native helper manifest workflow_commit is not a full commit hash",
+            missing_workflow_commit_errors,
         )
 
     def test_incomplete_native_helper_tree_is_rejected(self) -> None:

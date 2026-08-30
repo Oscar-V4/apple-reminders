@@ -228,7 +228,7 @@ def _trimmed_string(value: Any, name: str, maximum: int) -> str:
     return normalized
 
 
-def _public_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
+def _core_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
     reminder = {
         field: copy.deepcopy(value.get(field)) for field in PUBLIC_REMINDER_FIELDS
     }
@@ -238,6 +238,18 @@ def _public_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
     reminder["list_title"] = copy.deepcopy(
         value.get("list_title", value.get("calendar_title"))
     )
+    return reminder
+
+
+def _public_reminder(value: Mapping[str, Any]) -> dict[str, Any]:
+    reminder = _core_reminder(value)
+    raw_alarms = reminder.get("alarms")
+    if isinstance(raw_alarms, list):
+        reminder["alarms"] = [
+            alarm
+            for alarm in (_bounded_alarm(raw) for raw in raw_alarms)
+            if alarm is not None
+        ]
     return reminder
 
 
@@ -278,6 +290,19 @@ def _bounded_alarm(value: Any) -> dict[str, Any] | None:
         result["offset_seconds"] = value["offset_seconds"]
     if isinstance(value.get("read_only"), bool):
         result["read_only"] = value["read_only"]
+    action = value.get("action")
+    if isinstance(action, Mapping):
+        public_action: dict[str, Any] = {}
+        for field, maximum in (
+            ("type", 16),
+            ("email_address", 1_000),
+            ("sound_name", 512),
+            ("url", 8_192),
+        ):
+            if isinstance(action.get(field), str):
+                public_action[field] = action[field][:maximum]
+        if public_action:
+            result["action"] = public_action
     location = value.get("location")
     if isinstance(location, Mapping):
         public_location: dict[str, Any] = {}
@@ -331,12 +356,13 @@ def _change_reminder(
 ) -> dict[str, Any] | None:
     if not isinstance(value, Mapping) or not value:
         return None
+    public_value = _public_reminder(value)
     reminder = {
-        field: copy.deepcopy(value.get(field))
+        field: copy.deepcopy(public_value.get(field))
         for field in PUBLIC_CHANGE_REMINDER_FIELDS
     }
     reminder["list_id"] = copy.deepcopy(
-        value.get("list_id", value.get("calendar_id"))
+        public_value.get("list_id")
     )
     raw_url_attachment = value.get("url_attachment")
     reminder["url_attachment"] = (
@@ -776,7 +802,7 @@ class EventKitCoreAdapter:
                 "invalid_exact_read",
                 "EventKit exact read did not return a Reminder object",
             )
-        reminder = _public_reminder(raw_reminder)
+        reminder = _core_reminder(raw_reminder)
         if reminder.get("id") != reminder_id:
             raise UnsafeRevisionError(
                 "exact_read_target_mismatch",

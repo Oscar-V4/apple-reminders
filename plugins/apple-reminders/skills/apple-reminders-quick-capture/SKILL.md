@@ -35,7 +35,7 @@ Timed example:
 }
 ```
 
-All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their own RFC 3339 `date_time`; location alarms require explicit coordinates and `enter` or `leave`. A due-anchored relative alarm is `{"kind":"relative","offset_seconds":-1209600}` for two weeks before. Relative offsets are integer seconds from `-31536000` through `0` and require an existing or same-create due value. One recurrence rule is supported and requires a due value.
+All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their own RFC 3339 `date_time`; location alarms require explicit coordinates and `enter` or `leave`. A due-anchored relative alarm is `{"kind":"relative","offset_seconds":-1209600}` for two weeks before. Relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant. A relative alarm requires a same-create due value. One recurrence rule is supported and requires a due value.
 
 ## Image follow-up
 

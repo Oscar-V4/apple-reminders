@@ -10,7 +10,8 @@ Usage: prepare_signed_eventkit_helper.sh \
   --notary-key PATH \
   --notary-key-id KEY_ID \
   --notary-issuer-id ISSUER_ID \
-  --source-commit COMMIT
+  --source-commit COMMIT \
+  --workflow-commit COMMIT
 
 Builds, signs, notarizes, staples, structurally verifies, and packages the
 universal Apple Reminders EventKit helper. It never launches the helper. Run
@@ -37,6 +38,7 @@ notary_key=""
 notary_key_id=""
 notary_issuer_id=""
 source_commit=""
+workflow_commit=""
 
 while (($#)); do
   case "$1" in
@@ -75,6 +77,11 @@ while (($#)); do
       source_commit=$2
       shift 2
       ;;
+    --workflow-commit)
+      (($# >= 2)) || die "--workflow-commit requires a value"
+      workflow_commit=$2
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -93,6 +100,8 @@ done
   die "--notary-issuer-id must be a UUID"
 [[ "$source_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] ||
   die "--source-commit must be a full lowercase Git object ID"
+[[ "$workflow_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] ||
+  die "--workflow-commit must be a full lowercase Git object ID"
 [[ -f "$notary_key" && ! -L "$notary_key" ]] ||
   die "notary key must be a regular, non-symlink file"
 [[ ! -L "$output_directory" ]] || die "output directory must not be a symlink"
@@ -218,6 +227,7 @@ umask "$previous_umask"
   --require-developer-id \
   --require-notarized \
   --source-commit "$source_commit" \
+  --workflow-commit "$workflow_commit" \
   --write-manifest "$manifest"
 
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$app" "$final_zip"

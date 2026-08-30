@@ -52,6 +52,12 @@ def validated_source_commit(value: str) -> str:
     return value
 
 
+def validated_workflow_commit(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value):
+        raise BuildFailure("workflow commit must be a full lowercase Git object ID")
+    return value
+
+
 def current_build_environment() -> dict[str, str]:
     commands = {
         "clang": [XCRUN, "clang", "--version"],
@@ -374,9 +380,11 @@ def build_manifest(
     verification: dict[str, Any],
     *,
     source_commit: str,
+    workflow_commit: str,
     build_environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     source_commit = validated_source_commit(source_commit)
+    workflow_commit = validated_workflow_commit(workflow_commit)
     source_files = {
         relative.as_posix(): sha256(plugin_root / relative)
         for relative in (
@@ -392,6 +400,7 @@ def build_manifest(
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "source_commit": source_commit,
+        "workflow_commit": workflow_commit,
         "source_files": source_files,
         "build_inputs": build_inputs,
         "build_environment": build_environment or current_build_environment(),
@@ -405,6 +414,7 @@ def verify_manifest(
     actual: dict[str, Any],
     *,
     expected_source_commit: str,
+    expected_workflow_commit: str,
 ) -> dict[str, Any]:
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise BuildFailure("native helper manifest is missing or unsafe")
@@ -429,6 +439,7 @@ def verify_manifest(
         plugin_root,
         actual,
         source_commit=validated_source_commit(expected_source_commit),
+        workflow_commit=validated_workflow_commit(expected_workflow_commit),
         build_environment=manifest_build_environment,
     )
     if manifest != expected:
@@ -472,6 +483,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-manifest", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--source-commit", default=os.environ.get("GITHUB_SHA", ""))
+    parser.add_argument(
+        "--workflow-commit",
+        default=(
+            os.environ.get("WORKFLOW_COMMIT")
+            or os.environ.get("GITHUB_SHA", "")
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         verification = verify_app(
@@ -489,10 +507,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.write_manifest:
             if not args.source_commit:
                 raise BuildFailure("--source-commit is required when writing a manifest")
+            if not args.workflow_commit:
+                raise BuildFailure(
+                    "--workflow-commit, WORKFLOW_COMMIT, or GITHUB_SHA is required "
+                    "when writing a manifest"
+                )
             manifest = build_manifest(
                 args.plugin_root.resolve(),
                 verification,
                 source_commit=args.source_commit,
+                workflow_commit=args.workflow_commit,
             )
             result["manifest"] = str(
                 _write_new_manifest(args.write_manifest, manifest)
@@ -502,11 +526,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise BuildFailure(
                     "--source-commit or GITHUB_SHA is required when verifying a manifest"
                 )
+            if not args.workflow_commit:
+                raise BuildFailure(
+                    "--workflow-commit, WORKFLOW_COMMIT, or GITHUB_SHA is required "
+                    "when verifying a manifest"
+                )
             result["validated_manifest"] = verify_manifest(
                 args.plugin_root.resolve(),
                 Path(os.path.abspath(os.fspath(args.manifest.expanduser()))),
                 verification,
                 expected_source_commit=args.source_commit,
+                expected_workflow_commit=args.workflow_commit,
             )["source_commit"]
     except (BuildFailure, OSError, subprocess.SubprocessError) as exc:
         parser.exit(1, f"EventKit helper verification failed: {exc}\n")
