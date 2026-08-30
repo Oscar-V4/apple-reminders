@@ -37,7 +37,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 ## Dates, URLs, and recurrence
 
 - Resolve relative dates in the user's timezone. An all-day due value is `{"kind":"all_day","date":"YYYY-MM-DD"}`. A timed due value includes RFC 3339 `date_time` and an IANA `time_zone`.
-- Do not invent an alarm from a due date. Absolute alarms and coordinate-backed enter/leave location alarms are supported; relative and messaging alarms are not.
+- Add an alarm only when requested. Preserve “before the due date” wording as a due-anchored relative alarm; read an existing Reminder first to confirm its due value. Absolute and coordinate-backed enter/leave alarms remain available; messaging alarms are not public.
 - Only one validated recurrence rule is supported and it requires a due date.
 - A non-null URL on Core create/change is one hybrid operation: EventKit metadata, one visible native URL attachment, and final exact read. Do not add the same URL again after `verified`.
 - If a fresh same-URL patch returns `ambiguous_visible_url_attachment`, do not retry or guess which extra URL is stale. Follow `read_reminder` to obtain a fresh Reference, inspect native attachments, and clean up only an exact user-intended attachment ID.

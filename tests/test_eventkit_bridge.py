@@ -164,20 +164,39 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(normalized["alarms"][0]["date_time"], "2026-08-04T23:00:00.000Z")
 
-    def test_relative_alarm_fails_clearly_instead_of_guessing_anchor(self) -> None:
+    def test_relative_alarm_preserves_due_relative_offset(self) -> None:
+        normalized = eventkit_bridge.normalize_request(
+            {
+                "schema_version": 1,
+                "operation": "create_reminder",
+                "calendar_id": "CALENDAR-1",
+                "title": "Apple Developer membership expires",
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "alarms": [
+                    {"kind": "relative", "offset_seconds": -14 * 24 * 60 * 60}
+                ],
+            }
+        )
+
+        self.assertEqual(normalized["due"], {"kind": "all_day", "date": "2027-08-31"})
+        self.assertEqual(
+            normalized["alarms"],
+            [{"kind": "relative", "offset_seconds": -1_209_600}],
+        )
+
+    def test_relative_alarm_requires_a_due_anchor_on_create(self) -> None:
         with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
             eventkit_bridge.normalize_request(
                 {
                     "schema_version": 1,
                     "operation": "create_reminder",
                     "calendar_id": "CALENDAR-1",
-                    "title": "Leave home",
+                    "title": "Unanchored early reminder",
                     "alarms": [{"kind": "relative", "offset_seconds": -900}],
                 }
             )
 
-        self.assertEqual(raised.exception.code, "unsupported_relative_alarm")
-        self.assertEqual(raised.exception.status, "unsupported")
+        self.assertEqual(raised.exception.code, "relative_alarm_requires_due")
 
     def test_location_alarm_requires_coordinates_and_typed_proximity(self) -> None:
         normalized = eventkit_bridge.normalize_request(
@@ -1055,6 +1074,14 @@ class EventKitContractTests(unittest.TestCase):
                 self.assertIs(payload["ok"], True)
                 if operation == "capabilities":
                     self.assertIs(payload["data"]["fields"]["plain_location"], False)
+                    self.assertIs(
+                        payload["data"]["fields"]["relative_alarm_writes"],
+                        True,
+                    )
+                    self.assertNotIn(
+                        "early_reminder_relative_alarm_writes",
+                        payload["data"]["not_exposed"],
+                    )
                 self.assertIs(eventkit_bridge.validate_response(payload, operation), payload)
 
     @unittest.skipUnless(sys.platform == "darwin", "Objective-C EventKit helper requires macOS")

@@ -17,6 +17,7 @@ Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers,
 
 ```json
 {"kind":"patch","patch":{"title":"…","notes":"…","url":"…","priority":5,"due":null,"alarms":[],"recurrence_rules":[]}}
+{"kind":"patch","patch":{"alarms":[{"kind":"relative","offset_seconds":-1209600}]}}
 {"kind":"set_completion","completed":true}
 {"kind":"move_to_list","list_id":"EXACT-LIST-ID"}
 ```
@@ -70,7 +71,7 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 | Section | exact-list inspect/create and Reminder move | no rename or delete; names are list-scoped |
 | Tag | bounded inspect and exact Reminder assignment add/remove | no global unused-label row deletion |
 | Attachment | inspect metadata; attach/copy/replace/delete closed actions | no raw export/download, private path disclosure, or bulk repair apply |
-| Due/alarm/recurrence | typed due, explicit supported alarms, one validated recurrence rule | no invented alarm, relative alarm, or messaging alarm |
+| Due/alarm/recurrence | typed due; absolute, due-anchored relative, or coordinate-backed location alarms; one validated recurrence rule | relative alarms require a due value; no invented or messaging alarm |
 
 ## Diagnostics
 

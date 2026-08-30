@@ -2,6 +2,16 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## Unreleased
+
+### Added
+
+- Added writable EventKit relative alarms with bounded negative
+  `offset_seconds`, an existing or same-request due-date anchor, final exact
+  read-back, and public create/change schemas. Quick capture now preserves
+  requests such as “two weeks before” instead of converting them to an
+  absolute alarm date.
+
 ## 0.4.0 — 2026-08-29
 
 ### Added

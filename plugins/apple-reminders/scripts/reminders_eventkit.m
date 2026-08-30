@@ -3,6 +3,7 @@
 #import <EventKit/EventKit.h>
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
+#import <math.h>
 
 static const NSInteger BridgeSchemaVersion = 1;
 static const NSTimeInterval AccessRequestTimeoutSeconds = 60.0;
@@ -293,7 +294,7 @@ static NSDictionary *Capabilities(void) {
             @"typed_timed_due" : @YES,
             @"absolute_alarms" : @YES,
             @"location_alarms_with_coordinates" : @YES,
-            @"relative_alarm_writes" : @NO,
+            @"relative_alarm_writes" : @YES,
             @"single_typed_recurrence_rule" : @YES,
         },
         @"safety" : @{
@@ -314,13 +315,12 @@ static NSDictionary *Capabilities(void) {
             @"attachments",
             @"flagged",
             @"message_when_messaging",
-            @"early_reminder_relative_alarm_writes",
         ],
         @"limitations" : @[
             @"EventKit item and calendar identifiers are not guaranteed to survive a full account sync.",
             @"Location alarm support depends on the destination account and calendar; save may fail with a structured EventKit error.",
             @"Only one recurrence rule is accepted because multi-rule Reminder semantics are not reliably represented by the Reminders UI.",
-            @"Relative alarm writes are rejected because the public Reminder anchor semantics are not explicit enough for safe automation.",
+            @"Relative alarm writes require an existing or same-request typed due date and accept offsets from one year before through the due instant.",
             @"Create idempotency must be supplied by the calling adapter because EventKit exposes no safe reminder field for an idempotency key.",
         ],
     };
@@ -714,7 +714,6 @@ static NSDictionary *AlarmJSON(EKAlarm *alarm) {
     return @{
         @"kind" : @"relative",
         @"offset_seconds" : @(alarm.relativeOffset),
-        @"read_only" : @YES,
     };
 }
 
@@ -757,10 +756,45 @@ static EKAlarm *AlarmFromJSON(NSDictionary *value) {
         }
         return alarm;
     }
+    if ([kind isEqualToString:@"relative"]) {
+        NSNumber *offset = value[@"offset_seconds"];
+        if (![offset isKindOfClass:[NSNumber class]] ||
+            offset.doubleValue < -31536000 || offset.doubleValue > 0 ||
+            floor(offset.doubleValue) != offset.doubleValue) {
+            RaiseRequest(@"invalid_alarm",
+                         @"Relative alarm offset_seconds must be an integer from -31536000 through 0",
+                         @"invalid_request",
+                         @{});
+        }
+        return [EKAlarm alarmWithRelativeOffset:offset.doubleValue];
+    }
     RaiseRequest(@"unsupported_relative_alarm",
-                 @"Only absolute and coordinate-backed location alarm writes are supported",
+                 @"Only absolute, relative, and coordinate-backed location alarm writes are supported",
                  @"unsupported",
                  @{});
+}
+
+static BOOL AlarmValuesContainRelative(id values) {
+    if (![values isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+    for (id raw in (NSArray *)values) {
+        if ([raw isKindOfClass:[NSDictionary class]] &&
+            [[(NSDictionary *)raw objectForKey:@"kind"] isEqual:@"relative"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL ReminderHasRelativeAlarm(EKReminder *reminder) {
+    for (EKAlarm *alarm in reminder.alarms ?: @[]) {
+        if (alarm.absoluteDate == nil &&
+            (alarm.structuredLocation == nil || alarm.proximity == EKAlarmProximityNone)) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 static NSDictionary *ReminderJSON(EKReminder *reminder) {
@@ -862,6 +896,18 @@ static NSDictionary *ProjectionForKeys(NSDictionary *source, NSArray<NSString *>
 }
 
 static void ApplyMutableFields(EKReminder *reminder, NSDictionary *fields) {
+    id due = fields[@"due"];
+    id alarms = fields[@"alarms"];
+    BOOL dueWillExist = due == nil ? reminder.dueDateComponents != nil : due != [NSNull null];
+    BOOL relativeAlarmWillExist = alarms == nil
+        ? ReminderHasRelativeAlarm(reminder)
+        : AlarmValuesContainRelative(alarms);
+    if (relativeAlarmWillExist && !dueWillExist) {
+        RaiseRequest(@"relative_alarm_requires_due",
+                     @"A relative alarm requires a due date anchor",
+                     @"invalid_request",
+                     @{});
+    }
     if (fields[@"title"] != nil) {
         reminder.title = RequiredString(fields, @"title");
     }
@@ -877,11 +923,9 @@ static void ApplyMutableFields(EKReminder *reminder, NSDictionary *fields) {
     if (priority != nil) {
         reminder.priority = priority.unsignedIntegerValue;
     }
-    id due = fields[@"due"];
     if (due != nil) {
         reminder.dueDateComponents = due == [NSNull null] ? nil : ComponentsFromDueJSON((NSDictionary *)due);
     }
-    id alarms = fields[@"alarms"];
     if (alarms != nil) {
         if (alarms == [NSNull null]) {
             reminder.alarms = @[];

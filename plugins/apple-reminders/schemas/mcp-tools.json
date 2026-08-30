@@ -536,6 +536,24 @@
                 "type": "object",
                 "properties": {
                   "kind": {
+                    "const": "relative"
+                  },
+                  "offset_seconds": {
+                    "type": "integer",
+                    "minimum": -31536000,
+                    "maximum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "offset_seconds"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
                     "const": "location"
                   },
                   "proximity": {
@@ -911,6 +929,24 @@
                 "required": [
                   "kind",
                   "date_time"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "relative"
+                  },
+                  "offset_seconds": {
+                    "type": "integer",
+                    "minimum": -31536000,
+                    "maximum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "offset_seconds"
                 ],
                 "additionalProperties": false
               },

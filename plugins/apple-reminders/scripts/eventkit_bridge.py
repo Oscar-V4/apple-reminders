@@ -399,17 +399,20 @@ def normalize_alarm(value: Any, path: str) -> dict[str, Any]:
             )
         return {"kind": "location", "proximity": proximity, "location": result_location}
     if kind == "relative":
-        fail(
-            "unsupported_relative_alarm",
-            "Relative reminder alarm anchoring is not stable enough in the public macOS SDK; use an absolute alarm",
-            status="unsupported",
-            details={"path": path},
+        reject_unknown(alarm, {"kind", "offset_seconds"}, path)
+        require_fields(alarm, {"kind", "offset_seconds"}, path)
+        offset_seconds = normalized_int(
+            alarm["offset_seconds"],
+            f"{path}.offset_seconds",
+            -31_536_000,
+            0,
         )
+        return {"kind": "relative", "offset_seconds": offset_seconds}
     if kind is None:
         fail("missing_fields", f"{path} is missing required field: kind", details={"path": path})
     fail(
         "unsupported_alarm_kind",
-        f"{path}.kind must be absolute or location",
+        f"{path}.kind must be absolute, relative, or location",
         status="unsupported",
         details={"path": f"{path}.kind", "value": kind},
     )
@@ -642,6 +645,24 @@ def normalize_mutable_fields(obj: dict[str, Any], *, path: str, create: bool) ->
             obj["recurrence_rules"], f"{path}.recurrence_rules"
         )
     recurrence = result.get("recurrence_rules")
+    alarms = result.get("alarms")
+    has_relative_alarm = bool(
+        alarms
+        and any(alarm.get("kind") == "relative" for alarm in alarms)
+    )
+    if has_relative_alarm:
+        if create and result.get("due") is None:
+            fail(
+                "relative_alarm_requires_due",
+                "A relative alarm requires a typed due date to anchor its offset",
+                details={"path": path},
+            )
+        if "due" in result and result["due"] is None:
+            fail(
+                "relative_alarm_requires_due",
+                "Cannot set a relative alarm while clearing the due date",
+                details={"path": path},
+            )
     if recurrence:
         if create and result.get("due") is None:
             fail(
