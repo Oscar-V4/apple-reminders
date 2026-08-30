@@ -1,8 +1,8 @@
 {
   "app_files": {
-    "AppleRemindersEventKitHelper.app/Contents/CodeResources": "8adcba4a4f3e44f0a71f88e632c4a6d1ca8d0a0737df567df18ddc043b75e405",
+    "AppleRemindersEventKitHelper.app/Contents/CodeResources": "a3477ecd4c77afb19a8f711b11cd7efa8de292bf36b61f315622be43ccfef790",
     "AppleRemindersEventKitHelper.app/Contents/Info.plist": "657bc9d597dd7c1fdab8b060af4b8166ff8832ae83776504b1c674f86970d0d8",
-    "AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper": "95ea6c9cf816c5837b331cdd42c10454d53d400511c862662158400ec18d95de",
+    "AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper": "c0107ee42bb5213be150acf276e0df8f2acea1bd9366bb1b51ccbcf495ed81a8",
     "AppleRemindersEventKitHelper.app/Contents/_CodeSignature/CodeResources": "6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b"
   },
   "app_name": "AppleRemindersEventKitHelper.app",
@@ -10,7 +10,7 @@
     "arm64",
     "x86_64"
   ],
-  "binary_sha256": "95ea6c9cf816c5837b331cdd42c10454d53d400511c862662158400ec18d95de",
+  "binary_sha256": "c0107ee42bb5213be150acf276e0df8f2acea1bd9366bb1b51ccbcf495ed81a8",
   "build_environment": {
     "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
     "linker": "@(#)PROGRAM:ld PROJECT:ld-1167.5\nBUILD 01:45:05 Apr 30 2025\nconfigured to support archs: armv6 armv7 armv7s arm64 arm64e arm64_32 i386 x86_64 x86_64h armv6m armv7k armv7m armv7em\nwill use ld-classic for: armv6 armv7 armv7s i386 armv6m armv7k armv7m armv7em\nLTO support using: LLVM version 17.0.0 (static support for 29, runtime is 29)\nTAPI support using: Apple TAPI version 17.0.0 (tapi-1700.0.3.5)",
@@ -36,9 +36,9 @@
   "plugin_version": "0.5.1",
   "schema_version": 1,
   "signature": "developer-id",
-  "source_commit": "bc7d4dcea89931299d2f90c203c447aa1fab4ead",
+  "source_commit": "89fd04090eccbf835c51f6677c0ac081b67e2f16",
   "source_files": {
-    ".codex-plugin/plugin.json": "7412511334bffe8dde3c28d8335bf3002dd49d7d3d64aecd78245f4ed53b0c9d",
+    ".codex-plugin/plugin.json": "cdfa9ac1d2ba0baf9bcd2bda91d35037080f8e145944009ffee36e0bd959c683",
     "scripts/eventkit_bridge_schema.json": "e7a7633f8175b1db4bd738abc328c100d6d98431129e87a87f617f1f7cb2c408",
     "scripts/reminders_eventkit.m": "cb24dd1b3c7ab85db86ee14f2148fe97d9ec8a3fc7916cc53cb145c971957b4a"
   },
