@@ -521,6 +521,16 @@ def _next_action(
             "retry_original_once": False,
             "message": message,
         }
+    if reason == "native_helper_unavailable":
+        return {
+            "kind": "diagnose",
+            "tool": "diagnose_reminders",
+            "retry_original_once": False,
+            "message": (
+                "Reinstall or update Apple Reminders from an official release, "
+                "restart Codex, and run diagnose_reminders with scope=packaging."
+            ),
+        }
     if reason == "native_helper_build_failed":
         return {
             "kind": "diagnose",

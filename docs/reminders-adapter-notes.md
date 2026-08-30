@@ -4,7 +4,7 @@ These notes record implementation evidence from local macOS Reminders
 investigation. They describe the private adapter beneath the public Modules;
 they are not a second user-facing command contract.
 
-## Public 0.4 boundary
+## Public 0.5 boundary
 
 Core operations use EventKit for access, exact lists/reminders, typed due dates,
 absolute, due-anchored relative, and coordinate-backed location alarms, recurrence, completion,
@@ -26,7 +26,7 @@ recovery is exposed only through its guarded `del1` Recovery Module.
 ## Public API findings
 
 Historical experiments showed that AppleScript can inspect and change common
-Reminders fields, but it is app-state dependent. The packaged 0.4 runtime has
+Reminders fields, but it is app-state dependent. The packaged 0.5 runtime has
 no AppleScript mutation or native `show_reminder` path; normal Core writes and
 deletion use EventKit.
 

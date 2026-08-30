@@ -4,13 +4,38 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+## 0.5.0 — 2026-08-31
+
 ### Added
 
+- Bundled a universal `arm64`/`x86_64` EventKit Core helper for macOS 14 and
+  newer. The app is Developer ID signed, notarized by Apple, stapled for
+  offline Gatekeeper verification, and bound to its reviewed source and build
+  inputs by a committed provenance manifest and GitHub artifact attestation.
 - Added writable EventKit relative alarms with bounded negative
   `offset_seconds`, an existing or same-request due-date anchor, final exact
   read-back, and public create/change schemas. Quick capture now preserves
   requests such as “two weeks before” instead of converting them to an
   absolute alarm date.
+
+### Changed
+
+- Removed Xcode Command Line Tools from ordinary Core setup. Core now resolves
+  only the reviewed helper inside the installed plugin; a missing or invalid
+  bundle fails before mutation instead of downloading or automatically
+  compiling a replacement. Runtime trust checks parse Mach-O architecture and
+  minimum-version metadata directly and use only the macOS system `codesign`
+  tool; explicit contributor builds retain the legacy source path.
+- Kept Xcode Command Line Tools as a clearly separated dependency for Native
+  Extension and Recovery features that still compile private helpers locally,
+  including sections, tag changes, image or URL attachment changes, and
+  Recently Deleted recovery.
+- Migrated the Core helper once from its legacy ad-hoc signing identity to the
+  stable Developer ID signing identity used by project releases. macOS may ask
+  for Reminders access again at this upgrade boundary.
+- Added a secrets-free tag release path that independently verifies the helper
+  attestation, provenance, default-branch ancestry, package allowlist, file
+  modes, and deterministic ZIP before publishing exact checksums and assets.
 
 ## 0.4.0 — 2026-08-29
 

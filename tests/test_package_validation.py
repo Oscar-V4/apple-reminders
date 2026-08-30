@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import tempfile
@@ -47,20 +48,23 @@ class PluginValidationTests(unittest.TestCase):
         quick_start = readme.split("## Quick Start", 1)[1].split("## First permission", 1)[0]
 
         self.assertIn("# Apple Reminders for Codex", readme)
-        self.assertIn("Turn these meeting notes into separate action items", readme)
+        self.assertIn("Turn these meeting notes into one reminder per action item", readme)
         self.assertIn("Create one reminder per screenshot", readme)
+        featured_examples = readme.split("Try prompts like:", 1)[1].split(
+            "This repository hosts", 1
+        )[0]
+        self.assertIn("The first three prompts use Core", featured_examples)
+        self.assertNotIn("links", featured_examples.casefold())
         self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
         self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0",
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.0",
             quick_start,
         )
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)
         self.assertIn("Show me everything overdue", quick_start)
         self.assertNotIn("doctor", quick_start.casefold())
         self.assertIn("## Upgrade", readme)
-        upgrade = readme.split("## Upgrade", 1)[1].split(
-            "## Temporarily disable", 1
-        )[0]
+        upgrade = readme.split("## Upgrade", 1)[1].split("## Uninstall", 1)[0]
         self.assertIn(
             "codex plugin remove apple-reminders@oscar-v4-reminders",
             upgrade,
@@ -82,6 +86,51 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("codex plugin remove apple-reminders@oscar-v4-reminders", readme)
         self.assertIn("macOS 14 or newer", readme)
         self.assertIn("Python 3.11 or newer", readme)
+        self.assertIn(
+            "Ordinary Core use does **not** require Xcode or Xcode Command Line Tools",
+            readme,
+        )
+        self.assertIn(
+            "Extension and Recovery features",
+            readme,
+        )
+        self.assertIn("therefore require Xcode Command Line Tools", readme)
+        self.assertNotIn("two source-runtime prerequisites", readme)
+
+    def test_public_release_version_is_coherent(self) -> None:
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        version = manifest["version"]
+        server_tree = ast.parse(
+            (PLUGIN_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+        )
+        server_versions = [
+            node.value.value
+            for node in server_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "SERVER_VERSION"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ]
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        decision = (
+            REPO_ROOT
+            / "docs"
+            / "decisions"
+            / "0019-prebuilt-signed-eventkit-core-helper.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(server_versions, [version])
+        self.assertIn(f"--ref v{version}", readme)
+        self.assertIn(f"## {version} —", changelog)
+        self.assertIn(f"implemented in {version}", decision)
 
     def test_manifest_reuses_one_reviewed_brand_asset(self) -> None:
         manifest = json.loads(

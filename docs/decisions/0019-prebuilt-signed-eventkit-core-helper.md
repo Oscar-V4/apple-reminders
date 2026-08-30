@@ -1,17 +1,17 @@
 # 0019 — Ship a signed, notarized EventKit Core helper
 
-**Status:** Accepted — rollout pending
+**Status:** Accepted — implemented in 0.5.0
 
 ## Context
 
-Core reminder operations currently compile `reminders_eventkit.m` on each
-user's Mac, cache the result, and apply an ad-hoc signature. That makes Xcode
-Command Line Tools an ordinary-user dependency, increases first-run latency,
-and gives the helper a less stable code-signing identity across rebuilds. The
-Python bridge around it already owns the important safety rules: bounded input,
-typed normalization, mutation uncertainty, Receipt validation, and exact
-read-back. Replacing that bridge would increase risk without improving the
-installation experience.
+Before 0.5.0, Core reminder operations compiled `reminders_eventkit.m` on each
+user's Mac, cached the result, and applied an ad-hoc signature. That made Xcode
+Command Line Tools an ordinary-user dependency, increased first-run latency,
+and gave the helper a less stable code-signing identity across rebuilds. The
+Python bridge around it already owned the important safety rules: bounded
+input, typed normalization, mutation uncertainty, Receipt validation, and exact
+read-back. Replacing that bridge would have increased risk without improving
+the installation experience.
 
 Codex marketplace installation copies the plugin subtree from a reviewed Git
 tag. A helper attached only to a GitHub Release would therefore not reach an
@@ -32,11 +32,11 @@ ticket cannot be stapled for offline Gatekeeper verification.
 
 ## Decision
 
-Choose option 4 for the public EventKit Core helper, using a two-pull-request
-rollout so the current source-built runtime keeps working until the notarized
-app is ready.
+Choose option 4 for the public EventKit Core helper. Use a two-pull-request
+rollout so the source-built runtime keeps working until the notarized app is
+ready, then switch runtime and artifact atomically.
 
-The future release bundle is
+The release bundle is
 `native/AppleRemindersEventKitHelper.app`, with bundle identifier
 `io.github.oscar-v4.apple-reminders.eventkit-bridge`. It contains exactly one
 universal `arm64` and `x86_64` executable, targets macOS 14, uses Developer ID
@@ -45,27 +45,27 @@ and a stapled ticket. App Sandbox remains off and the helper has no
 entitlements. Reminders access is requested through EventKit and the reviewed
 purpose string; no undocumented entitlement is invented.
 
-The first pull request adds only the build, verification, signing preparation,
-package policy, and this decision record. It keeps the existing
+The first rollout pull request added only the build, verification, signing
+preparation, package policy, and this decision record. It kept the existing
 `eventkit_bridge_info.plist`, source compiler, ad-hoc helper identity, and
-runtime resolver unchanged. The signed app is then produced from that merged,
+runtime resolver unchanged. The signed app was then produced from that merged,
 versioned source commit.
 
-The second pull request atomically commits the reviewed app and provenance
-manifest and switches ordinary Core resolution to that app. At that point the
-Python bridge remains the public safety boundary. Normal execution will resolve
-only the bundled app, reject symlinks and signature or identity drift, and
-launch the inner executable directly so synchronous stdin/stdout semantics do
-not change. A missing or invalid bundle will fail before mutation as
-`native_helper_unavailable`; it will not trigger an automatic compiler
-fallback. Contributor source compilation will remain an explicit development
+The second rollout pull request atomically commits the reviewed app and
+provenance manifest and switches ordinary Core resolution to that app. The
+Python bridge remains the public safety boundary. Normal execution resolves
+only the bundled app, rejects symlinks and signature or identity drift, and
+launches the inner executable directly so synchronous stdin/stdout semantics do
+not change. A missing or invalid bundle fails before mutation as
+`native_helper_unavailable`; it does not trigger an automatic compiler
+fallback. Contributor source compilation remains an explicit development
 operation using the legacy plist and identity.
 
 The bundle identifier intentionally migrates once from the existing
 `com.codex` ad-hoc identity to the repository owner's namespace. Both identities
 remain separate during the rollout and the signed identity must remain stable
-after release. Users may see one new Reminders permission prompt at the
-migration boundary.
+after release. macOS may ask for Reminders access again at the migration
+boundary.
 
 Release preparation is separate from release publication:
 
@@ -83,9 +83,14 @@ Release preparation is separate from release publication:
    modes, then attests and uploads those exact reviewed files.
 4. The expanded bundle and provenance manifest enter the repository through a
    normal reviewed pull request.
-5. A later secrets-free tag workflow must verify the committed artifact's
-   attestation, require its source commit to be on the default branch, and
-   verify the deterministic plugin ZIP before publication.
+5. The secrets-free tag workflow verifies the committed artifact's attestation,
+   requires its source commit to be on the default branch, and verifies the
+   deterministic plugin ZIP before publication.
+
+The repository ruleset permits creation of `v*` tags but blocks their update or
+deletion without a bypass actor. Publication rechecks the exact tag object at
+its final boundary and relies on that immutability between the check and GitHub
+Release creation.
 
 The package allowlist admits only the exact app members and provenance manifest.
 The executable alone keeps mode `0755`; every other packaged file is normalized
@@ -95,14 +100,12 @@ release checks.
 
 ## Consequences
 
-Ordinary Core use no longer requires Xcode Command Line Tools once the second
-pull request and its signed bundle are released. Until then, the existing
-source-built behavior remains unchanged. Python 3.11+ remains a runtime
-dependency for the MCP and safety layers. Advanced sections, image attachments,
-and Recently Deleted recovery still use private helper paths that compile
-locally; those capabilities temporarily retain the Command Line Tools
-dependency and must be documented separately rather than implying the whole
-plugin is compiler-free.
+Ordinary Core use no longer requires Xcode Command Line Tools in 0.5.0. Python
+3.11+ remains a runtime dependency for the MCP and safety layers. Advanced
+sections, tag changes, image and URL attachments, and Recently Deleted recovery
+still use private helper paths that compile locally; those capabilities retain
+the Command Line Tools dependency and are documented separately rather than
+implying the whole plugin is compiler-free.
 
 The signed bytes and notarization ticket are intentionally not reproducible
 from source alone because secure timestamps and Apple tickets vary. The tagged

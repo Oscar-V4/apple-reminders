@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Strict JSON-in/JSON-out launcher for the native Reminders EventKit bridge.
 
-The Python layer owns request validation and deterministic helper compilation.
-The Objective-C helper owns EventKit access.  `--validate-only` never compiles or
-instantiates EventKit, which keeps contract tests independent from live data and
-macOS privacy prompts.
+The Python layer owns request validation and helper trust checks. The signed,
+notarized Objective-C helper owns EventKit access. ``--validate-only`` never
+launches EventKit, and source compilation is an explicit contributor-only path.
 """
 
 from __future__ import annotations
@@ -13,7 +12,10 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
+import stat
+import struct
 import sys
 import tempfile
 from datetime import date, datetime, timedelta, timezone
@@ -49,17 +51,130 @@ from bounded_process import (  # noqa: E402
 SOURCE_PATH = SCRIPT_DIR / "reminders_eventkit.m"
 INFO_PLIST_PATH = SCRIPT_DIR / "eventkit_bridge_info.plist"
 SCHEMA_PATH = SCRIPT_DIR / "eventkit_bridge_schema.json"
+PLUGIN_ROOT = SCRIPT_DIR.parent
+PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+BUNDLED_HELPER_NATIVE_DIR = PLUGIN_ROOT / "native"
+BUNDLED_HELPER_APP_NAME = "AppleRemindersEventKitHelper.app"
+BUNDLED_HELPER_EXECUTABLE_NAME = "apple-reminders-eventkit-helper"
+BUNDLED_HELPER_MANIFEST_NAME = "eventkit-helper-build.json"
+BUNDLED_HELPER_APP = BUNDLED_HELPER_NATIVE_DIR / BUNDLED_HELPER_APP_NAME
+BUNDLED_HELPER_PATH = (
+    BUNDLED_HELPER_APP / "Contents" / "MacOS" / BUNDLED_HELPER_EXECUTABLE_NAME
+)
+BUNDLED_HELPER_MANIFEST_PATH = (
+    BUNDLED_HELPER_NATIVE_DIR / BUNDLED_HELPER_MANIFEST_NAME
+)
 DEFAULT_CACHE_ROOT = Path.home() / "Library/Caches/apple-reminders-codex/eventkit-bridge"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_NOTES_CHARS = 100_000
 NATIVE_TIMEOUT_SECONDS = 70
-HELPER_BUNDLE_IDENTIFIER = "com.codex.apple-reminders.eventkit-bridge"
+LEGACY_HELPER_BUNDLE_IDENTIFIER = "com.codex.apple-reminders.eventkit-bridge"
+BUNDLED_HELPER_BUNDLE_IDENTIFIER = (
+    "io.github.oscar-v4.apple-reminders.eventkit-bridge"
+)
+BUNDLED_HELPER_TEAM_IDENTIFIER = "V8347N9346"
+BUNDLED_HELPER_MINIMUM_MACOS = "14.0"
+BUNDLED_HELPER_ARCHITECTURES = frozenset(("arm64", "x86_64"))
+BUNDLED_HELPER_DESIGNATED_REQUIREMENT = (
+    'anchor apple generic and identifier "'
+    + BUNDLED_HELPER_BUNDLE_IDENTIFIER
+    + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+    + ' and certificate leaf[subject.OU] = "'
+    + BUNDLED_HELPER_TEAM_IDENTIFIER
+    + '" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+)
 MAX_NATIVE_STDOUT_BYTES = 2_000_000
 MAX_NATIVE_STDERR_BYTES = 256 * 1024
 MAX_COMPILER_IDENTITY_STDOUT_BYTES = 64 * 1024
 MAX_COMPILER_IDENTITY_STDERR_BYTES = 64 * 1024
 MAX_BUILD_STDOUT_BYTES = 256 * 1024
 MAX_BUILD_STDERR_BYTES = 1024 * 1024
+MAX_HELPER_VERIFY_STDOUT_BYTES = 256 * 1024
+MAX_HELPER_VERIFY_STDERR_BYTES = 256 * 1024
+MAX_BUNDLED_HELPER_FILE_BYTES = 16 * 1024 * 1024
+
+FAT_MAGIC_FORMATS = {
+    b"\xca\xfe\xba\xbe": (">", False),
+    b"\xbe\xba\xfe\xca": ("<", False),
+    b"\xca\xfe\xba\xbf": (">", True),
+    b"\xbf\xba\xfe\xca": ("<", True),
+}
+MACH_HEADER_64_SIZE = 32
+MACH_MAGIC_64_LITTLE_ENDIAN = 0xFEEDFACF
+MACH_FILETYPE_EXECUTE = 0x2
+CPU_TYPE_X86_64 = 0x01000007
+CPU_SUBTYPE_X86_64_ALL = 0x3
+CPU_TYPE_ARM64 = 0x0100000C
+CPU_SUBTYPE_ARM64_ALL = 0x0
+CPU_SUBTYPE_CAPABILITY_MASK = 0xFF000000
+CPU_SUBTYPE_BASE_MASK = 0x00FFFFFF
+EXPECTED_MACH_CPU_SUBTYPES = {
+    CPU_TYPE_X86_64: CPU_SUBTYPE_X86_64_ALL,
+    CPU_TYPE_ARM64: CPU_SUBTYPE_ARM64_ALL,
+}
+LC_VERSION_MIN_MACOSX = 0x24
+LC_BUILD_VERSION = 0x32
+PLATFORM_MACOS = 0x1
+MACOS_14_0_0_PACKED_VERSION = 14 << 16
+MAX_MACH_LOAD_COMMANDS = 4096
+
+BUNDLED_HELPER_EXPECTED_DIRECTORIES = frozenset(
+    (
+        "Contents",
+        "Contents/MacOS",
+        "Contents/_CodeSignature",
+    )
+)
+BUNDLED_HELPER_EXPECTED_FILE_MODES = {
+    "Contents/CodeResources": 0o644,
+    "Contents/Info.plist": 0o644,
+    f"Contents/MacOS/{BUNDLED_HELPER_EXECUTABLE_NAME}": 0o755,
+    "Contents/_CodeSignature/CodeResources": 0o644,
+}
+BUNDLED_HELPER_SOURCE_RELATIVE_PATHS = (
+    ".codex-plugin/plugin.json",
+    "scripts/eventkit_bridge_schema.json",
+    "scripts/reminders_eventkit.m",
+)
+BUNDLED_HELPER_BUILD_INPUT_RELATIVE_PATHS = frozenset(
+    (
+        ".github/workflows/prepare-signed-helper.yml",
+        "scripts/build_eventkit_helper_app.py",
+        "scripts/eventkit_helper_app_info.plist",
+        "scripts/prepare_signed_eventkit_helper.sh",
+        "scripts/verify_eventkit_helper.py",
+    )
+)
+BUNDLED_HELPER_BUILD_ENVIRONMENT_KEYS = frozenset(
+    ("clang", "linker", "macos_sdk", "xcode_path")
+)
+BUNDLED_HELPER_MANIFEST_KEYS = frozenset(
+    (
+        "app_files",
+        "app_name",
+        "architectures",
+        "binary_sha256",
+        "build_environment",
+        "build_inputs",
+        "bundle_identifier",
+        "executable",
+        "minimum_macos",
+        "minimum_macos_by_architecture",
+        "notarization_checked",
+        "notarized",
+        "plugin_version",
+        "schema_version",
+        "signature",
+        "source_commit",
+        "source_files",
+        "team_id",
+    )
+)
+
+# Content-addressed caching skips expensive system trust checks only while every
+# reviewed app byte and the provenance manifest remain identical. Failures are
+# never cached.
+_verified_bundled_helper_fingerprint: tuple[str, ...] | None = None
 
 OPERATIONS = {
     "schema",
@@ -101,6 +216,10 @@ class BridgeValidationError(ValueError):
         self.message = message
         self.status = status
         self.details = details or {}
+
+
+class BundledHelperUnavailable(RuntimeError):
+    """The reviewed release helper is absent, unsafe, or no longer trusted."""
 
 
 def response(
@@ -1012,7 +1131,7 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
                 "--sign",
                 "-",
                 "--identifier",
-                HELPER_BUNDLE_IDENTIFIER,
+                LEGACY_HELPER_BUNDLE_IDENTIFIER,
                 str(temporary_binary),
             ],
             timeout_s=30,
@@ -1030,6 +1149,632 @@ def build_helper(cache_root: Path | None = None, *, force: bool = False) -> Path
     temporary_binary.chmod(0o700)
     os.replace(temporary_binary, binary)
     return binary
+
+
+def _read_regular_file(path: Path, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BundledHelperUnavailable(f"{label} is missing or unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise BundledHelperUnavailable(f"{label} is not a regular file")
+        if metadata.st_size < 0 or metadata.st_size > MAX_BUNDLED_HELPER_FILE_BYTES:
+            raise BundledHelperUnavailable(f"{label} exceeds the validation bound")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(MAX_BUNDLED_HELPER_FILE_BYTES + 1)
+        if len(payload) != metadata.st_size:
+            raise BundledHelperUnavailable(f"{label} changed while it was read")
+        return payload
+    except OSError as exc:
+        raise BundledHelperUnavailable(f"{label} could not be read") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _sha256_regular_file(path: Path, label: str) -> str:
+    return hashlib.sha256(_read_regular_file(path, label)).hexdigest()
+
+
+def _load_plugin_version() -> str:
+    raw = _read_regular_file(PLUGIN_MANIFEST_PATH, "plugin manifest")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BundledHelperUnavailable("plugin manifest is invalid") from exc
+    if not isinstance(payload, dict):
+        raise BundledHelperUnavailable("plugin manifest root is invalid")
+    version = payload.get("version")
+    if not isinstance(version, str) or not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+", version
+    ):
+        raise BundledHelperUnavailable("plugin version is invalid")
+    return version
+
+
+def _bundled_helper_inventory() -> dict[str, str]:
+    for path, label in (
+        (BUNDLED_HELPER_NATIVE_DIR, "native helper directory"),
+        (BUNDLED_HELPER_APP, "bundled helper app"),
+    ):
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise BundledHelperUnavailable(f"{label} is missing") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise BundledHelperUnavailable(f"{label} is unsafe")
+    if stat.S_IMODE(BUNDLED_HELPER_NATIVE_DIR.lstat().st_mode) != 0o755:
+        raise BundledHelperUnavailable("native helper directory mode is invalid")
+    if stat.S_IMODE(BUNDLED_HELPER_APP.lstat().st_mode) != 0o755:
+        raise BundledHelperUnavailable("bundled helper app mode is invalid")
+
+    try:
+        with os.scandir(BUNDLED_HELPER_NATIVE_DIR) as iterator:
+            native_entries = {entry.name: entry.stat(follow_symlinks=False) for entry in iterator}
+    except OSError as exc:
+        raise BundledHelperUnavailable(
+            "native helper directory could not be inspected"
+        ) from exc
+    if set(native_entries) != {
+        BUNDLED_HELPER_APP_NAME,
+        BUNDLED_HELPER_MANIFEST_NAME,
+    }:
+        raise BundledHelperUnavailable("native helper inventory is invalid")
+    manifest_metadata = native_entries[BUNDLED_HELPER_MANIFEST_NAME]
+    if (
+        stat.S_ISLNK(manifest_metadata.st_mode)
+        or not stat.S_ISREG(manifest_metadata.st_mode)
+        or stat.S_IMODE(manifest_metadata.st_mode) != 0o644
+    ):
+        raise BundledHelperUnavailable("native helper manifest is unsafe")
+
+    directories: set[str] = set()
+    file_modes: dict[str, int] = {}
+    pending = [BUNDLED_HELPER_APP]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    path = Path(entry.path)
+                    relative = path.relative_to(BUNDLED_HELPER_APP).as_posix()
+                    if stat.S_ISLNK(metadata.st_mode):
+                        raise BundledHelperUnavailable(
+                            "bundled helper app contains a symlink"
+                        )
+                    if stat.S_ISDIR(metadata.st_mode):
+                        directories.add(relative)
+                        if stat.S_IMODE(metadata.st_mode) != 0o755:
+                            raise BundledHelperUnavailable(
+                                "bundled helper directory mode is invalid"
+                            )
+                        pending.append(path)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        file_modes[relative] = stat.S_IMODE(metadata.st_mode)
+                    else:
+                        raise BundledHelperUnavailable(
+                            "bundled helper app contains a special file"
+                        )
+        except BundledHelperUnavailable:
+            raise
+        except OSError as exc:
+            raise BundledHelperUnavailable(
+                "bundled helper inventory could not be inspected"
+            ) from exc
+
+    if directories != set(BUNDLED_HELPER_EXPECTED_DIRECTORIES):
+        raise BundledHelperUnavailable("bundled helper directory inventory is invalid")
+    if set(file_modes) != set(BUNDLED_HELPER_EXPECTED_FILE_MODES):
+        raise BundledHelperUnavailable("bundled helper file inventory is invalid")
+    if file_modes != BUNDLED_HELPER_EXPECTED_FILE_MODES:
+        raise BundledHelperUnavailable("bundled helper file modes are invalid")
+
+    return {
+        f"{BUNDLED_HELPER_APP_NAME}/{relative}": _sha256_regular_file(
+            BUNDLED_HELPER_APP / relative,
+            f"bundled helper member {relative}",
+        )
+        for relative in sorted(file_modes)
+    }
+
+
+def _load_bundled_helper_manifest(
+    app_files: dict[str, str],
+    plugin_version: str,
+) -> tuple[dict[str, Any], str, dict[str, str]]:
+    raw = _read_regular_file(
+        BUNDLED_HELPER_MANIFEST_PATH,
+        "bundled helper provenance manifest",
+    )
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BundledHelperUnavailable(
+            "bundled helper provenance manifest is invalid"
+        ) from exc
+    if not isinstance(manifest, dict) or set(manifest) != set(
+        BUNDLED_HELPER_MANIFEST_KEYS
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper provenance key inventory is invalid"
+        )
+
+    source_files = {
+        relative: _sha256_regular_file(
+            PLUGIN_ROOT / relative,
+            f"bundled helper source {relative}",
+        )
+        for relative in BUNDLED_HELPER_SOURCE_RELATIVE_PATHS
+    }
+    expected_metadata: dict[str, Any] = {
+        "app_name": BUNDLED_HELPER_APP_NAME,
+        "architectures": sorted(BUNDLED_HELPER_ARCHITECTURES),
+        "bundle_identifier": BUNDLED_HELPER_BUNDLE_IDENTIFIER,
+        "executable": BUNDLED_HELPER_EXECUTABLE_NAME,
+        "minimum_macos": BUNDLED_HELPER_MINIMUM_MACOS,
+        "minimum_macos_by_architecture": {
+            architecture: BUNDLED_HELPER_MINIMUM_MACOS
+            for architecture in sorted(BUNDLED_HELPER_ARCHITECTURES)
+        },
+        "plugin_version": plugin_version,
+        "signature": "developer-id",
+        "team_id": BUNDLED_HELPER_TEAM_IDENTIFIER,
+    }
+    for key, expected in expected_metadata.items():
+        if manifest.get(key) != expected:
+            raise BundledHelperUnavailable(
+                f"bundled helper provenance {key} is invalid"
+            )
+    if type(manifest.get("schema_version")) is not int or manifest.get(
+        "schema_version"
+    ) != 1:
+        raise BundledHelperUnavailable(
+            "bundled helper provenance schema version is invalid"
+        )
+    if manifest.get("notarization_checked") is not True or manifest.get(
+        "notarized"
+    ) is not True:
+        raise BundledHelperUnavailable(
+            "bundled helper provenance notarization state is invalid"
+        )
+    if manifest.get("app_files") != app_files:
+        raise BundledHelperUnavailable(
+            "bundled helper bytes do not match their provenance"
+        )
+    binary_hash = app_files[
+        f"{BUNDLED_HELPER_APP_NAME}/Contents/MacOS/"
+        f"{BUNDLED_HELPER_EXECUTABLE_NAME}"
+    ]
+    if manifest.get("binary_sha256") != binary_hash:
+        raise BundledHelperUnavailable(
+            "bundled helper executable does not match its provenance"
+        )
+    if manifest.get("source_files") != source_files:
+        raise BundledHelperUnavailable(
+            "bundled helper sources do not match their provenance"
+        )
+
+    build_inputs = manifest.get("build_inputs")
+    if (
+        not isinstance(build_inputs, dict)
+        or set(build_inputs) != set(BUNDLED_HELPER_BUILD_INPUT_RELATIVE_PATHS)
+        or any(
+            not isinstance(value, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in build_inputs.values()
+        )
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper build-input provenance is invalid"
+        )
+    build_environment = manifest.get("build_environment")
+    if (
+        not isinstance(build_environment, dict)
+        or set(build_environment) != set(BUNDLED_HELPER_BUILD_ENVIRONMENT_KEYS)
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for value in build_environment.values()
+        )
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper build-environment provenance is invalid"
+        )
+    source_commit = manifest.get("source_commit")
+    if not isinstance(source_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper source commit provenance is invalid"
+        )
+    return manifest, hashlib.sha256(raw).hexdigest(), source_files
+
+
+def _verify_bundled_helper_info(plugin_version: str) -> None:
+    raw = _read_regular_file(
+        BUNDLED_HELPER_APP / "Contents" / "Info.plist",
+        "bundled helper Info.plist",
+    )
+    try:
+        info = plistlib.loads(raw)
+    except plistlib.InvalidFileException as exc:
+        raise BundledHelperUnavailable("bundled helper Info.plist is invalid") from exc
+    expected = {
+        "CFBundleIdentifier": BUNDLED_HELPER_BUNDLE_IDENTIFIER,
+        "CFBundleName": "Apple Reminders EventKit Helper",
+        "CFBundleDisplayName": "Apple Reminders EventKit Helper",
+        "CFBundleExecutable": BUNDLED_HELPER_EXECUTABLE_NAME,
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": plugin_version,
+        "CFBundleVersion": plugin_version,
+        "LSMinimumSystemVersion": BUNDLED_HELPER_MINIMUM_MACOS,
+        "NSRemindersUsageDescription": (
+            "Access is used only to perform the Apple Reminders actions "
+            "explicitly requested by the user."
+        ),
+        "NSRemindersFullAccessUsageDescription": (
+            "Full access is used to read, create, and update Apple Reminders "
+            "explicitly requested by the user."
+        ),
+    }
+    if info != expected:
+        raise BundledHelperUnavailable("bundled helper Info.plist metadata is invalid")
+
+
+def _run_bundled_helper_check(argv: list[str]) -> tuple[str, str]:
+    try:
+        result = run_bounded_process(
+            argv,
+            timeout_s=30,
+            stdout_limit=MAX_HELPER_VERIFY_STDOUT_BYTES,
+            stderr_limit=MAX_HELPER_VERIFY_STDERR_BYTES,
+            output="utf8",
+        )
+    except ProcessError as exc:
+        raise BundledHelperUnavailable(
+            "bundled helper trust check could not run"
+        ) from exc
+    if result.returncode != 0:
+        raise BundledHelperUnavailable("bundled helper trust check failed")
+    return str(result.stdout), str(result.stderr)
+
+
+def _unpack_macho(
+    format_string: str,
+    payload: bytes | memoryview,
+    offset: int,
+    label: str,
+) -> tuple[int, ...]:
+    size = struct.calcsize(format_string)
+    if offset < 0 or size < 0 or offset + size > len(payload):
+        raise BundledHelperUnavailable(f"bundled helper {label} is out of bounds")
+    try:
+        return struct.unpack_from(format_string, payload, offset)
+    except struct.error as exc:
+        raise BundledHelperUnavailable(
+            f"bundled helper {label} is malformed"
+        ) from exc
+
+
+def _verify_bundled_helper_mach_slice(
+    payload: bytes,
+    *,
+    slice_offset: int,
+    slice_size: int,
+    expected_cpu_type: int,
+    expected_cpu_subtype: int,
+) -> None:
+    slice_end = slice_offset + slice_size
+    if slice_size < MACH_HEADER_64_SIZE or slice_end > len(payload):
+        raise BundledHelperUnavailable("bundled helper Mach-O slice is truncated")
+    slice_payload = memoryview(payload)[slice_offset:slice_end]
+    (
+        magic,
+        cpu_type,
+        cpu_subtype,
+        file_type,
+        command_count,
+        command_bytes,
+        _flags,
+        reserved,
+    ) = _unpack_macho(
+        "<IIIIIIII",
+        slice_payload,
+        0,
+        "64-bit Mach-O header",
+    )
+    if magic != MACH_MAGIC_64_LITTLE_ENDIAN:
+        raise BundledHelperUnavailable(
+            "bundled helper slice is not a little-endian 64-bit Mach-O"
+        )
+    if (
+        cpu_type != expected_cpu_type
+        or (cpu_subtype & CPU_SUBTYPE_CAPABILITY_MASK) != 0
+        or (cpu_subtype & CPU_SUBTYPE_BASE_MASK) != expected_cpu_subtype
+    ):
+        raise BundledHelperUnavailable("bundled helper Mach-O CPU metadata is invalid")
+    if file_type != MACH_FILETYPE_EXECUTE or reserved != 0:
+        raise BundledHelperUnavailable("bundled helper Mach-O header is invalid")
+    if (
+        command_count == 0
+        or command_count > MAX_MACH_LOAD_COMMANDS
+        or command_bytes < command_count * 8
+        or command_bytes % 8 != 0
+    ):
+        raise BundledHelperUnavailable(
+            "bundled helper Mach-O load-command bounds are invalid"
+        )
+    commands_offset = MACH_HEADER_64_SIZE
+    commands_end = commands_offset + command_bytes
+    if commands_end > len(slice_payload):
+        raise BundledHelperUnavailable(
+            "bundled helper Mach-O load commands exceed their slice"
+        )
+
+    cursor = commands_offset
+    build_version_seen = False
+    for _ in range(command_count):
+        if cursor + 8 > commands_end:
+            raise BundledHelperUnavailable(
+                "bundled helper Mach-O load-command header exceeds its table"
+            )
+        command, command_size = _unpack_macho(
+            "<II",
+            slice_payload,
+            cursor,
+            "load-command header",
+        )
+        if command_size < 8 or command_size % 8 != 0:
+            raise BundledHelperUnavailable(
+                "bundled helper Mach-O load-command size is invalid"
+            )
+        command_end = cursor + command_size
+        if command_end > commands_end:
+            raise BundledHelperUnavailable(
+                "bundled helper Mach-O load command exceeds its table"
+            )
+        if command == LC_VERSION_MIN_MACOSX:
+            raise BundledHelperUnavailable(
+                "bundled helper uses an unexpected legacy deployment command"
+            )
+        if command == LC_BUILD_VERSION:
+            if build_version_seen or command_size < 24:
+                raise BundledHelperUnavailable(
+                    "bundled helper LC_BUILD_VERSION inventory is invalid"
+                )
+            (
+                _command,
+                _command_size,
+                platform,
+                minimum_os,
+                _sdk,
+                tool_count,
+            ) = _unpack_macho(
+                "<IIIIII",
+                slice_payload,
+                cursor,
+                "LC_BUILD_VERSION",
+            )
+            if command_size != 24 + tool_count * 8:
+                raise BundledHelperUnavailable(
+                    "bundled helper LC_BUILD_VERSION tools are malformed"
+                )
+            if platform != PLATFORM_MACOS:
+                raise BundledHelperUnavailable(
+                    "bundled helper LC_BUILD_VERSION platform is invalid"
+                )
+            if minimum_os != MACOS_14_0_0_PACKED_VERSION:
+                raise BundledHelperUnavailable(
+                    "bundled helper minimum macOS version is invalid"
+                )
+            build_version_seen = True
+        cursor = command_end
+
+    if cursor != commands_end:
+        raise BundledHelperUnavailable(
+            "bundled helper Mach-O load-command table has trailing bytes"
+        )
+    if not build_version_seen:
+        raise BundledHelperUnavailable(
+            "bundled helper has no LC_BUILD_VERSION command"
+        )
+
+
+def _verify_bundled_helper_architectures(payload: bytes) -> None:
+    """Parse the universal binary without invoking Xcode or developer-tool shims."""
+
+    if len(payload) < 8:
+        raise BundledHelperUnavailable("bundled helper fat header is truncated")
+    fat_format = FAT_MAGIC_FORMATS.get(payload[:4])
+    if fat_format is None:
+        raise BundledHelperUnavailable("bundled helper has an invalid fat magic")
+    endian, uses_64_bit_entries = fat_format
+    (architecture_count,) = _unpack_macho(
+        f"{endian}I",
+        payload,
+        4,
+        "fat architecture count",
+    )
+    if architecture_count != len(EXPECTED_MACH_CPU_SUBTYPES):
+        raise BundledHelperUnavailable(
+            "bundled helper must contain exactly two architectures"
+        )
+
+    entry_format = f"{endian}{'IIQQII' if uses_64_bit_entries else 'IIIII'}"
+    entry_size = struct.calcsize(entry_format)
+    table_end = 8 + architecture_count * entry_size
+    if table_end > len(payload):
+        raise BundledHelperUnavailable("bundled helper fat table is truncated")
+
+    slices: list[tuple[int, int, int, int]] = []
+    cpu_types: set[int] = set()
+    for index in range(architecture_count):
+        values = _unpack_macho(
+            entry_format,
+            payload,
+            8 + index * entry_size,
+            "fat architecture entry",
+        )
+        if uses_64_bit_entries:
+            cpu_type, cpu_subtype, slice_offset, slice_size, alignment, reserved = values
+            if reserved != 0:
+                raise BundledHelperUnavailable(
+                    "bundled helper fat64 reserved field is invalid"
+                )
+        else:
+            cpu_type, cpu_subtype, slice_offset, slice_size, alignment = values
+        expected_subtype = EXPECTED_MACH_CPU_SUBTYPES.get(cpu_type)
+        if (
+            expected_subtype is None
+            or (cpu_subtype & CPU_SUBTYPE_CAPABILITY_MASK) != 0
+            or (cpu_subtype & CPU_SUBTYPE_BASE_MASK) != expected_subtype
+        ):
+            raise BundledHelperUnavailable(
+                "bundled helper fat CPU metadata is invalid"
+            )
+        if cpu_type in cpu_types:
+            raise BundledHelperUnavailable(
+                "bundled helper contains a duplicate architecture"
+            )
+        cpu_types.add(cpu_type)
+        maximum_alignment = 63 if uses_64_bit_entries else 31
+        if alignment > maximum_alignment or slice_offset % (1 << alignment) != 0:
+            raise BundledHelperUnavailable(
+                "bundled helper fat slice alignment is invalid"
+            )
+        if slice_size < MACH_HEADER_64_SIZE or slice_offset < table_end:
+            raise BundledHelperUnavailable(
+                "bundled helper fat slice boundary is invalid"
+            )
+        slice_end = slice_offset + slice_size
+        if slice_end > len(payload):
+            raise BundledHelperUnavailable(
+                "bundled helper fat slice exceeds the executable"
+            )
+        slices.append((slice_offset, slice_end, cpu_type, cpu_subtype))
+
+    if cpu_types != set(EXPECTED_MACH_CPU_SUBTYPES):
+        raise BundledHelperUnavailable("bundled helper architectures are invalid")
+    previous_end = table_end
+    for slice_offset, slice_end, cpu_type, cpu_subtype in sorted(slices):
+        if slice_offset < previous_end:
+            raise BundledHelperUnavailable("bundled helper fat slices overlap")
+        _verify_bundled_helper_mach_slice(
+            payload,
+            slice_offset=slice_offset,
+            slice_size=slice_end - slice_offset,
+            expected_cpu_type=cpu_type,
+            expected_cpu_subtype=cpu_subtype,
+        )
+        previous_end = slice_end
+
+
+def _codesign_value(details: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for line in details.splitlines():
+        if line.startswith(prefix):
+            value = line.partition("=")[2].strip()
+            return value or None
+    return None
+
+
+def _verify_bundled_helper_signature() -> None:
+    _run_bundled_helper_check(
+        [
+            "/usr/bin/codesign",
+            "--verify",
+            "--deep",
+            "--strict",
+            "--test-requirement",
+            f"={BUNDLED_HELPER_DESIGNATED_REQUIREMENT}",
+            str(BUNDLED_HELPER_APP),
+        ]
+    )
+    stdout, stderr = _run_bundled_helper_check(
+        ["/usr/bin/codesign", "-dvvv", str(BUNDLED_HELPER_APP)]
+    )
+    details = f"{stdout}\n{stderr}"
+    if _codesign_value(details, "Identifier") != BUNDLED_HELPER_BUNDLE_IDENTIFIER:
+        raise BundledHelperUnavailable("bundled helper signing identifier is invalid")
+    if _codesign_value(details, "TeamIdentifier") != BUNDLED_HELPER_TEAM_IDENTIFIER:
+        raise BundledHelperUnavailable("bundled helper signing Team ID is invalid")
+    code_directory = next(
+        (
+            line
+            for line in details.splitlines()
+            if line.startswith("CodeDirectory ")
+        ),
+        None,
+    )
+    if code_directory is None or "runtime" not in code_directory:
+        raise BundledHelperUnavailable("bundled helper lacks Hardened Runtime")
+    if _codesign_value(details, "Timestamp") is None:
+        raise BundledHelperUnavailable("bundled helper lacks a secure timestamp")
+
+
+def _verify_bundled_helper() -> Path:
+    """Fail closed unless the exact reviewed release helper is still trusted."""
+
+    global _verified_bundled_helper_fingerprint
+
+    if sys.platform != "darwin":
+        raise BundledHelperUnavailable("the EventKit helper requires macOS")
+    try:
+        plugin_version = _load_plugin_version()
+        app_files = _bundled_helper_inventory()
+        manifest, manifest_hash, source_files = _load_bundled_helper_manifest(
+            app_files,
+            plugin_version,
+        )
+        _verify_bundled_helper_info(plugin_version)
+        fingerprint = (
+            manifest_hash,
+            *(f"app:{key}:{value}" for key, value in sorted(app_files.items())),
+            *(
+                f"source:{key}:{value}"
+                for key, value in sorted(source_files.items())
+            ),
+        )
+        if fingerprint == _verified_bundled_helper_fingerprint:
+            return BUNDLED_HELPER_PATH
+        executable = _read_regular_file(
+            BUNDLED_HELPER_PATH,
+            "bundled helper executable",
+        )
+        if hashlib.sha256(executable).hexdigest() != manifest["binary_sha256"]:
+            raise BundledHelperUnavailable(
+                "bundled helper executable changed during verification"
+            )
+        _verify_bundled_helper_architectures(executable)
+        _verify_bundled_helper_signature()
+        _verified_bundled_helper_fingerprint = fingerprint
+        return BUNDLED_HELPER_PATH
+    except BundledHelperUnavailable:
+        raise
+    except Exception as exc:
+        raise BundledHelperUnavailable(
+            "the bundled helper could not be verified"
+        ) from exc
+
+
+def resolve_helper(
+    cache_root: Path | None = None,
+    *,
+    allow_source_build: bool = False,
+) -> Path:
+    """Use the release helper, or an explicitly requested contributor build."""
+
+    try:
+        return _verify_bundled_helper()
+    except BundledHelperUnavailable:
+        if not allow_source_build:
+            raise
+    return build_helper(cache_root)
 
 
 def _invalid_native_response(
@@ -1065,9 +1810,27 @@ def invoke_native(
     *,
     cache_root: Path | None = None,
     timeout: int = NATIVE_TIMEOUT_SECONDS,
+    allow_source_build: bool = False,
 ) -> dict[str, Any]:
     try:
-        binary = build_helper(cache_root)
+        binary = resolve_helper(
+            cache_root,
+            allow_source_build=allow_source_build,
+        )
+    except BundledHelperUnavailable:
+        return response(
+            request["operation"],
+            "failed_no_mutation",
+            error={
+                "code": "unexpected_error",
+                "reason_code": "native_helper_unavailable",
+                "message": (
+                    "The signed EventKit helper is missing or could not be verified."
+                ),
+                "retryable": False,
+                "details": {},
+            },
+        )
     except Exception as exc:
         return response(
             request["operation"],
@@ -1206,7 +1969,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--build-only",
         action="store_true",
-        help="Compile the helper and print its path without accessing EventKit",
+        help=(
+            "Compile a contributor-only legacy helper and print its path without "
+            "accessing EventKit"
+        ),
+    )
+    parser.add_argument(
+        "--development-source-build-fallback",
+        action="store_true",
+        help=(
+            "Allow legacy source compilation only when the bundled release helper "
+            "is unavailable"
+        ),
     )
     parser.add_argument("--cache-dir", type=Path, help="Override the compiled-helper cache directory")
     parser.add_argument("--force-build", action="store_true", help="Recompile even if the cached helper exists")
@@ -1293,7 +2067,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         try:
-            payload = invoke_native(normalized, cache_root=args.cache_dir)
+            payload = invoke_native(
+                normalized,
+                cache_root=args.cache_dir,
+                allow_source_build=args.development_source_build_fallback,
+            )
         except RuntimeError as exc:
             payload = response(
                 normalized["operation"],
