@@ -1,8 +1,8 @@
 {
   "app_files": {
-    "AppleRemindersEventKitHelper.app/Contents/CodeResources": "b9eb7e699cee1725d28cea32111ddb1efa6fe9a1f302eb3516d656ac75421210",
-    "AppleRemindersEventKitHelper.app/Contents/Info.plist": "ca6d412f0ca6f51fdf666090b19b92645cb9df68e59456d4c8f59cf1c305f568",
-    "AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper": "6dd401958e24731549f4ca44be3957ede329ca9967b41af9ea75e40482a1ba84",
+    "AppleRemindersEventKitHelper.app/Contents/CodeResources": "db8118eb42a9833c6cdac19c4ba5174050fcce9d9bc90b250eca8a5b24868cc4",
+    "AppleRemindersEventKitHelper.app/Contents/Info.plist": "657bc9d597dd7c1fdab8b060af4b8166ff8832ae83776504b1c674f86970d0d8",
+    "AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper": "388c52905aac74ccc5a1392b3feb2fda2a78f7d262ac830865496d455bfbdd30",
     "AppleRemindersEventKitHelper.app/Contents/_CodeSignature/CodeResources": "6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b"
   },
   "app_name": "AppleRemindersEventKitHelper.app",
@@ -10,7 +10,7 @@
     "arm64",
     "x86_64"
   ],
-  "binary_sha256": "6dd401958e24731549f4ca44be3957ede329ca9967b41af9ea75e40482a1ba84",
+  "binary_sha256": "388c52905aac74ccc5a1392b3feb2fda2a78f7d262ac830865496d455bfbdd30",
   "build_environment": {
     "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
     "linker": "@(#)PROGRAM:ld PROJECT:ld-1167.5\nBUILD 01:45:05 Apr 30 2025\nconfigured to support archs: armv6 armv7 armv7s arm64 arm64e arm64_32 i386 x86_64 x86_64h armv6m armv7k armv7m armv7em\nwill use ld-classic for: armv6 armv7 armv7s i386 armv6m armv7k armv7m armv7em\nLTO support using: LLVM version 17.0.0 (static support for 29, runtime is 29)\nTAPI support using: Apple TAPI version 17.0.0 (tapi-1700.0.3.5)",
@@ -18,11 +18,11 @@
     "xcode_path": "/Applications/Xcode_16.4.app/Contents/Developer"
   },
   "build_inputs": {
-    ".github/workflows/prepare-signed-helper.yml": "62b76fdf5821d87b61adc887358ce5688b6c1d19fd8695f282c8b119dd073115",
-    "scripts/build_eventkit_helper_app.py": "7dd8ed34d96c47e797a340ddcb198912fa8d975c670bf3b9300ed22dbab8cfb6",
+    ".github/workflows/prepare-signed-helper-source.yml": "c7b21f1585087bb3e574f5aed73fa3e7e12b09fc9054284a205338611047ebbe",
+    "scripts/build_eventkit_helper_app.py": "2f4f00e9e98b51d53bc713ada21d62a1ce4f88560f8693f9e70eec6bc2506c73",
     "scripts/eventkit_helper_app_info.plist": "f0530c8673a2e1f9184b3e25feb241db8e343e7e32c40f0f97825d7918c49235",
-    "scripts/prepare_signed_eventkit_helper.sh": "b38f74832a3ea689763be518e55bc07596ffb11bb68b8a42ef96e2d04c748917",
-    "scripts/verify_eventkit_helper.py": "1a8603a45753cac736456b816dafb534b1c0432cd268fed91b372194b9458724"
+    "scripts/prepare_signed_eventkit_helper.sh": "69a4261f270bdb6cbcd8a1587a91f9938b571eedf25246e577ae476c7518943e",
+    "scripts/verify_eventkit_helper.py": "e47cd61a9a26525a22dd8b12e39d5b1192039041da29bb025406504b9eb2e1b1"
   },
   "bundle_identifier": "io.github.oscar-v4.apple-reminders.eventkit-bridge",
   "executable": "apple-reminders-eventkit-helper",
@@ -33,14 +33,15 @@
   },
   "notarization_checked": true,
   "notarized": true,
-  "plugin_version": "0.5.0",
+  "plugin_version": "0.5.1",
   "schema_version": 1,
   "signature": "developer-id",
-  "source_commit": "10eb741ba9cc3176c0985b8e5a4301d7edfb8af6",
+  "source_commit": "103c6b68491718011be6869619488fc4cc951619",
   "source_files": {
-    ".codex-plugin/plugin.json": "72ad56358b15b0e45b17ffa26711063dae2308fc98282a2e719c655c79ae389c",
-    "scripts/eventkit_bridge_schema.json": "2e5f787678decfbc3e7e366651bb53e825b48c98200b01a026827ca2083e75d7",
-    "scripts/reminders_eventkit.m": "f2f6abc4c33b945dad4928fa46a3d6d1ed5666214ea4df2becae26f2128dec96"
+    ".codex-plugin/plugin.json": "b61f9774a2ea16a5704b54b3fd74c1c9a4ca3b8c1a185fb290dabdeca57f1241",
+    "scripts/eventkit_bridge_schema.json": "e7a7633f8175b1db4bd738abc328c100d6d98431129e87a87f617f1f7cb2c408",
+    "scripts/reminders_eventkit.m": "cb24dd1b3c7ab85db86ee14f2148fe97d9ec8a3fc7916cc53cb145c971957b4a"
   },
-  "team_id": "V8347N9346"
+  "team_id": "V8347N9346",
+  "workflow_commit": "39ea911f6e2b274dc18a57eabfd3d928262a5685"
 }
