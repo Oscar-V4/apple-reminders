@@ -12,7 +12,7 @@ Do not include reminder titles, notes, URLs, image attachments, database copies,
 
 ## Security boundary
 
-The plugin runs locally with the permissions of Codex on macOS. Routine fields use EventKit. Some Native Extension and Maintenance operations rely on version-sensitive Apple interfaces or the local Reminders store and may stop working after a macOS update. Capability checks, exact references, bounded reads, preconditions, Snapshots, and read-back verification reduce risk but do not make those interfaces public or stable.
+The plugin runs locally with the permissions of Codex on macOS. Routine fields use EventKit. Some Native Extension and Recovery operations rely on version-sensitive Apple interfaces or the local Reminders store and may stop working after a macOS update. Capability checks, exact references, bounded reads, preconditions, Snapshots, and read-back verification reduce risk but do not make those interfaces public or stable.
 
 The project does not request passwords, Apple ID credentials, iCloud tokens, or remote service credentials. Treat any request for those secrets as outside the supported workflow.
 

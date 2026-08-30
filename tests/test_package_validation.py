@@ -97,6 +97,11 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("do not invoke `clang`", readme)
         self.assertIn("compile three private Objective-C helpers", readme)
         self.assertIn("therefore require Xcode Command Line Tools", readme)
+        self.assertIn(
+            "End users do not need an Apple Developer Program membership",
+            readme,
+        )
+        self.assertNotIn("revoke Reminders and Automation access", readme)
         self.assertNotIn("two source-runtime prerequisites", readme)
 
     def test_public_release_version_is_coherent(self) -> None:
@@ -217,6 +222,22 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("        - Recovery", feature)
         self.assertNotIn("Optional Maintenance", feature)
         self.assertIn("Recently Deleted or recovery", bug)
+
+    def test_native_syntax_checks_cover_every_runtime_helper_source(self) -> None:
+        ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+        for source in (
+            "remkit_attach_image.m",
+            "remkit_sections.m",
+            "remkit_recover.m",
+            "reminders_eventkit.m",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(source, ci)
+                self.assertIn(source, contributing)
 
     def test_substantive_mcp_requires_manifest_declaration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

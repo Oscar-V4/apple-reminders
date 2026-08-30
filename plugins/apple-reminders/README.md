@@ -43,9 +43,12 @@ creation or moves, image-attachment changes, and exact Recently Deleted
 inspection or recovery compile three private Objective-C helpers locally and
 therefore require Xcode Command Line Tools.
 
-Finder-launched Codex checks `PATH` plus standard Homebrew and python.org
-locations. Availability is capability-specific, so Core remains usable when an
-advanced Native or Recovery capability is unavailable.
+End users do not need an Apple Developer Program membership. Maintainers use it
+only to sign and notarize the bundled Core release helper.
+
+For Python, Finder-launched Codex checks `PATH` plus standard Homebrew and
+python.org locations. Availability is capability-specific, so Core remains
+usable when an advanced Native or Recovery capability is unavailable.
 
 ## 60-second setup check
 
@@ -77,9 +80,9 @@ Show me everything overdue, due today, and coming up this week.
 Add "Submit expense report" to my Work list for Friday at 3 PM.
 ```
 
-Version 0.5.0 changes Core from a locally compiled ad-hoc helper to the stable
-signed helper above. macOS may ask for Reminders access again after this upgrade
-because the helper's code-signing identity changed.
+Starting with 0.5.0, Core uses the stable signed helper above instead of a
+locally compiled ad-hoc helper. macOS may ask for Reminders access again after
+this upgrade because the helper's code-signing identity changed.
 
 ## First permission
 
@@ -204,9 +207,10 @@ new Codex task, and confirm that no Reminders operation is running. In Finder,
 use **Go → Go to Folder…** for each exact path, then move only its
 `apple-reminders-codex` folder to Trash—never a parent directory. This clears
 local support data but does not undo Reminders or iCloud changes.
-For a full uninstall, also revoke Reminders and Automation access in **System
-Settings → Privacy & Security**, and separately inspect any custom external
-legacy backup directory that you explicitly configured.
+For a full uninstall, also revoke Reminders access in **System Settings →
+Privacy & Security**, and separately inspect any custom external legacy backup
+directory that you explicitly configured. The 0.5 runtime does not use macOS
+Automation or Apple Events.
 
 ## License and contributions
 

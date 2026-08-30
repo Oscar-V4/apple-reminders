@@ -83,6 +83,10 @@ user-facing promise.
 4. **Native Extension Module**
    - Uses private ReminderKit/store-backed adapters only for Reminders-specific
      section, tag, image, and native URL attachment behavior.
+   - “Native Extension” names the public capability boundary, not one
+     implementation language: tag and URL-attachment paths stay in guarded
+     Python/SQLite, while section and image writes invoke compiled ReminderKit
+     helpers.
    - Keeps Core usable when a private capability is unavailable.
 5. **Recovery Module**
    - Lists Recently Deleted items without write authority and issues a
