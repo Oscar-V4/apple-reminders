@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -371,7 +372,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.4.0")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.0")
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -633,6 +634,134 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 [],
             )
 
+    def test_reviewed_native_helper_is_bound_and_keeps_its_execute_bit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            plugin = base / "apple-reminders"
+            shutil.copytree(self.plugin_root, plugin)
+            app = plugin / audit_source_package.NATIVE_HELPER_APP
+            executable = plugin / audit_source_package.NATIVE_HELPER_EXECUTABLE
+            info = app / "Contents" / "Info.plist"
+            signature = app / "Contents" / "_CodeSignature" / "CodeResources"
+            ticket = app / "Contents" / "CodeResources"
+            executable.parent.mkdir(parents=True)
+            signature.parent.mkdir(parents=True)
+
+            info_payload = plistlib.loads(
+                (REPO_ROOT / "scripts" / "eventkit_helper_app_info.plist").read_bytes()
+            )
+            info_payload["CFBundleShortVersionString"] = "0.5.0"
+            info_payload["CFBundleVersion"] = "0.5.0"
+            info.write_bytes(plistlib.dumps(info_payload, sort_keys=True))
+            executable.write_bytes(b"\xca\xfe\xba\xbe" + b"universal-helper")
+            executable.chmod(0o755)
+            signature.write_bytes(b"reviewed-signature")
+            ticket.write_bytes(b"reviewed-notary-ticket")
+
+            app_members = audit_source_package.NATIVE_HELPER_FILES - {
+                audit_source_package.NATIVE_HELPER_MANIFEST
+            }
+            source_files = {
+                relative: hashlib.sha256((plugin / relative).read_bytes()).hexdigest()
+                for relative in sorted(audit_source_package.NATIVE_HELPER_SOURCE_FILES)
+            }
+            build_inputs = {
+                relative: hashlib.sha256((REPO_ROOT / relative).read_bytes()).hexdigest()
+                for relative in sorted(
+                    audit_source_package.NATIVE_HELPER_BUILD_INPUT_FILES
+                )
+            }
+            app_files = {
+                relative.relative_to("native").as_posix(): hashlib.sha256(
+                    (plugin / relative).read_bytes()
+                ).hexdigest()
+                for relative in sorted(app_members, key=lambda item: item.as_posix())
+            }
+            manifest = {
+                "schema_version": 1,
+                "source_commit": "a" * 40,
+                "source_files": source_files,
+                "build_inputs": build_inputs,
+                "build_environment": {
+                    "clang": "fixture clang",
+                    "linker": "fixture linker",
+                    "macos_sdk": "14.0",
+                    "xcode_path": "/Applications/Xcode.app/Contents/Developer",
+                },
+                "app_name": "AppleRemindersEventKitHelper.app",
+                "app_files": app_files,
+                "architectures": ["arm64", "x86_64"],
+                "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                "bundle_identifier": "io.github.oscar-v4.apple-reminders.eventkit-bridge",
+                "executable": "apple-reminders-eventkit-helper",
+                "minimum_macos": "14.0",
+                "minimum_macos_by_architecture": {
+                    "arm64": "14.0",
+                    "x86_64": "14.0",
+                },
+                "notarization_checked": True,
+                "notarized": True,
+                "plugin_version": "0.5.0",
+                "signature": "developer-id",
+                "team_id": "V8347N9346",
+            }
+            manifest_path = plugin / audit_source_package.NATIVE_HELPER_MANIFEST
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            archive = build_source_package.build_package(plugin, base / "build")
+            package_name = json.loads(
+                (plugin / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+            )["name"]
+            executable_member = (
+                f"{package_name}/{audit_source_package.NATIVE_HELPER_EXECUTABLE.as_posix()}"
+            )
+            with zipfile.ZipFile(archive) as handle:
+                info_by_name = {item.filename: item for item in handle.infolist()}
+
+            manifest["unexpected"] = True
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            extra_key_errors = audit_source_package.audit_source(plugin).errors
+            manifest.pop("unexpected")
+            manifest["minimum_macos_by_architecture"]["x86_64"] = "13.0"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            minos_errors = audit_source_package.audit_source(plugin).errors
+
+        self.assertEqual(
+            info_by_name[executable_member].external_attr >> 16,
+            0o100755,
+        )
+        self.assertIn(
+            "native helper manifest top-level key inventory drift",
+            extra_key_errors,
+        )
+        self.assertIn(
+            "native helper manifest minimum_macos_by_architecture drift",
+            minos_errors,
+        )
+
+    def test_incomplete_native_helper_tree_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = Path(temp_dir) / "apple-reminders"
+            shutil.copytree(self.plugin_root, plugin)
+            (plugin / "native").mkdir()
+
+            result = audit_source_package.audit_source(plugin)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("native helper manifest" in error for error in result.errors),
+            result.errors,
+        )
+
     def test_release_archive_stays_within_size_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             archive = build_source_package.build_package(self.plugin_root, Path(temp_dir))
@@ -641,7 +770,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.20 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.21 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 

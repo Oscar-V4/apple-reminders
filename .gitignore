@@ -24,6 +24,8 @@ htmlcov/
 .env.*
 !.env.example
 !.env.sample
+*.p8
+*.p12
 
 # Native build products
 build/
@@ -31,6 +33,8 @@ dist/
 *.o
 *.dSYM/
 *.app/
+!plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/
+!plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/**
 
 # Reminders stores and plugin-owned operational data
 *.sqlite
