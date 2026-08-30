@@ -130,9 +130,11 @@ user-facing promise.
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.
-   - Keep locally compiled private helpers only for Native Extension and
-     Recovery capabilities. These advanced paths retain an Xcode Command Line
-     Tools dependency independently of the prebuilt Core helper.
+   - Keep exactly three locally compiled private helpers: image-attachment
+     writes, section writes, and exact Recently Deleted inspection or recovery.
+     Tag assignments and native URL attachment changes stay in the guarded
+     Python/SQLite adapter and do not invoke `clang`. Only the helper-backed
+     paths require Xcode Command Line Tools.
    - Are not a second public API and are not a fallback for skills.
 
 There is no equivalent hosted Codex connector for the user's local native
@@ -192,7 +194,8 @@ to the type decoded from byte-identical data and is not treated as corruption.
 Core work does not run Doctor as onboarding. If an operation reports a relevant
 permission, environment, bundle, build, schema, or capability failure, the next
 action may be `request_reminders_access` or targeted `diagnose_reminders`. A
-Native or Recovery build failure does not globally block Core.
+An image/section/Recovery helper build failure does not globally block Core or
+the other private-store capabilities.
 
 Diagnosis is content-free. It can inspect toolchain, filesystem metadata,
 permission symptoms, and schema/capability metadata, but not reminder titles,

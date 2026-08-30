@@ -125,11 +125,12 @@ release checks.
 ## Consequences
 
 Ordinary Core use no longer requires Xcode Command Line Tools in 0.5.0. Python
-3.11+ remains a runtime dependency for the MCP and safety layers. Advanced
-sections, tag changes, image and URL attachments, and Recently Deleted recovery
-still use private helper paths that compile locally; those capabilities retain
-the Command Line Tools dependency and are documented separately rather than
-implying the whole plugin is compiler-free.
+3.11+ remains a runtime dependency for the MCP and safety layers. Exactly three
+advanced paths still compile private Objective-C helpers locally: section
+writes, image-attachment changes, and exact Recently Deleted inspection or
+recovery. Tag assignments and native URL attachment operations remain
+version-sensitive guarded Python/SQLite paths and do not invoke `clang`. Only
+the helper-backed capabilities retain the Command Line Tools dependency.
 
 The signed bytes and notarization ticket are intentionally not reproducible
 from source alone because secure timestamps and Apple tickets vary. The tagged

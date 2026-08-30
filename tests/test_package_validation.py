@@ -91,9 +91,11 @@ class PluginValidationTests(unittest.TestCase):
             readme,
         )
         self.assertIn(
-            "Extension and Recovery features",
-            readme,
+            "Tag assignments and native URL attachment operations",
+            " ".join(readme.split()),
         )
+        self.assertIn("do not invoke `clang`", readme)
+        self.assertIn("compile three private Objective-C helpers", readme)
         self.assertIn("therefore require Xcode Command Line Tools", readme)
         self.assertNotIn("two source-runtime prerequisites", readme)
 
@@ -177,7 +179,20 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("overdue", interface["defaultPrompt"][2])
         self.assertIn("without Xcode", interface["longDescription"])
         self.assertIn(
+            "Tag assignments and native URL attachments",
+            interface["longDescription"],
+        )
+        self.assertIn("avoid compilation", interface["longDescription"])
+        self.assertIn(
+            "Section writes, image-attachment changes",
+            interface["longDescription"],
+        )
+        self.assertIn(
             "require Xcode Command Line Tools",
+            interface["longDescription"],
+        )
+        self.assertNotIn(
+            "Optional section, tag, attachment",
             interface["longDescription"],
         )
         for prompt in interface["defaultPrompt"]:
