@@ -27,7 +27,11 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving narrowly reviewed room for the
 # signed universal Core helper; exact bytes remain visible in benchmarks.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.59 * 1024 * 1024)
+# v0.5.1 adds the dependency-verification implementation to both universal
+# native slices plus its reviewed Objective-C source. The signed candidate was
+# inspected before raising this ceiling: 84,688 bytes of binary growth and
+# 40,590 bytes of source growth account for the observed archive delta.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.72 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -794,7 +798,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.59 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.72 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 
