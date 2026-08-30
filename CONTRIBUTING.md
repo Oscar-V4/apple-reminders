@@ -192,7 +192,15 @@ Use only synthetic fixtures. Never commit, package, or attach:
 - journals, caches, idempotency/capability records, schema dumps tied to a user,
   or container backups;
 - `.DS_Store`, bytecode, screenshots/UI captures, archives, recovery copies, or
-  compiled helpers.
+  compiled helpers other than the exact reviewed EventKit app described below.
+
+The sole planned compiled-artifact exception is
+`plugins/apple-reminders/native/AppleRemindersEventKitHelper.app` together with
+`native/eventkit-helper-build.json`. It must come from the protected signing
+workflow, retain the exact allowlisted file tree, pass Developer ID,
+notarization, Gatekeeper, source-hash, mode, and artifact-attestation
+verification, and enter the repository through normal review. Never commit a
+local or ad-hoc build.
 
 Do not inspect the contents of a suspected screenshot, archive, backup, or user
 data file merely to decide whether it belongs in the package. Classify it by
@@ -213,6 +221,19 @@ The package intentionally excludes `.github/`, `tests/`, `docs/`,
 runtime file requires an intentional allowlist update plus a packaging test.
 Run the build twice in separate empty directories and compare SHA-256 values
 before a release. Do not hand-assemble a ZIP from the working tree.
+
+The EventKit helper has a separate two-stage release boundary. A maintainer
+manually runs `prepare-signed-helper.yml` on the protected default branch. Its
+unsigned build, protected signing, and post-signing execution checks are
+separate jobs; repository code is never run while signing credentials are
+available. The maintainer then reviews and expands the attested notarized
+artifact into the exact `native/` paths through a normal pull request. The
+later tag workflow must remain secrets-free and may publish only an attested
+helper already committed on the default branch. Signing keys, API keys,
+certificate archives, and their passwords must never enter the worktree,
+logs, artifacts, pull requests, or issues. See
+[`0019-prebuilt-signed-eventkit-core-helper.md`](docs/decisions/0019-prebuilt-signed-eventkit-core-helper.md)
+for the trust model.
 
 ## Private API Review
 

@@ -1,0 +1,9 @@
+# Release-signing boundaries require explicit review by the repository owner.
+/.github/CODEOWNERS @Oscar-V4
+/.github/workflows/prepare-signed-helper.yml @Oscar-V4
+/.github/workflows/release.yml @Oscar-V4
+/scripts/build_eventkit_helper_app.py @Oscar-V4
+/scripts/eventkit_helper_app_info.plist @Oscar-V4
+/scripts/prepare_signed_eventkit_helper.sh @Oscar-V4
+/scripts/setup_release_signing_credentials.sh @Oscar-V4
+/scripts/verify_eventkit_helper.py @Oscar-V4

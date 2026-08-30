@@ -75,6 +75,35 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/remkit_recover.m"),
     Path("scripts/remkit_sections.m"),
 }
+NATIVE_HELPER_APP = Path("native/AppleRemindersEventKitHelper.app")
+NATIVE_HELPER_EXECUTABLE = (
+    NATIVE_HELPER_APP / "Contents/MacOS/apple-reminders-eventkit-helper"
+)
+NATIVE_HELPER_MANIFEST = Path("native/eventkit-helper-build.json")
+NATIVE_HELPER_FILES = {
+    NATIVE_HELPER_APP / "Contents/Info.plist",
+    NATIVE_HELPER_EXECUTABLE,
+    NATIVE_HELPER_APP / "Contents/_CodeSignature/CodeResources",
+    NATIVE_HELPER_APP / "Contents/CodeResources",
+    NATIVE_HELPER_MANIFEST,
+}
+NATIVE_HELPER_OPAQUE_FILES = {
+    NATIVE_HELPER_EXECUTABLE,
+    NATIVE_HELPER_APP / "Contents/_CodeSignature/CodeResources",
+    NATIVE_HELPER_APP / "Contents/CodeResources",
+}
+NATIVE_HELPER_SOURCE_FILES = {
+    ".codex-plugin/plugin.json",
+    "scripts/eventkit_bridge_schema.json",
+    "scripts/reminders_eventkit.m",
+}
+NATIVE_HELPER_BUILD_INPUT_FILES = {
+    ".github/workflows/prepare-signed-helper.yml",
+    "scripts/build_eventkit_helper_app.py",
+    "scripts/eventkit_helper_app_info.plist",
+    "scripts/prepare_signed_eventkit_helper.sh",
+    "scripts/verify_eventkit_helper.py",
+}
 ALLOWED_SKILL_FILES = {
     Path("SKILL.md"),
     Path("agents/openai.yaml"),
@@ -151,6 +180,10 @@ PRIVATE_HOME_RE = re.compile(r"(?:/Users/|[A-Za-z]:\\Users\\)[^/<\\\s]+[/\\]")
 TEXT_SUFFIXES = {".json", ".m", ".md", ".plist", ".py", ".sh", ".yaml", ".yml"}
 
 
+def package_member_mode(relative: Path) -> int:
+    return 0o100755 if relative == NATIVE_HELPER_EXECUTABLE else 0o100644
+
+
 @dataclass(frozen=True)
 class AuditResult:
     files: tuple[Path, ...]
@@ -210,6 +243,9 @@ def package_files(root: Path) -> tuple[set[Path], list[str]]:
     root = root.expanduser().resolve()
     files = set(PACKAGE_ROOT_FILES)
     errors: list[str] = []
+    native_root = root / "native"
+    if native_root.exists() or native_root.is_symlink():
+        files.update(NATIVE_HELPER_FILES)
     skills_root = root / "skills"
     if not skills_root.is_dir():
         return files, ["missing skills directory"]
@@ -268,6 +304,18 @@ def _validate_file(root: Path, relative: Path, errors: list[str]) -> None:
         errors.append(f"empty package stub: {relative}")
         return
     if relative in ALLOWED_IMAGE_FILES:
+        return
+    if relative in NATIVE_HELPER_OPAQUE_FILES:
+        if relative == NATIVE_HELPER_EXECUTABLE:
+            if path.read_bytes()[:4] not in {
+                b"\xca\xfe\xba\xbe",
+                b"\xbe\xba\xfe\xca",
+                b"\xca\xfe\xba\xbf",
+                b"\xbf\xba\xfe\xca",
+            }:
+                errors.append(f"native helper is not a universal Mach-O: {relative}")
+            if path.stat().st_mode & 0o111 == 0:
+                errors.append(f"native helper is not executable: {relative}")
         return
     if path.suffix.casefold() not in TEXT_SUFFIXES and path.name not in {"LICENSE", ".mcp.json"}:
         errors.append(f"unreviewed package file type: {relative}")
@@ -345,6 +393,132 @@ def unallowlisted_runtime_files(root: Path, allowed: set[Path]) -> list[str]:
     return findings
 
 
+def _sha256_path(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _validate_native_helper_manifest(root: Path) -> list[str]:
+    """Bind an optional committed helper to its reviewed source and exact bytes."""
+
+    native_root = root / "native"
+    if not native_root.exists() and not native_root.is_symlink():
+        return []
+    manifest_path = root / NATIVE_HELPER_MANIFEST
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return ["native helper manifest is missing or unsafe"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"native helper manifest is invalid: {exc}"]
+    if not isinstance(manifest, dict):
+        return ["native helper manifest root must be an object"]
+
+    errors: list[str] = []
+    expected_top_level_keys = {
+        "app_files",
+        "app_name",
+        "architectures",
+        "binary_sha256",
+        "build_environment",
+        "build_inputs",
+        "bundle_identifier",
+        "executable",
+        "minimum_macos",
+        "minimum_macos_by_architecture",
+        "notarization_checked",
+        "notarized",
+        "plugin_version",
+        "schema_version",
+        "signature",
+        "source_commit",
+        "source_files",
+        "team_id",
+    }
+    if set(manifest) != expected_top_level_keys:
+        errors.append("native helper manifest top-level key inventory drift")
+    missing_source_files = [
+        relative
+        for relative in sorted(NATIVE_HELPER_SOURCE_FILES)
+        if not (root / Path(relative)).is_file()
+        or (root / Path(relative)).is_symlink()
+    ]
+    if missing_source_files:
+        errors.append("native helper manifest source inputs are missing or unsafe")
+    expected_source_files = {
+        relative: _sha256_path(root / Path(relative))
+        for relative in sorted(NATIVE_HELPER_SOURCE_FILES)
+        if relative not in missing_source_files
+    }
+    if manifest.get("source_files") != expected_source_files:
+        errors.append("native helper manifest source hashes do not match reviewed source")
+    missing_build_inputs = [
+        relative
+        for relative in sorted(NATIVE_HELPER_BUILD_INPUT_FILES)
+        if not (REPO_ROOT / relative).is_file()
+        or (REPO_ROOT / relative).is_symlink()
+    ]
+    if missing_build_inputs:
+        errors.append("native helper manifest build inputs are missing or unsafe")
+    expected_build_inputs = {
+        relative: _sha256_path(REPO_ROOT / relative)
+        for relative in sorted(NATIVE_HELPER_BUILD_INPUT_FILES)
+        if relative not in missing_build_inputs
+    }
+    if manifest.get("build_inputs") != expected_build_inputs:
+        errors.append("native helper manifest build-input hashes do not match reviewed tooling")
+    build_environment = manifest.get("build_environment")
+    if (
+        not isinstance(build_environment, dict)
+        or set(build_environment) != {"clang", "linker", "macos_sdk", "xcode_path"}
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for value in build_environment.values()
+        )
+    ):
+        errors.append("native helper manifest build environment provenance is invalid")
+
+    app_members = NATIVE_HELPER_FILES - {NATIVE_HELPER_MANIFEST}
+    expected_app_files = {
+        relative.relative_to("native").as_posix(): _sha256_path(root / relative)
+        for relative in sorted(app_members, key=lambda item: item.as_posix())
+        if (root / relative).is_file()
+    }
+    if manifest.get("app_files") != expected_app_files:
+        errors.append("native helper manifest app hashes do not match bundled bytes")
+    binary = root / NATIVE_HELPER_EXECUTABLE
+    if binary.is_file() and manifest.get("binary_sha256") != _sha256_path(binary):
+        errors.append("native helper manifest binary hash does not match")
+
+    plugin_manifest = root / ".codex-plugin" / "plugin.json"
+    try:
+        plugin_version = json.loads(plugin_manifest.read_text(encoding="utf-8"))["version"]
+    except (OSError, KeyError, json.JSONDecodeError):
+        plugin_version = None
+    expected_metadata = {
+        "schema_version": 1,
+        "app_name": "AppleRemindersEventKitHelper.app",
+        "architectures": ["arm64", "x86_64"],
+        "bundle_identifier": "io.github.oscar-v4.apple-reminders.eventkit-bridge",
+        "executable": "apple-reminders-eventkit-helper",
+        "minimum_macos": "14.0",
+        "minimum_macos_by_architecture": {"arm64": "14.0", "x86_64": "14.0"},
+        "notarization_checked": True,
+        "notarized": True,
+        "plugin_version": plugin_version,
+        "signature": "developer-id",
+        "team_id": "V8347N9346",
+    }
+    for key, expected in expected_metadata.items():
+        if manifest.get(key) != expected:
+            errors.append(f"native helper manifest {key} drift")
+    source_commit = manifest.get("source_commit")
+    if not isinstance(source_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit
+    ):
+        errors.append("native helper manifest source_commit is not a full commit hash")
+    return errors
+
+
 def validate_document_mirrors(
     repo_root: Path = REPO_ROOT,
     plugin_root: Path = PLUGIN_ROOT,
@@ -381,6 +555,7 @@ def audit_source(root: Path, *, strict_worktree: bool = False) -> AuditResult:
     )
     for relative in sorted(files, key=lambda path: path.as_posix()):
         _validate_file(root, relative, errors)
+    errors.extend(_validate_native_helper_manifest(root))
     findings = scan_worktree_for_forbidden(root)
     if strict_worktree:
         errors.extend(f"forbidden worktree artifact: {item}" for item in findings)
@@ -457,8 +632,12 @@ def audit_archive(root: Path, archive: Path) -> list[str]:
             errors.append(f"non-deterministic timestamp on {info.filename}: {info.date_time}")
         if info.compress_type != zipfile.ZIP_STORED:
             errors.append(f"archive member must use deterministic stored mode: {info.filename}")
-        if info.create_system != 3 or (info.external_attr >> 16) != 0o100644:
-            errors.append(f"archive member mode must be normalized to 0644: {info.filename}")
+        expected_mode = package_member_mode(relative)
+        if info.create_system != 3 or (info.external_attr >> 16) != expected_mode:
+            errors.append(
+                "archive member mode drift: "
+                f"{info.filename} must be {expected_mode & 0o777:04o}"
+            )
     if errors:
         return errors
 

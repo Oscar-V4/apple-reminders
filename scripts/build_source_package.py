@@ -11,7 +11,12 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from audit_source_package import FIXED_ZIP_TIMESTAMP, audit_archive, audit_source
+from audit_source_package import (
+    FIXED_ZIP_TIMESTAMP,
+    audit_archive,
+    audit_source,
+    package_member_mode,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +48,7 @@ def build_package(root: Path, output_directory: Path, *, force: bool = False) ->
                 info = zipfile.ZipInfo(member, date_time=FIXED_ZIP_TIMESTAMP)
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_STORED
-                info.external_attr = (0o100644 & 0xFFFF) << 16
+                info.external_attr = (package_member_mode(relative) & 0xFFFF) << 16
                 handle.writestr(info, (root / relative).read_bytes())
         if archive.exists():
             archive.unlink()
