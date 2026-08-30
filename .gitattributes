@@ -1,3 +1,5 @@
 plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper -text
+plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/Info.plist -text
 plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/_CodeSignature/CodeResources -text
 plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/CodeResources -text
+plugins/apple-reminders/native/eventkit-helper-build.json -text

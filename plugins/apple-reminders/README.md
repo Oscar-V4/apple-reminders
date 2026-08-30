@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml)
 
-Turn meeting notes, screenshots, and everyday plans into organized Apple
-Reminders—right from Codex on your Mac.
+Give Codex the messy input—meeting notes, screenshots, or an everyday plan—and
+get organized Apple Reminders back on your Mac.
 
 With this plugin, Codex can extract action items and dates, create reminders in
 the right lists, brief upcoming work, and safely organize or update reminders
@@ -11,10 +11,13 @@ with verified read-backs.
 
 Try prompts like:
 
-- `Turn these meeting notes into separate action items and deadlines, then add them to my Project list.`
-- `Create one reminder per screenshot in my Job Search list. Keep any dates, links, and useful details you find.`
+- `Turn these meeting notes into one reminder per action item, preserving owners and deadlines, then add them to my Project list.`
+- `Create one reminder per screenshot in my Job Search list. Keep any dates and useful details you find.`
 - `Show me everything overdue, due today, and coming up this week.`
 - `Organize my Inbox reminders into sensible sections. Show me the plan before changing anything.`
+
+The first three prompts use Core. Section organization is an optional Native
+Extension feature and requires Xcode Command Line Tools.
 
 This repository hosts an independent, open-source community plugin for Apple
 Reminders. Its MCP server and macOS adapters run locally, while tool results
@@ -29,31 +32,37 @@ withheld operations.
 
 - macOS 14 or newer with Apple Reminders available for the current user.
 - Python 3.11 or newer.
-- Xcode command-line tools while native helpers are distributed as source.
 - Reminders permission for Core operations.
 
+Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. Version
+0.5.0 includes a universal EventKit helper that is Developer ID signed,
+notarized by Apple, and stapled for offline Gatekeeper verification. Native
+Extension and Recovery features—including sections, tag changes, image or URL
+attachment changes, and Recently Deleted recovery—still compile separate
+private helpers locally and therefore require Xcode Command Line Tools.
+
 Finder-launched Codex checks `PATH` plus standard Homebrew and python.org
-locations. Native availability is capability-specific; Core can remain usable
-when one Native operation is unavailable.
+locations. Availability is capability-specific, so Core remains usable when an
+advanced Native or Recovery capability is unavailable.
 
-## 60-second preflight
+## 60-second setup check
 
-Before the first install, confirm the two source-runtime prerequisites:
+Before the first install, confirm Python:
 
 ```bash
 python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
-xcode-select -p
 ```
 
-If the second command fails, run `xcode-select --install`, finish installation,
-and restart Codex.
+If you plan to use Native Extension or Recovery features, also run
+`xcode-select -p`. If that command fails, run `xcode-select --install`, finish
+installation, and restart Codex. You can skip this for Core reminders.
 
 ## Quick Start
 
-Install the pinned 0.4.0 repo-marketplace release:
+Install the pinned 0.5.0 repo-marketplace release:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.4.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -64,8 +73,9 @@ Show me everything overdue, due today, and coming up this week.
 Add "Submit expense report" to my Work list for Friday at 3 PM.
 ```
 
-Current-Mac Reminders and iCloud attachment checks pass. Fresh-profile
-permission behavior remains follow-up validation; report unexpected prompts.
+Version 0.5.0 changes Core from a locally compiled ad-hoc helper to the stable
+signed helper above. macOS may ask for Reminders access again after this upgrade
+because the helper's code-signing identity changed.
 
 ## First permission
 
@@ -102,7 +112,10 @@ named read-back evidence, not convergence to every device or shared-list member.
 ## Architecture and trust boundary
 
 Skills grant no macOS permission. The local MCP validates inputs and Receipts;
-version-sensitive Native and Recovery paths remain behind exact read-back gates.
+Core launches only the reviewed helper bundled in the installed plugin and does
+not download or automatically compile a fallback. A missing or invalid bundle
+fails before mutation. Version-sensitive Native and Recovery paths remain
+behind exact read-back gates and retain their separate local-build dependency.
 
 ## Diagnosis and troubleshooting
 
@@ -119,9 +132,12 @@ Common cases:
   new Reference. Do not replay the old token.
 - **Verification pending:** read the exact reminder before deciding whether to
   retry. Blind retry can duplicate a change whose first result was unknown.
-- **Native/build failure:** run targeted diagnosis; for a missing compiler run
-  `xcode-select --install`, finish installation, and restart Codex. Core may
-  remain usable.
+- **Bundled Core helper unavailable:** reinstall the same reviewed release tag,
+  then run targeted diagnosis if the failure persists. Core does not silently
+  compile or download a replacement.
+- **Advanced Native/Recovery build failure:** run targeted diagnosis; for a
+  missing compiler run `xcode-select --install`, finish installation, and
+  restart Codex. Core remains independently usable.
 - **Plugin changes are not visible:** start a new Codex task after install,
   upgrade, removal, or re-addition so tool discovery is refreshed.
 
@@ -173,7 +189,7 @@ Internal or development operations can create support data under:
 - `~/Library/Caches/apple-reminders-codex/`
 
 These folders may contain sensitive identifiers, operation records, helpers,
-or legacy cache/backup artifacts. The 0.4 runtime no longer creates metadata
+or legacy cache/backup artifacts. The 0.5 runtime does not create metadata
 caches or backup archives; Recently Deleted recovery is exact and user-directed.
 See [PRIVACY.md](PRIVACY.md#user-control) before inspecting or removing them.
 

@@ -261,7 +261,7 @@ class V2CoreFacadeTests(unittest.TestCase):
                 self.assertEqual(result["error"]["reason_code"], reason_code)
                 validate_public_result(public_operation, result, "not_mutated")
 
-    def test_missing_native_build_prerequisite_has_an_actionable_recovery_path(self) -> None:
+    def test_missing_signed_native_helper_has_an_actionable_recovery_path(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue(
             "list_calendars",
@@ -272,8 +272,8 @@ class V2CoreFacadeTests(unittest.TestCase):
                 "operation": "list_calendars",
                 "error": {
                     "code": "unexpected_error",
-                    "reason_code": "native_helper_build_failed",
-                    "message": "EventKit helper could not be prepared (RuntimeError)",
+                    "reason_code": "native_helper_unavailable",
+                    "message": "The signed EventKit helper is unavailable",
                     "retryable": False,
                 },
             },
@@ -287,7 +287,8 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["tool"], "diagnose_reminders")
         self.assertFalse(result["next_action"]["retry_original_once"])
         self.assertIn("scope=packaging", result["next_action"]["message"])
-        self.assertIn("xcode-select --install", result["next_action"]["message"])
+        self.assertIn("Reinstall or update", result["next_action"]["message"])
+        self.assertNotIn("xcode-select --install", result["next_action"]["message"])
         validate_public_result("list_reminder_lists", result)
 
     def test_exact_read_maps_backend_not_found_category_to_public_not_found(self) -> None:

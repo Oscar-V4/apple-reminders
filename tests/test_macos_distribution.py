@@ -361,14 +361,32 @@ class SigningWorkflowBoundaryTests(unittest.TestCase):
             encoding="utf-8"
         )
         for path in (
+            "/.gitattributes",
             "/.github/CODEOWNERS",
             "/.github/workflows/prepare-signed-helper.yml",
+            "/.github/workflows/release.yml",
+            "/plugins/apple-reminders/.codex-plugin/plugin.json",
+            "/plugins/apple-reminders/native/**",
+            "/plugins/apple-reminders/scripts/eventkit_bridge.py",
+            "/scripts/audit_source_package.py",
             "/scripts/build_eventkit_helper_app.py",
+            "/scripts/build_source_package.py",
             "/scripts/eventkit_helper_app_info.plist",
             "/scripts/setup_release_signing_credentials.sh",
             "/scripts/verify_eventkit_helper.py",
         ):
             self.assertIn(path, codeowners)
+
+    def test_signed_and_attested_helper_bytes_disable_text_conversion(self) -> None:
+        attributes = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        for path in (
+            "plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/Info.plist",
+            "plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/MacOS/apple-reminders-eventkit-helper",
+            "plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/_CodeSignature/CodeResources",
+            "plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/CodeResources",
+            "plugins/apple-reminders/native/eventkit-helper-build.json",
+        ):
+            self.assertIn(f"{path} -text", attributes)
 
     def test_setup_wizard_is_fail_closed_to_the_one_repository(self) -> None:
         wizard = (

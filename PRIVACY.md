@@ -50,9 +50,10 @@ Depending on the commands used, operational files may be created under:
   - idempotency metadata and lock;
   - temporary or legacy version/schema capability records.
 - `~/Library/Caches/apple-reminders-codex/`
-  - locally compiled EventKit/ReminderKit helpers and build locks.
+  - locally compiled advanced ReminderKit helpers and build locks;
+  - legacy or explicit contributor EventKit builds.
 
-The 0.4 runtime no longer creates a reminder metadata cache or backup archive.
+The current runtime does not create a reminder metadata cache or backup archive.
 Earlier development versions may have left either artifact in these folders or
 in an explicitly selected output directory. A legacy metadata cache can contain
 reminder identifiers, titles, list/section names, dates, status, and counts;

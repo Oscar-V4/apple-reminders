@@ -1,0 +1,405 @@
+name: Release Apple Reminders plugin
+
+run-name: Release ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: apple-reminders-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify_release:
+    name: Verify tagged source and package
+    if: github.repository == 'Oscar-V4/apple-reminders'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      checksums_sha256: ${{ steps.release_artifacts.outputs.checksums_sha256 }}
+      package_name: ${{ steps.release_artifacts.outputs.package_name }}
+      package_sha256: ${{ steps.release_artifacts.outputs.package_sha256 }}
+      release_tag: ${{ steps.release_identity.outputs.release_tag }}
+      tag_commit: ${{ steps.release_identity.outputs.tag_commit }}
+      tag_object: ${{ steps.release_identity.outputs.tag_object }}
+      version: ${{ steps.release_identity.outputs.version }}
+    env:
+      PLUGIN_ROOT: plugins/apple-reminders
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Check out the exact tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Prove the release tag is an exact main commit
+        id: release_identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          release_tag="$GITHUB_REF_NAME"
+          [[ "$GITHUB_REF" == "refs/tags/$release_tag" ]]
+          [[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+          git fetch --force --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          remote_tag_object="$(
+            git ls-remote --refs origin "$GITHUB_REF" |
+              awk 'NF == 2 { count += 1; value = $1 } END { if (count != 1) exit 1; print value }'
+          )"
+          tag_object="$(git rev-parse --verify "$GITHUB_REF")"
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF")"
+          [[ "$remote_tag_object" == "$tag_object" ]]
+          [[ "$(git rev-parse HEAD)" == "$tag_commit" ]]
+          git cat-file -e "$tag_commit^{commit}"
+          git merge-base --is-ancestor "$tag_commit" "refs/remotes/origin/main"
+
+          version="${release_tag#v}"
+          python3 - "$version" <<'PY'
+          import ast
+          import json
+          import sys
+          from pathlib import Path
+
+          expected = sys.argv[1]
+          plugin = json.loads(
+              Path("plugins/apple-reminders/.codex-plugin/plugin.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          tree = ast.parse(
+              Path("plugins/apple-reminders/mcp/server.py").read_text(encoding="utf-8")
+          )
+          server_versions = [
+              node.value.value
+              for node in tree.body
+              if isinstance(node, ast.Assign)
+              and any(
+                  isinstance(target, ast.Name) and target.id == "SERVER_VERSION"
+                  for target in node.targets
+              )
+              and isinstance(node.value, ast.Constant)
+              and isinstance(node.value.value, str)
+          ]
+          if plugin.get("version") != expected:
+              raise SystemExit(
+                  f"tag/plugin version drift: tag={expected}, plugin={plugin.get('version')!r}"
+              )
+          if server_versions != [expected]:
+              raise SystemExit(
+                  f"tag/server version drift: tag={expected}, server={server_versions!r}"
+              )
+          PY
+
+          {
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'tag_commit=%s\n' "$tag_commit"
+            printf 'tag_object=%s\n' "$tag_object"
+            printf 'version=%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prove the helper source commit ancestry
+        id: helper_source
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ steps.release_identity.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          manifest_path="$PLUGIN_ROOT/native/eventkit-helper-build.json"
+          source_commit="$(
+            python3 - "$manifest_path" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          value = payload.get("source_commit")
+          if not isinstance(value, str):
+              raise SystemExit("helper manifest source_commit is not a string")
+          print(value)
+          PY
+          )"
+          [[ "$source_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          git cat-file -e "$source_commit^{commit}"
+          git merge-base --is-ancestor "$source_commit" "$TAG_COMMIT"
+          git merge-base --is-ancestor "$source_commit" "refs/remotes/origin/main"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the complete public source
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_plugin.py "$PLUGIN_ROOT"
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT" \
+            --strict-worktree \
+            --verify-root-document-mirrors
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Bind the expanded helper bytes to the manifest
+        env:
+          MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - "$PLUGIN_ROOT/native" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path
+
+          native = Path(sys.argv[1])
+          manifest_path = native / "eventkit-helper-build.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          expected_app_files = manifest.get("app_files")
+          if not isinstance(expected_app_files, dict):
+              raise SystemExit("helper manifest app_files is not an object")
+          expected_files = set(expected_app_files) | {"eventkit-helper-build.json"}
+          expected_directories = {
+              "AppleRemindersEventKitHelper.app",
+              "AppleRemindersEventKitHelper.app/Contents",
+              "AppleRemindersEventKitHelper.app/Contents/MacOS",
+              "AppleRemindersEventKitHelper.app/Contents/_CodeSignature",
+          }
+          actual_files = set()
+          actual_directories = set()
+          if native.is_symlink() or not native.is_dir():
+              raise SystemExit("native helper root is missing, unsafe, or not a directory")
+          if stat.S_IMODE(native.lstat().st_mode) != 0o755:
+              raise SystemExit("native helper root mode drift")
+          for path in sorted(native.rglob("*")):
+              relative = path.relative_to(native).as_posix()
+              mode = path.lstat().st_mode
+              if stat.S_ISLNK(mode):
+                  raise SystemExit(f"native helper symlink rejected: {relative}")
+              if stat.S_ISDIR(mode):
+                  actual_directories.add(relative)
+                  if stat.S_IMODE(mode) != 0o755:
+                      raise SystemExit(f"native helper directory mode drift: {relative}")
+              elif stat.S_ISREG(mode):
+                  actual_files.add(relative)
+              else:
+                  raise SystemExit(f"native helper special file rejected: {relative}")
+          if actual_directories != expected_directories:
+              raise SystemExit(
+                  "native helper directory inventory drift: "
+                  f"expected={sorted(expected_directories)}, actual={sorted(actual_directories)}"
+              )
+          if actual_files != expected_files:
+              raise SystemExit(
+                  "native helper file inventory drift: "
+                  f"expected={sorted(expected_files)}, actual={sorted(actual_files)}"
+              )
+          executable = (
+              "AppleRemindersEventKitHelper.app/Contents/MacOS/"
+              "apple-reminders-eventkit-helper"
+          )
+          for relative in sorted(actual_files):
+              path = native / relative
+              expected_mode = 0o755 if relative == executable else 0o644
+              actual_mode = stat.S_IMODE(path.lstat().st_mode)
+              if actual_mode != expected_mode:
+                  raise SystemExit(
+                      f"native helper file mode drift: {relative} is {actual_mode:04o}"
+                  )
+              if relative in expected_app_files:
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  if expected_app_files[relative] != digest:
+                      raise SystemExit(f"manifest/app byte drift: {relative}")
+          if manifest.get("source_commit") != os.environ["MANIFEST_SOURCE_COMMIT"]:
+              raise SystemExit("helper manifest source commit drift")
+          if manifest.get("plugin_version") != os.environ["RELEASE_VERSION"]:
+              raise SystemExit("helper manifest release version drift")
+          PY
+
+          python3 scripts/verify_eventkit_helper.py \
+            --plugin-root "$PLUGIN_ROOT" \
+            --app "$PLUGIN_ROOT/native/AppleRemindersEventKitHelper.app" \
+            --expected-team-id V8347N9346 \
+            --require-developer-id \
+            --require-notarized \
+            --run-protocol-probes \
+            --manifest "$PLUGIN_ROOT/native/eventkit-helper-build.json" \
+            --source-commit "$MANIFEST_SOURCE_COMMIT"
+
+      - name: Independently verify helper manifest provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          manifest_path="$PLUGIN_ROOT/native/eventkit-helper-build.json"
+          attestation_result="$RUNNER_TEMP/eventkit-helper-manifest-attestation.json"
+          gh attestation verify "$manifest_path" \
+            --repo "Oscar-V4/apple-reminders" \
+            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/prepare-signed-helper.yml" \
+            --signer-digest "$MANIFEST_SOURCE_COMMIT" \
+            --source-digest "$MANIFEST_SOURCE_COMMIT" \
+            --source-ref "refs/heads/main" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$attestation_result"
+          python3 - "$attestation_result" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          results = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(results, list) or not results:
+              raise SystemExit("gh returned no verified helper manifest attestation")
+          if not all(isinstance(item, dict) for item in results):
+              raise SystemExit("gh returned malformed attestation verification results")
+          PY
+
+      - name: Build the deterministic release package twice
+        id: release_artifacts
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          umask 022
+          build_a="$RUNNER_TEMP/apple-reminders-package-a"
+          build_b="$RUNNER_TEMP/apple-reminders-package-b"
+          release_root="$RUNNER_TEMP/apple-reminders-release"
+          package_name="apple-reminders-$RELEASE_VERSION.zip"
+          [[ ! -e "$build_a" && ! -e "$build_b" && ! -e "$release_root" ]]
+
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
+            --output-directory "$build_a"
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
+            --output-directory "$build_b"
+          cmp "$build_a/$package_name" "$build_b/$package_name"
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT" \
+            --archive "$build_a/$package_name"
+
+          mkdir -m 0755 "$release_root"
+          install -m 0644 "$build_a/$package_name" "$release_root/$package_name"
+          (
+            cd "$release_root"
+            shasum -a 256 "$package_name" > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+          [[ "$(find "$release_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == 2 ]]
+          [[ "$(find "$release_root" -mindepth 1 -maxdepth 1 ! -type f | wc -l | tr -d ' ')" == 0 ]]
+          package_sha256="$(shasum -a 256 "$release_root/$package_name" | awk '{print $1}')"
+          checksums_sha256="$(shasum -a 256 "$release_root/SHA256SUMS" | awk '{print $1}')"
+          {
+            printf 'package_name=%s\n' "$package_name"
+            printf 'package_sha256=%s\n' "$package_sha256"
+            printf 'checksums_sha256=%s\n' "$checksums_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the verified release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: apple-reminders-release-${{ steps.release_identity.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/apple-reminders-release/${{ steps.release_artifacts.outputs.package_name }}
+            ${{ runner.temp }}/apple-reminders-release/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  publish_release:
+    name: Publish verified GitHub Release
+    needs: verify_release
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      needs.verify_release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the exact verified release payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: apple-reminders-release-${{ needs.verify_release.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apple-reminders-release
+
+      - name: Recheck the publication boundary and publish
+        shell: bash
+        env:
+          CHECKSUMS_SHA256: ${{ needs.verify_release.outputs.checksums_sha256 }}
+          EXPECTED_TAG_COMMIT: ${{ needs.verify_release.outputs.tag_commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.verify_release.outputs.tag_object }}
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_NAME: ${{ needs.verify_release.outputs.package_name }}
+          PACKAGE_SHA256: ${{ needs.verify_release.outputs.package_sha256 }}
+          RELEASE_TAG: ${{ needs.verify_release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.verify_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" == "$RELEASE_TAG" ]]
+          [[ "$RELEASE_TAG" == "v$RELEASE_VERSION" ]]
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+          release_root="$RUNNER_TEMP/apple-reminders-release"
+          python3 - "$release_root" "$PACKAGE_NAME" <<'PY'
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = {sys.argv[2], "SHA256SUMS"}
+          if root.is_symlink() or not root.is_dir():
+              raise SystemExit("release payload root is missing or unsafe")
+          actual = {path.name for path in root.iterdir()}
+          if actual != expected:
+              raise SystemExit(
+                  f"release payload inventory drift: expected={sorted(expected)}, actual={sorted(actual)}"
+              )
+          for name in sorted(expected):
+              path = root / name
+              mode = path.lstat().st_mode
+              if not stat.S_ISREG(mode) or path.is_symlink():
+                  raise SystemExit(f"release payload member is unsafe: {name}")
+              if stat.S_IMODE(mode) not in {0o600, 0o644}:
+                  raise SystemExit(f"release payload member mode drift: {name}")
+          PY
+
+          [[ "$(sha256sum "$release_root/$PACKAGE_NAME" | awk '{print $1}')" == "$PACKAGE_SHA256" ]]
+          [[ "$(sha256sum "$release_root/SHA256SUMS" | awk '{print $1}')" == "$CHECKSUMS_SHA256" ]]
+          (
+            cd "$release_root"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          current_tag_object="$(
+            gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha'
+          )"
+          [[ "$current_tag_object" == "$EXPECTED_TAG_OBJECT" ]]
+
+          release_flags=(--verify-tag)
+          if [[ "$RELEASE_VERSION" == 0.* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            "$release_root/$PACKAGE_NAME#Apple Reminders plugin $RELEASE_VERSION" \
+            "$release_root/SHA256SUMS#SHA-256 checksums" \
+            --repo "$GITHUB_REPOSITORY" \
+            "${release_flags[@]}" \
+            --target "$EXPECTED_TAG_COMMIT" \
+            --title "Apple Reminders $RELEASE_TAG" \
+            --generate-notes

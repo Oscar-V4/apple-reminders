@@ -7,7 +7,7 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The 0.4 Interface has one static 15-tool surface:
+The 0.5 Interface has one static 15-tool surface:
 
 ### Core
 
@@ -69,6 +69,13 @@ user-facing promise.
 3. **Core Module**
    - Uses EventKit for access, lists, bounded reminder fetches, exact reads,
      create/change/complete/reopen/list moves, and deletion.
+   - Launches the exact Developer ID signed, notarized, stapled universal app
+     committed inside the plugin. Runtime validation rejects symlinks, bundle
+     identity drift, manifest drift, and an unexpected executable before
+     dispatch. Architecture and minimum-version checks parse bounded Mach-O
+     bytes directly, and signature checks use the macOS system `codesign` tool;
+     ordinary Core use never invokes developer-tool shims, downloads a helper,
+     or automatically compiles a fallback.
    - Preserves omitted fields and keeps due dates, alarms, and recurrence typed
      separately.
    - Composes visible URL writes across EventKit and the native URL attachment
@@ -123,6 +130,9 @@ user-facing promise.
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.
+   - Keep locally compiled private helpers only for Native Extension and
+     Recovery capabilities. These advanced paths retain an Xcode Command Line
+     Tools dependency independently of the prebuilt Core helper.
    - Are not a second public API and are not a fallback for skills.
 
 There is no equivalent hosted Codex connector for the user's local native
@@ -180,9 +190,9 @@ to the type decoded from byte-identical data and is not treated as corruption.
 ## Diagnosis policy
 
 Core work does not run Doctor as onboarding. If an operation reports a relevant
-permission, environment, build, schema, or capability failure, the next action
-may be `request_reminders_access` or targeted `diagnose_reminders`. A Native
-failure does not globally block Core.
+permission, environment, bundle, build, schema, or capability failure, the next
+action may be `request_reminders_access` or targeted `diagnose_reminders`. A
+Native or Recovery build failure does not globally block Core.
 
 Diagnosis is content-free. It can inspect toolchain, filesystem metadata,
 permission symptoms, and schema/capability metadata, but not reminder titles,
@@ -191,11 +201,13 @@ contents.
 
 ## Production and test boundaries
 
-The packaged server always uses its bundled adapter, EventKit bridge, and
-Doctor. Production backend paths cannot be changed through environment
-variables. Durable idempotency uses its fixed Application Support location in
-production; tests bind the same implementation to a temporary directory rather
-than substituting a different storage protocol.
+The packaged server always uses its bundled adapter, EventKit bridge, signed
+EventKit app, and Doctor. Production backend paths cannot be changed through
+environment variables. The bridge accepts an explicit contributor build mode,
+but ordinary packaged execution resolves only the signed app. Durable
+idempotency uses its fixed Application Support location in production; tests
+bind the same implementation to a temporary directory rather than substituting
+a different storage protocol.
 
 Source tests construct `BackendPaths(adapter=..., eventkit_bridge=...,
 doctor=...)` and inject it into a fresh `McpRuntime` (or through the source-only
@@ -215,5 +227,5 @@ share initialization, rate-limit history, or lazy Facade instances.
   states.
 
 Historical adapter backup, repair, cache, log-purge, direct Core-write, and
-UI-handoff routes are not part of the 0.4 runtime contract. They were removed
+UI-handoff routes are not part of the 0.5 runtime contract. They were removed
 as a release-blocking cleanup rather than exposed or retained as fallbacks.

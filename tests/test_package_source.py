@@ -25,9 +25,9 @@ import build_source_package  # noqa: E402
 
 
 # The deterministic allowlist is the primary content boundary. This hard ceiling
-# catches gross package growth while leaving room for the reviewed recovery
-# facade, backend, and native helper; exact bytes remain visible in benchmarks.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.21 * 1024 * 1024)
+# catches gross package growth while leaving narrowly reviewed room for the
+# signed universal Core helper; exact bytes remain visible in benchmarks.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.59 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -639,6 +639,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
             base = Path(temp_dir)
             plugin = base / "apple-reminders"
             shutil.copytree(self.plugin_root, plugin)
+            shutil.rmtree(plugin / "native")
             app = plugin / audit_source_package.NATIVE_HELPER_APP
             executable = plugin / audit_source_package.NATIVE_HELPER_EXECUTABLE
             info = app / "Contents" / "Info.plist"
@@ -752,6 +753,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin = Path(temp_dir) / "apple-reminders"
             shutil.copytree(self.plugin_root, plugin)
+            shutil.rmtree(plugin / "native")
             (plugin / "native").mkdir()
 
             result = audit_source_package.audit_source(plugin)
@@ -770,7 +772,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.21 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.59 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 
