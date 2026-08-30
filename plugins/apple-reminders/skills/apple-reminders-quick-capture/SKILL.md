@@ -13,7 +13,7 @@ Preserve wording, choose an exact destination, and create each intended Reminder
 2. Call `list_reminder_lists`. If the destination is missing or duplicate by display name, show exact account/list candidates. Do not create a list unless asked.
 3. If asked to create a list, use `ensure_reminder_list` with exact `source_id`, exact name, and a fresh idempotency key. The public interface does not set list color or emblem.
 4. Call `create_reminder` with exact `list_id`, preserved title, and a unique idempotency key. For multi-capture, process at most 25 items one at a time; stop on the first ambiguous, pending, partial, or failed result. Include only supplied or delegated fields.
-5. Use typed due values. A timed due includes RFC 3339 offset and IANA timezone. Alerts belong in `alarms`; never turn a due date into an alarm without a notification request.
+5. Use typed due values. A timed due includes RFC 3339 offset and IANA timezone. Alerts belong in `alarms`; add one only when the user requests a notification. Preserve relative wording such as “2 weeks before” as a due-anchored relative alarm instead of converting it to an absolute date.
 6. Pass a supplied URL in the same create call. A verified result already includes the visible native URL attachment and final exact read; do not attach it again.
 7. On `verified` or `unchanged`, report the returned exact state, ID, and fresh reference. An extra `read_reminder` is unnecessary unless the returned result lacks a final reference.
 8. On `partial_success` or `committed_verification_pending`, report which items are verified, uncreated, or uncertain; perform only the indicated read-only step before retry.
@@ -35,7 +35,7 @@ Timed example:
 }
 ```
 
-All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their own RFC 3339 `date_time`; location alarms require explicit coordinates and `enter` or `leave`. One recurrence rule is supported and requires a due value. Relative alarms are unsupported.
+All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their own RFC 3339 `date_time`; location alarms require explicit coordinates and `enter` or `leave`. A due-anchored relative alarm is `{"kind":"relative","offset_seconds":-1209600}` for two weeks before. Relative offsets are integer seconds from `-31536000` through `0` and require an existing or same-create due value. One recurrence rule is supported and requires a due value.
 
 ## Image follow-up
 

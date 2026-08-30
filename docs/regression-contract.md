@@ -36,8 +36,9 @@ even though optional MCP `outputSchema` descriptors are omitted from
    verifies local absence, and does not claim that Recently Deleted was
    visually observed.
 5. Timed and all-day due values remain distinct from alarms. Time zones,
-   recurrence, coordinate-backed location alarms, and priority keep typed
-   contracts.
+   recurrence, absolute/due-anchored relative/coordinate-backed location
+   alarms, and priority keep typed contracts. Relative alarms preserve their
+   signed offset and require an existing or same-request due value.
 6. A non-null URL create/change preserves EventKit metadata, verifies the
    user-visible native URL attachment, and then performs a final exact EventKit
    read. An unavailable final read remains verification-pending; a failed

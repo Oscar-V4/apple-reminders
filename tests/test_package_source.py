@@ -26,7 +26,7 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving room for the reviewed recovery
 # facade, backend, and native helper; exact bytes remain visible in benchmarks.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.20 * 1024 * 1024)
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.21 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",

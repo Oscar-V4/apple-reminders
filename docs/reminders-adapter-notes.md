@@ -7,7 +7,7 @@ they are not a second user-facing command contract.
 ## Public 0.4 boundary
 
 Core operations use EventKit for access, exact lists/reminders, typed due dates,
-absolute and coordinate-backed location alarms, recurrence, completion,
+absolute, due-anchored relative, and coordinate-backed location alarms, recurrence, completion,
 priority, URLs, and list moves. Native Extension operations cover exact
 sections, tags, and native image/URL attachments.
 
@@ -37,8 +37,9 @@ broad fetch safe. Existing-reminder changes require exact identity and a fresh
 precondition, carried publicly inside the opaque Reference.
 
 Normal creation and editing keep `due` and `alarms` separate, reject
-timezone-naive timed values, support explicit location-alarm coordinates, and
-never infer an alert from a due date.
+timezone-naive timed values, preserve requested relative offsets against an
+existing or same-request due anchor, support explicit location-alarm
+coordinates, and never infer an alert from a due date.
 
 ## Private store surfaces
 

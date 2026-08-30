@@ -145,6 +145,36 @@ class McpToolsV2SchemaTests(unittest.TestCase):
             self.assertIn("6-9 low", description)
             self.assertIn("1, 5, or 9", description)
 
+    def test_relative_alarms_are_writable_through_create_and_change(self) -> None:
+        for tool_name in ("create_reminder", "change_reminder"):
+            alarm = self.by_name[tool_name]["inputSchema"]["$defs"]["alarm"]
+            relative = next(
+                branch
+                for branch in alarm["oneOf"]
+                if branch["properties"]["kind"].get("const") == "relative"
+            )
+
+            self.assertEqual(
+                set(relative["properties"]),
+                {"kind", "offset_seconds"},
+                tool_name,
+            )
+            self.assertEqual(
+                set(relative["required"]),
+                {"kind", "offset_seconds"},
+                tool_name,
+            )
+            self.assertIs(relative["additionalProperties"], False, tool_name)
+            self.assertEqual(
+                relative["properties"]["offset_seconds"],
+                {
+                    "type": "integer",
+                    "minimum": -31_536_000,
+                    "maximum": 0,
+                },
+                tool_name,
+            )
+
     def test_every_public_tool_has_a_human_readable_title(self) -> None:
         self.assertEqual(
             {name: tool.get("title") for name, tool in self.by_name.items()},

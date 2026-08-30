@@ -144,6 +144,19 @@
         },
         {
           "type": "object",
+          "required": ["kind", "offset_seconds"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "relative"},
+            "offset_seconds": {
+              "type": "integer",
+              "minimum": -31536000,
+              "maximum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
           "required": ["kind", "proximity", "location"],
           "additionalProperties": false,
           "properties": {
