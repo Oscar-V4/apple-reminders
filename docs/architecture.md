@@ -176,6 +176,9 @@ Normal operation is background-first:
 - bounded reads use semantic scope, numeric limits, and snapshot-bound opaque
   cursors that reject changed ordered membership or revisions;
 - exact writes use a current Reference and preserve omitted fields;
+- existing-item success compares one canonical requested-delta-plus-stable-state
+  projection at both the native and public seams, excluding provider-owned
+  volatile metadata;
 - every terminal success names its final read-back evidence;
 - `committed_verification_pending` and `partial_success` remain visible instead
   of being translated into optimistic success;

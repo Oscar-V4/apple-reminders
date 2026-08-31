@@ -2492,7 +2492,9 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         bridge_call = mock.Mock(
             side_effect=[
                 transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
+                transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
                 transport(first_eventkit_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(retry_eventkit_no_write),
@@ -2676,7 +2678,9 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         bridge_call = mock.Mock(
             side_effect=[
                 transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
+                transport(read_receipt(old_url, "2026-08-25T01:00:00.000Z")),
                 transport(first_eventkit_write),
+                transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(read_receipt(new_url, "2026-08-25T01:00:01.000Z")),
                 transport(retry_eventkit_no_write),

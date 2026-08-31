@@ -57,7 +57,7 @@ class PluginValidationTests(unittest.TestCase):
         self.assertNotIn("links", featured_examples.casefold())
         self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
         self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.1",
+            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2",
             quick_start,
         )
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)

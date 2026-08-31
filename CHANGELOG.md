@@ -2,6 +2,32 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.5.2 — 2026-09-01
+
+### Changed
+
+- Consolidated existing-Reminder verification behind one canonical semantic
+  projection in the native EventKit helper and public Core. Requested changes
+  are combined with every stable user-authored field, while provider-owned or
+  derived identity, timestamp, completion-date, and display-title fields are
+  explicitly excluded.
+- Added a fresh exact Reference revalidation before Core action preflight, so
+  validation uses current Reminder state and stale, cross-store, expired, or
+  failed-revalidation grants are consumed before dispatch.
+
+### Fixed
+
+- Prevented title changes, completion/reopen actions, and Reminder List moves
+  from reporting `verified` or issuing a new `rev1` when EventKit drops or
+  transforms absolute, location, writable relative, or read-only alarms.
+- Preserved alarm arrays as order-insensitive multisets with duplicate counts,
+  and made due, recurrence, start, list, and other stable user state part of
+  the same final-read integrity decision instead of alarm-type-specific
+  condition branches.
+- Refreshed the universal EventKit helper through the protected default-branch
+  signing workflow, retaining Developer ID signing, notarization, stapling,
+  Gatekeeper validation, source/build-input hashes, and artifact attestations.
+
 ## 0.5.1 — 2026-08-31
 
 ### Changed

@@ -44,6 +44,7 @@ from reminders_service import (  # noqa: E402
     MutationState,
     PatchAction,
     ReferenceRejected,
+    ReferenceRevalidationFailed,
     SetCompletionAction,
     Snapshot,
     mutation_state_after_unverified_projection,
@@ -1835,6 +1836,18 @@ class V2CoreFacade:
                     None,
                     code="concurrent_modification",
                     reason_code=exc.code,
+                    message=str(exc),
+                    retryable=True,
+                ),
+                "not_mutated",
+            )
+        except ReferenceRevalidationFailed as exc:
+            return _CoreCallResult(
+                self._change_failure(
+                    public_operation,
+                    None,
+                    code="sync_pending",
+                    reason_code="reference_revalidation_failed",
                     message=str(exc),
                     retryable=True,
                 ),

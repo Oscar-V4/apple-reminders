@@ -343,6 +343,7 @@ class V2CoreFacadeTests(unittest.TestCase):
     def test_change_transport_exception_consumes_reference_and_reports_pending(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue("read_reminder", read_receipt(native_reminder()))
+        eventkit.queue("read_reminder", read_receipt(native_reminder()))
         eventkit.fail(
             "update_reminder",
             RuntimeError("native process disappeared after dispatch"),
@@ -369,7 +370,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             }
         )
         self.assertEqual(rejected["error"]["reason_code"], "invalid_reference")
-        self.assertEqual(len(eventkit.calls), 2)
+        self.assertEqual(len(eventkit.calls), 3)
 
     def test_delete_transport_exception_consumes_reference_and_reports_pending(self) -> None:
         eventkit = FakeEventKit()
@@ -1096,6 +1097,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         final = copy.deepcopy(committed)
         final["alarms"][0]["action"]["sound_name"] = "s" * 512 + "B"
         eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",
             mutation_receipt("update_reminder", before, committed),
@@ -1391,7 +1393,11 @@ class V2CoreFacadeTests(unittest.TestCase):
             title="Ship public beta",
             last_modified="2026-08-25T02:00:00.000Z",
         )
-        final = {**committed, "notes": "Verified by a final exact read"}
+        final = {
+            **committed,
+            "last_modified": "2026-08-25T03:00:00.000Z",
+        }
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",
@@ -1415,7 +1421,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            eventkit.calls[1],
+            eventkit.calls[2],
             (
                 "update_reminder",
                 {
@@ -1427,14 +1433,14 @@ class V2CoreFacadeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            eventkit.calls[2],
+            eventkit.calls[3],
             ("read_reminder", {"reminder_id": "REMINDER-1"}, False),
         )
         self.assertEqual(result["schema_version"], 2)
         self.assertEqual(result["operation"], "change_reminder.patch")
         self.assertEqual(result["target"], {"reminder_id": "REMINDER-1", "list_id": "LIST-1"})
         self.assertEqual(result["after"]["title"], "Ship public beta")
-        self.assertEqual(result["after"]["notes"], "Verified by a final exact read")
+        self.assertEqual(result["after"]["last_modified"], "2026-08-25T03:00:00.000Z")
         self.assertEqual(result["after"]["reference"], "rev1." + "B" * 32)
         self.assertNotIn("reference", result["before"])
         self.assertEqual(result["verification"]["state"], "read_back")
@@ -1455,6 +1461,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             title="Conflicting title",
             last_modified="2026-08-25T03:00:00.000Z",
         )
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",
@@ -1483,6 +1490,116 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["error"]["reason_code"], "final_state_mismatch")
         self.assertNotIn("rev1.", repr(result))
         self.assertFalse(result["recovery"]["automatic_retry_safe"])
+
+    def test_alarm_integrity_mismatch_never_becomes_verified_or_writable(
+        self,
+    ) -> None:
+        alarms = {
+            "absolute": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+            },
+            "location": {
+                "kind": "location",
+                "proximity": "enter",
+                "location": {
+                    "title": "Office",
+                    "latitude": 37.5,
+                    "longitude": 127.0,
+                    "radius_meters": 100.0,
+                },
+            },
+            "writable_relative": {
+                "kind": "relative",
+                "offset_seconds": -900,
+            },
+            "read_only": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+                "read_only": True,
+                "action": {"type": "procedure", "url": "example:before"},
+            },
+        }
+        actions = (
+            (
+                "title_patch",
+                "update_reminder",
+                False,
+                {"kind": "patch", "patch": {"title": "Changed title"}},
+                {"title": "Changed title"},
+            ),
+            (
+                "completion",
+                "complete_reminder",
+                False,
+                {"kind": "set_completion", "completed": True},
+                {"completed": True},
+            ),
+            (
+                "reopen",
+                "reopen_reminder",
+                True,
+                {"kind": "set_completion", "completed": False},
+                {"completed": False},
+            ),
+            (
+                "move",
+                "move_reminder",
+                False,
+                {"kind": "move_to_list", "list_id": "LIST-2"},
+                {"calendar_id": "LIST-2", "calendar_title": "Work"},
+            ),
+        )
+
+        for alarm_name, alarm in alarms.items():
+            for action_name, operation, completed, action, delta in actions:
+                with self.subTest(alarm=alarm_name, action=action_name):
+                    before = native_reminder(completed=completed)
+                    before["due"] = {
+                        "kind": "all_day",
+                        "date": "2027-08-31",
+                    }
+                    before["alarms"] = [copy.deepcopy(alarm)]
+                    before["recurrence_rules"] = [
+                        {"frequency": "weekly", "interval": 1}
+                    ]
+                    committed = {
+                        **copy.deepcopy(before),
+                        **copy.deepcopy(delta),
+                        "last_modified": "2026-08-25T02:00:00.000Z",
+                    }
+                    final = {
+                        **copy.deepcopy(committed),
+                        "alarms": [],
+                        "last_modified": "2026-08-25T03:00:00.000Z",
+                    }
+                    eventkit = FakeEventKit()
+                    eventkit.queue("read_reminder", read_receipt(before))
+                    eventkit.queue("read_reminder", read_receipt(before))
+                    eventkit.queue(
+                        operation,
+                        mutation_receipt(operation, before, committed),
+                        mutation=True,
+                    )
+                    eventkit.queue("read_reminder", read_receipt(final))
+                    subject = facade(eventkit)
+                    reference = subject.read_reminder(
+                        {"reminder_id": "REMINDER-1"}
+                    )["data"]["reminder"]["reference"]
+
+                    result = subject.change_reminder(
+                        {"reference": reference, "action": action}
+                    )
+
+                    self.assertEqual(
+                        result["status"],
+                        "committed_verification_pending",
+                    )
+                    self.assertEqual(
+                        result["error"]["reason_code"],
+                        "final_state_mismatch",
+                    )
+                    self.assertNotIn("rev1.", repr(result))
 
     def test_relative_alarm_dependencies_must_match_the_public_final_read(self) -> None:
         before = native_reminder()
@@ -1542,6 +1659,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             with self.subTest(label=label):
                 eventkit = FakeEventKit()
                 eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue("read_reminder", read_receipt(before))
                 eventkit.queue(
                     operation,
                     mutation_receipt(operation, before, committed),
@@ -1571,6 +1689,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         unchanged = mutation_receipt("update_reminder", before, before)
         unchanged["status"] = "unchanged"
         unchanged["verification"]["write_performed"] = False
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("update_reminder", unchanged, mutation=True)
         eventkit.queue(
@@ -1629,6 +1748,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             last_modified="2026-08-25T02:00:00.000Z",
         )
         eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "move_reminder",
             mutation_receipt("move_reminder", before, after),
@@ -1647,15 +1767,16 @@ class V2CoreFacadeTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(eventkit.calls[1][0], "move_reminder")
-        self.assertEqual(eventkit.calls[1][1]["calendar_id"], "LIST-2")
-        self.assertNotIn("list_id", eventkit.calls[1][1])
+        self.assertEqual(eventkit.calls[2][0], "move_reminder")
+        self.assertEqual(eventkit.calls[2][1]["calendar_id"], "LIST-2")
+        self.assertNotIn("list_id", eventkit.calls[2][1])
         self.assertEqual(result["operation"], "change_reminder.move_to_list")
         self.assertEqual(result["after"]["list_id"], "LIST-2")
 
     def test_known_concurrent_change_returns_a_structured_fresh_read_failure(self) -> None:
         eventkit = FakeEventKit()
         before = native_reminder()
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",
@@ -1695,6 +1816,114 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["kind"], "fresh_read")
         self.assertIsNone(result["before"])
         self.assertIsNone(result["after"])
+
+    def test_stale_alarm_reference_is_consumed_before_semantic_preflight(self) -> None:
+        cached_alarms = (
+            (
+                "read_only",
+                {
+                    "kind": "absolute",
+                    "date_time": "2027-08-17T00:00:00.000Z",
+                    "read_only": True,
+                    "action": {"type": "procedure", "url": "example:before"},
+                },
+                {
+                    "kind": "patch",
+                    "patch": {
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-18T00:00:00.000Z",
+                            }
+                        ]
+                    },
+                },
+            ),
+            (
+                "relative",
+                {"kind": "relative", "offset_seconds": -900},
+                {"kind": "patch", "patch": {"due": None}},
+            ),
+        )
+
+        for label, alarm, action in cached_alarms:
+            with self.subTest(alarm=label):
+                before = native_reminder()
+                before["due"] = {"kind": "all_day", "date": "2027-08-31"}
+                before["alarms"] = [alarm]
+                current = native_reminder(
+                    last_modified="2026-08-25T02:00:00.000Z"
+                )
+                eventkit = FakeEventKit()
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue("read_reminder", read_receipt(current))
+                subject = facade(eventkit)
+                reference = subject.read_reminder(
+                    {"reminder_id": "REMINDER-1"}
+                )["data"]["reminder"]["reference"]
+
+                result = subject.change_reminder(
+                    {"reference": reference, "action": action}
+                )
+                replay = subject.change_reminder(
+                    {
+                        "reference": reference,
+                        "action": {
+                            "kind": "patch",
+                            "patch": {"title": "No replay"},
+                        },
+                    }
+                )
+
+                self.assertEqual(result["status"], "failed_no_mutation")
+                self.assertEqual(
+                    result["error"]["reason_code"],
+                    "concurrent_modification",
+                )
+                self.assertEqual(
+                    replay["error"]["reason_code"],
+                    "invalid_reference",
+                )
+                self.assertEqual(
+                    [call[0] for call in eventkit.calls],
+                    ["read_reminder", "read_reminder"],
+                )
+
+    def test_change_revalidation_failure_is_no_write_and_consumes_reference(
+        self,
+    ) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue("read_reminder", read_receipt(native_reminder()))
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": "REMINDER-1"})[
+            "data"
+        ]["reminder"]["reference"]
+        eventkit.fail("read_reminder", RuntimeError("fresh read unavailable"))
+
+        result = subject.change_reminder(
+            {
+                "reference": reference,
+                "action": {"kind": "patch", "patch": {"title": "No dispatch"}},
+            }
+        )
+        replay = subject.change_reminder(
+            {
+                "reference": reference,
+                "action": {"kind": "patch", "patch": {"title": "No replay"}},
+            }
+        )
+
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["code"], "sync_pending")
+        self.assertEqual(
+            result["error"]["reason_code"],
+            "reference_revalidation_failed",
+        )
+        self.assertEqual(replay["error"]["reason_code"], "invalid_reference")
+        self.assertEqual(
+            [call[0] for call in eventkit.calls],
+            ["read_reminder", "read_reminder"],
+        )
 
     def test_call_with_state_does_not_infer_no_write_from_public_failure(self) -> None:
         for raw_state in ("committed", "unknown"):
@@ -1757,6 +1986,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         eventkit = FakeEventKit()
         before = native_reminder()
         eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",
             {
@@ -1810,6 +2040,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             with self.subTest(raw_state=raw_state):
                 eventkit = FakeEventKit()
                 before = native_reminder()
+                eventkit.queue("read_reminder", read_receipt(before))
                 eventkit.queue("read_reminder", read_receipt(before))
                 eventkit.queue(
                     "update_reminder",
@@ -1876,6 +2107,7 @@ class V2CoreFacadeTests(unittest.TestCase):
             title="Changed",
             last_modified="2026-08-25T01:00:01.000Z",
         )
+        eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue("read_reminder", read_receipt(before))
         eventkit.queue(
             "update_reminder",

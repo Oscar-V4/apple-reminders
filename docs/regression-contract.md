@@ -266,6 +266,23 @@ even though optional MCP `outputSchema` descriptors are omitted from
     `offset_seconds`. In particular, direct helper inputs using either `false`
     or `true` fail before mutation; Foundation's Boolean `NSNumber` bridge is
     never accepted as the integer zero or one.
+36. Existing-Reminder writes use one canonical semantic projection at both the
+    native EventKit and public Core seams: the requested delta plus the stable
+    user-authored `title`, `notes`, `url`, `location`, `priority`, `completed`,
+    `due`, `start`, complete `alarms` multiset, `recurrence_rules`, and exact
+    destination list. Native `calendar_id` and public `list_id` are the same
+    semantic field. Identity is guarded separately. Provider-owned or derived
+    `external_id`, completion date, creation/modification timestamps,
+    list/source display titles, and source identity are not semantic equality
+    inputs. Alarm order may change but duplicate multiplicity may not. Title
+    patches, completion, reopen, and moves therefore preserve absolute,
+    location, writable-relative, and read-only alarm semantics together with
+    due and recurrence state. Any final mismatch stays pending and issues no
+    writable `rev1`, even if an inner receipt claimed `verified` or
+    `unchanged`. Core performs a fresh exact revalidation before cached
+    read-only/relative alarm preflight; stale, cross-store, expired, or failed
+    revalidation grants are consumed before dispatch and cannot be masked by an
+    `invalid_action` result.
 
 ## Deliberately withheld behavior
 

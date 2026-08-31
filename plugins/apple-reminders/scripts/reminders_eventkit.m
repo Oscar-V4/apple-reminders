@@ -1080,19 +1080,6 @@ static BOOL AlarmValuesContainRelative(id values) {
     return NO;
 }
 
-static BOOL AlarmValuesContainReadOnly(id values) {
-    if (![values isKindOfClass:[NSArray class]]) {
-        return NO;
-    }
-    for (id raw in (NSArray *)values) {
-        if ([raw isKindOfClass:[NSDictionary class]] &&
-            [[(NSDictionary *)raw objectForKey:@"read_only"] isEqual:@YES]) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
 static BOOL ReminderHasRelativeAlarm(EKReminder *reminder) {
     for (EKAlarm *alarm in reminder.alarms ?: @[]) {
         if (alarm.absoluteDate == nil &&
@@ -1220,26 +1207,6 @@ static BOOL RequestedFieldsAlreadyMatch(NSDictionary *requested, NSDictionary *a
     return YES;
 }
 
-static NSDictionary *ProjectionForKeys(NSDictionary *source, NSArray<NSString *> *keys) {
-    NSMutableDictionary *projection = [NSMutableDictionary dictionary];
-    for (NSString *key in keys) {
-        projection[key] = source[key] ?: (id)[NSNull null];
-    }
-    BOOL touchesRelativeAlarmDependency =
-        [keys containsObject:@"due"] ||
-        [keys containsObject:@"alarms"] ||
-        [keys containsObject:@"calendar_id"];
-    BOOL containsReadOnlyAlarm = AlarmValuesContainReadOnly(source[@"alarms"]);
-    if ((touchesRelativeAlarmDependency || containsReadOnlyAlarm) &&
-        AlarmValuesContainRelative(source[@"alarms"])) {
-        projection[@"due"] = source[@"due"] ?: (id)[NSNull null];
-        projection[@"alarms"] = source[@"alarms"] ?: @[];
-    } else if (containsReadOnlyAlarm) {
-        projection[@"alarms"] = source[@"alarms"] ?: @[];
-    }
-    return projection;
-}
-
 static id CanonicalDueVerificationValue(id raw) {
     if (raw == [NSNull null]) {
         return [NSNull null];
@@ -1296,23 +1263,100 @@ static NSArray *CanonicalAlarmVerificationValues(id raw) {
     return values;
 }
 
-static NSDictionary *VerificationSource(NSDictionary *before,
-                                        NSDictionary *desired,
-                                        NSDictionary *requestedFields) {
-    NSMutableDictionary *source = [desired mutableCopy];
-    id due = requestedFields[@"due"];
-    if (due != nil) {
-        source[@"due"] = CanonicalDueVerificationValue(due);
-    } else if (before[@"due"] != nil) {
-        source[@"due"] = before[@"due"];
+static NSArray *CanonicalRecurrenceVerificationValues(id raw) {
+    if (raw == [NSNull null]) {
+        return @[];
     }
-    id alarms = requestedFields[@"alarms"];
-    if (alarms != nil) {
-        source[@"alarms"] = CanonicalAlarmVerificationValues(alarms);
-    } else if (before[@"alarms"] != nil) {
-        source[@"alarms"] = before[@"alarms"];
+    if (![raw isKindOfClass:[NSArray class]]) {
+        RaiseRequest(@"invalid_recurrence",
+                     @"recurrence_rules must be an array or null",
+                     @"invalid_request",
+                     @{});
     }
-    return source;
+    NSMutableArray *values = [NSMutableArray array];
+    for (id entry in (NSArray *)raw) {
+        if (![entry isKindOfClass:[NSDictionary class]]) {
+            RaiseRequest(@"invalid_recurrence",
+                         @"Recurrence entries must be objects",
+                         @"invalid_request",
+                         @{});
+        }
+        [values addObject:RecurrenceJSON(RecurrenceFromJSON((NSDictionary *)entry))];
+    }
+    return values;
+}
+
+static NSArray<NSString *> *StableUserFieldKeys(void) {
+    // Identity is guarded separately. Provider-owned or derived values such as
+    // external_id, completion_date, created, last_modified, calendar/source
+    // titles, and source_id are intentionally excluded from semantic equality.
+    return @[
+        @"title",
+        @"notes",
+        @"url",
+        @"location",
+        @"priority",
+        @"completed",
+        @"due",
+        @"start",
+        @"alarms",
+        @"recurrence_rules",
+        @"calendar_id",
+    ];
+}
+
+static NSDictionary *CanonicalReminderProjection(
+    NSDictionary *before,
+    NSDictionary *desired,
+    NSDictionary *requestedFields,
+    NSArray<NSString *> *closedActionKeys
+) {
+    NSMutableDictionary *source = before == nil
+        ? [desired mutableCopy]
+        : [before mutableCopy];
+    if (before != nil) {
+        for (NSString *key in closedActionKeys ?: @[]) {
+            source[key] = desired[key] ?: (id)[NSNull null];
+        }
+    }
+
+    for (NSString *key in StableUserFieldKeys()) {
+        id requested = requestedFields[key];
+        if (requested == nil) {
+            continue;
+        }
+        if ([key isEqualToString:@"due"]) {
+            source[key] = CanonicalDueVerificationValue(requested);
+        } else if ([key isEqualToString:@"alarms"]) {
+            source[key] = CanonicalAlarmVerificationValues(requested);
+        } else if ([key isEqualToString:@"recurrence_rules"]) {
+            source[key] = CanonicalRecurrenceVerificationValues(requested);
+        } else {
+            source[key] = requested;
+        }
+    }
+
+    NSMutableOrderedSet<NSString *> *keys = [NSMutableOrderedSet orderedSet];
+    if (before != nil) {
+        for (NSString *key in StableUserFieldKeys()) {
+            if (source[key] != nil) {
+                [keys addObject:key];
+            }
+        }
+    } else {
+        for (NSString *key in StableUserFieldKeys()) {
+            if (requestedFields[key] != nil) {
+                [keys addObject:key];
+            }
+        }
+    }
+    [keys addObjectsFromArray:closedActionKeys ?: @[]];
+
+    NSMutableDictionary *projection = [NSMutableDictionary dictionary];
+    for (NSString *key in keys) {
+        projection[key] = source[key] ?: (id)[NSNull null];
+    }
+    return projection;
 }
 
 static void ApplyMutableFields(EKReminder *reminder, NSDictionary *fields) {
@@ -2232,20 +2276,16 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         reminder.calendar = calendar;
         ApplyMutableFields(reminder, request);
         NSDictionary *desired = ReminderJSON(reminder);
-        NSMutableArray<NSString *> *keys = [NSMutableArray arrayWithObject:@"calendar_id"];
-        for (NSString *key in @[ @"title", @"notes", @"url", @"priority", @"due", @"alarms", @"recurrence_rules" ]) {
-            if (request[key] != nil) {
-                [keys addObject:key];
-            }
-        }
-        NSDictionary *verificationSource =
-            VerificationSource(nil, desired, request);
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              nil,
-                             ProjectionForKeys(verificationSource, keys),
+                             CanonicalReminderProjection(
+                                 nil,
+                                 desired,
+                                 request,
+                                 @[ @"calendar_id" ]),
                              YES);
     }
     if ([operation isEqualToString:@"delete_reminder"]) {
@@ -2265,14 +2305,16 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         }
         ApplyMutableFields(reminder, patch);
         NSDictionary *desired = ReminderJSON(reminder);
-        NSDictionary *verificationSource =
-            VerificationSource(before, desired, patch);
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             ProjectionForKeys(verificationSource, patch.allKeys),
+                             CanonicalReminderProjection(
+                                 before,
+                                 desired,
+                                 patch,
+                                 @[]),
                              NO);
     }
     if ([operation isEqualToString:@"complete_reminder"] ||
@@ -2285,14 +2327,16 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         }
         reminder.completed = target;
         NSDictionary *desired = @{ @"completed" : @(target) };
-        NSDictionary *verificationSource =
-            VerificationSource(before, desired, @{});
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             ProjectionForKeys(verificationSource, @[ @"completed" ]),
+                             CanonicalReminderProjection(
+                                 before,
+                                 desired,
+                                 @{},
+                                 @[ @"completed" ]),
                              NO);
     }
     if ([operation isEqualToString:@"move_reminder"]) {
@@ -2304,14 +2348,16 @@ static NSDictionary *HandleRequest(NSDictionary *request) {
         }
         reminder.calendar = calendar;
         NSDictionary *desired = ReminderJSON(reminder);
-        NSDictionary *verificationSource =
-            VerificationSource(before, desired, @{});
         return SaveAndVerify(store,
                              reminder,
                              operation,
                              operationID,
                              before,
-                             ProjectionForKeys(verificationSource, @[ @"calendar_id" ]),
+                             CanonicalReminderProjection(
+                                 before,
+                                 desired,
+                                 @{},
+                                 @[ @"calendar_id" ]),
                              NO);
     }
     RaiseRequest(@"unsupported_operation", @"Operation is not implemented", @"unsupported", @{});
@@ -2632,35 +2678,126 @@ int main(void) {
             @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-09-30" },
             @"alarms" : @[ @{ @"kind" : @"relative", @"offset_seconds" : @(-1209600) } ],
         };
-        NSDictionary *dueProjection = ProjectionForKeys(desired, @[ @"due" ]);
-        NSDictionary *alarmProjection = ProjectionForKeys(desired, @[ @"alarms" ]);
-        NSDictionary *moveProjection = ProjectionForKeys(desired, @[ @"calendar_id" ]);
-        NSDictionary *providerDrift = @{
-            @"calendar_id" : @"CALENDAR-2",
-            @"due" : desired[@"due"],
-            @"alarms" : @[],
-        };
-        NSDictionary *providerDueDrift = @{
-            @"calendar_id" : @"CALENDAR-2",
-            @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-10-01" },
-            @"alarms" : desired[@"alarms"],
-        };
         NSDictionary *before = @{
             @"calendar_id" : @"CALENDAR-1",
             @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-08-31" },
             @"alarms" : desired[@"alarms"],
         };
+        NSDictionary *absoluteTitleSource = @{
+            @"calendar_id" : @"CALENDAR-1",
+            @"title" : @"Changed title",
+            @"notes" : @"Stable notes",
+            @"url" : [NSNull null],
+            @"location" : @"Stable location",
+            @"priority" : @5,
+            @"completed" : @NO,
+            @"due" : @{ @"kind" : @"all_day", @"date" : @"2027-08-31" },
+            @"start" : [NSNull null],
+            @"alarms" : @[@{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+            }],
+            @"recurrence_rules" : @[],
+        };
+        NSMutableDictionary *absoluteTitleBefore =
+            [absoluteTitleSource mutableCopy];
+        absoluteTitleBefore[@"title"] = @"Original title";
+        NSDictionary *absoluteTitleProjection =
+            CanonicalReminderProjection(
+                absoluteTitleBefore,
+                absoluteTitleSource,
+                @{ @"title" : @"Changed title" },
+                @[]);
+        NSDictionary *semanticAlarmKinds = @{
+            @"absolute" : absoluteTitleSource[@"alarms"][0],
+            @"location" : @{
+                @"kind" : @"location",
+                @"proximity" : @"enter",
+                @"location" : @{
+                    @"title" : @"Office",
+                    @"latitude" : @37.5,
+                    @"longitude" : @127.0,
+                    @"radius_meters" : @100.0,
+                },
+            },
+            @"writable_relative" : @{
+                @"kind" : @"relative",
+                @"offset_seconds" : @(-900),
+            },
+            @"read_only" : @{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+                @"read_only" : @YES,
+                @"action" : @{
+                    @"type" : @"procedure",
+                    @"url" : @"example:before",
+                },
+            },
+        };
+        NSMutableDictionary *semanticMatrix = [NSMutableDictionary dictionary];
+        for (NSString *alarmKind in semanticAlarmKinds) {
+            NSMutableDictionary *matrixBefore = [absoluteTitleBefore mutableCopy];
+            matrixBefore[@"alarms"] = @[semanticAlarmKinds[alarmKind]];
+            matrixBefore[@"completed"] = @NO;
+            NSMutableDictionary *reopenBefore = [matrixBefore mutableCopy];
+            reopenBefore[@"completed"] = @YES;
+            semanticMatrix[alarmKind] = @{
+                @"title_patch" : CanonicalReminderProjection(
+                    matrixBefore,
+                    @{},
+                    @{ @"title" : @"Changed title" },
+                    @[]),
+                @"completion" : CanonicalReminderProjection(
+                    matrixBefore,
+                    @{ @"completed" : @YES },
+                    @{},
+                    @[ @"completed" ]),
+                @"reopen" : CanonicalReminderProjection(
+                    reopenBefore,
+                    @{ @"completed" : @NO },
+                    @{},
+                    @[ @"completed" ]),
+                @"move" : CanonicalReminderProjection(
+                    matrixBefore,
+                    @{ @"calendar_id" : @"CALENDAR-2" },
+                    @{},
+                    @[ @"calendar_id" ]),
+            };
+        }
+        NSDictionary *dueProjection = CanonicalReminderProjection(
+            before,
+            desired,
+            @{ @"due" : desired[@"due"] },
+            @[]);
+        NSDictionary *alarmProjection = CanonicalReminderProjection(
+            before,
+            desired,
+            @{ @"alarms" : desired[@"alarms"] },
+            @[]);
+        NSDictionary *moveProjection = CanonicalReminderProjection(
+            before,
+            desired,
+            @{},
+            @[ @"calendar_id" ]);
+        NSMutableDictionary *dueAlarmDrift = [dueProjection mutableCopy];
+        dueAlarmDrift[@"alarms"] = @[];
+        NSMutableDictionary *alarmDueDrift = [alarmProjection mutableCopy];
+        alarmDueDrift[@"due"] = @{
+            @"kind" : @"all_day",
+            @"date" : @"2027-10-01",
+        };
+        NSMutableDictionary *moveAlarmDrift = [moveProjection mutableCopy];
+        moveAlarmDrift[@"alarms"] = @[];
         NSDictionary *setterDriftDesired = @{
             @"calendar_id" : @"CALENDAR-1",
             @"due" : desired[@"due"],
             @"alarms" : @[],
         };
-        NSDictionary *setterDriftSource = VerificationSource(
+        NSDictionary *setterDriftProjection = CanonicalReminderProjection(
             before,
             setterDriftDesired,
-            @{ @"due" : desired[@"due"] });
-        NSDictionary *setterDriftProjection =
-            ProjectionForKeys(setterDriftSource, @[ @"due" ]);
+            @{ @"due" : desired[@"due"] },
+            @[]);
         NSDictionary *permutedAlarms = @{
             @"alarms" : @[
                 @{ @"kind" : @"absolute", @"date_time" : @"2027-08-17T00:00:00.000Z" },
@@ -2671,6 +2808,26 @@ int main(void) {
             @"alarms" : @[
                 desired[@"alarms"][0],
                 @{ @"kind" : @"absolute", @"date_time" : @"2027-08-17T00:00:00.000Z" },
+            ],
+        };
+        NSDictionary *duplicateAlarms = @{
+            @"alarms" : @[
+                desired[@"alarms"][0],
+                desired[@"alarms"][0],
+                requestedAlarmOrder[@"alarms"][1],
+            ],
+        };
+        NSDictionary *permutedDuplicateAlarms = @{
+            @"alarms" : @[
+                requestedAlarmOrder[@"alarms"][1],
+                desired[@"alarms"][0],
+                desired[@"alarms"][0],
+            ],
+        };
+        NSDictionary *lostDuplicateAlarm = @{
+            @"alarms" : @[
+                requestedAlarmOrder[@"alarms"][1],
+                desired[@"alarms"][0],
             ],
         };
         NSDictionary *readOnlySource = @{
@@ -2687,32 +2844,45 @@ int main(void) {
                 },
             }],
         };
+        NSMutableDictionary *readOnlyBefore = [readOnlySource mutableCopy];
+        readOnlyBefore[@"calendar_id"] = @"CALENDAR-1";
+        readOnlyBefore[@"completed"] = @NO;
         NSDictionary *readOnlyMoveProjection =
-            ProjectionForKeys(readOnlySource, @[ @"calendar_id" ]);
+            CanonicalReminderProjection(
+                readOnlyBefore,
+                readOnlySource,
+                @{},
+                @[ @"calendar_id" ]);
         NSDictionary *readOnlyCompletionProjection =
-            ProjectionForKeys(readOnlySource, @[ @"completed" ]);
-        NSDictionary *readOnlyActionDrift = @{
-            @"calendar_id" : @"CALENDAR-2",
-            @"completed" : @YES,
-            @"due" : [NSNull null],
-            @"alarms" : @[@{
-                @"kind" : @"absolute",
-                @"date_time" : @"2027-08-17T00:00:00.000Z",
-                @"read_only" : @YES,
-                @"action" : @{
-                    @"type" : @"procedure",
-                    @"url" : @"example:after",
-                },
-            }],
+            CanonicalReminderProjection(
+                readOnlyBefore,
+                readOnlySource,
+                @{},
+                @[ @"completed" ]);
+        NSDictionary *driftedReadOnlyAlarm = @{
+            @"kind" : @"absolute",
+            @"date_time" : @"2027-08-17T00:00:00.000Z",
+            @"read_only" : @YES,
+            @"action" : @{
+                @"type" : @"procedure",
+                @"url" : @"example:after",
+            },
         };
-        NSDictionary *timedDueSource = VerificationSource(
+        NSMutableDictionary *readOnlyMoveDrift =
+            [readOnlyMoveProjection mutableCopy];
+        readOnlyMoveDrift[@"alarms"] = @[driftedReadOnlyAlarm];
+        NSMutableDictionary *readOnlyCompletionDrift =
+            [readOnlyCompletionProjection mutableCopy];
+        readOnlyCompletionDrift[@"alarms"] = @[driftedReadOnlyAlarm];
+        NSDictionary *timedDueSource = CanonicalReminderProjection(
             nil,
             @{},
             @{ @"due" : @{
                 @"kind" : @"timed",
                 @"date_time" : @"2027-01-15T08:00:00.123+09:00",
                 @"time_zone" : @"Asia/Seoul",
-            } });
+            } },
+            @[]);
         NSDictionary *fractionalAlarmRequest = @{
             @"alarms" : @[@{
                 @"kind" : @"absolute",
@@ -2725,12 +2895,11 @@ int main(void) {
                 @"date_time" : @"2027-01-14T23:00:00.000Z",
             }],
         };
-        NSDictionary *fractionalAlarmSource = VerificationSource(
+        NSDictionary *fractionalAlarmProjection = CanonicalReminderProjection(
             nil,
             fractionalAlarmSetterDrift,
-            fractionalAlarmRequest);
-        NSDictionary *fractionalAlarmProjection =
-            ProjectionForKeys(fractionalAlarmSource, @[ @"alarms" ]);
+            fractionalAlarmRequest,
+            @[]);
         NSDictionary *timedDueSetterDrift = @{
             @"due" : @{
                 @"kind" : @"timed",
@@ -2741,18 +2910,24 @@ int main(void) {
         NSDate *parsedFractionalDate =
             ParseISODate(@"2027-01-15T08:00:00.123+09:00");
         NSDictionary *fixtures = @{
+            @"absolute_title_projection" : absoluteTitleProjection,
+            @"semantic_matrix" : semanticMatrix,
             @"due_projection" : dueProjection,
             @"alarm_projection" : alarmProjection,
             @"move_projection" : moveProjection,
-            @"due_drift_matched" : @(ProjectionMatches(dueProjection, providerDrift)),
-            @"alarm_drift_matched" : @(ProjectionMatches(alarmProjection, providerDueDrift)),
-            @"move_drift_matched" : @(ProjectionMatches(moveProjection, providerDrift)),
+            @"due_drift_matched" : @(ProjectionMatches(dueProjection, dueAlarmDrift)),
+            @"alarm_drift_matched" : @(ProjectionMatches(alarmProjection, alarmDueDrift)),
+            @"move_drift_matched" : @(ProjectionMatches(moveProjection, moveAlarmDrift)),
             @"setter_drift_matched" : @(ProjectionMatches(setterDriftProjection, setterDriftDesired)),
             @"permuted_alarms_matched" : @(ProjectionMatches(requestedAlarmOrder, permutedAlarms)),
+            @"permuted_duplicate_alarms_matched" : @(
+                ProjectionMatches(duplicateAlarms, permutedDuplicateAlarms)),
+            @"lost_duplicate_alarm_matched" : @(
+                ProjectionMatches(duplicateAlarms, lostDuplicateAlarm)),
             @"read_only_move_projection" : readOnlyMoveProjection,
             @"read_only_completion_projection" : readOnlyCompletionProjection,
-            @"read_only_move_drift_matched" : @(ProjectionMatches(readOnlyMoveProjection, readOnlyActionDrift)),
-            @"read_only_completion_drift_matched" : @(ProjectionMatches(readOnlyCompletionProjection, readOnlyActionDrift)),
+            @"read_only_move_drift_matched" : @(ProjectionMatches(readOnlyMoveProjection, readOnlyMoveDrift)),
+            @"read_only_completion_drift_matched" : @(ProjectionMatches(readOnlyCompletionProjection, readOnlyCompletionDrift)),
             @"timed_due" : timedDueSource[@"due"],
             @"fractional_alarm_projection" : fractionalAlarmProjection,
             @"fractional_alarm_setter_drift_matched" : @(

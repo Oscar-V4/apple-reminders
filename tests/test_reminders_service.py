@@ -27,6 +27,8 @@ from reminders_service import (  # noqa: E402
     ReferenceRejected,
     SetCompletionAction,
     Snapshot,
+    STABLE_USER_FIELDS,
+    canonical_action_projection,
     reminder_matches_fields,
 )
 
@@ -187,6 +189,79 @@ class ReadOnlyProcedureAlarmAdapter(InMemoryAdapter):
             guard=current.guard,
         )
         return outcome
+
+
+class SemanticReminderAdapter(InMemoryAdapter):
+    def __init__(
+        self,
+        *,
+        alarm: dict[str, Any],
+        completed: bool = False,
+        provider_drift: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self._provider_drift = deepcopy(provider_drift)
+        current = self._reminders["reminder-1"]
+        self._reminders["reminder-1"] = Snapshot(
+            reminder={
+                "id": "reminder-1",
+                "title": "Original title",
+                "notes": "Stable notes",
+                "url": "https://example.test/reminder",
+                "location": "Stable location",
+                "priority": 5,
+                "completed": completed,
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "start": None,
+                "alarms": [deepcopy(alarm)],
+                "recurrence_rules": [{"frequency": "weekly", "interval": 1}],
+                "list_id": "list-alpha",
+            },
+            guard=current.guard,
+        )
+
+    def apply_action(
+        self,
+        guard: Guard,
+        action: PatchAction | SetCompletionAction | MoveToListAction,
+    ) -> MutationOutcome:
+        outcome = super().apply_action(guard, action)
+        if self._provider_drift is None:
+            return outcome
+        current = self._reminders[guard.reminder_id]
+        self._reminders[guard.reminder_id] = Snapshot(
+            reminder={
+                **deepcopy(dict(current.reminder)),
+                **deepcopy(self._provider_drift),
+            },
+            guard=current.guard,
+        )
+        return outcome
+
+
+SEMANTIC_ALARMS: dict[str, dict[str, Any]] = {
+    "absolute": {
+        "kind": "absolute",
+        "date_time": "2027-08-17T00:00:00.000Z",
+    },
+    "location": {
+        "kind": "location",
+        "proximity": "enter",
+        "location": {
+            "title": "Office",
+            "latitude": 37.5,
+            "longitude": 127.0,
+            "radius_meters": 100.0,
+        },
+    },
+    "writable_relative": {"kind": "relative", "offset_seconds": -900},
+    "read_only": {
+        "kind": "absolute",
+        "date_time": "2027-08-17T00:00:00.000Z",
+        "read_only": True,
+        "action": {"type": "procedure", "url": "example:before"},
+    },
+}
 
 
 class CoreModuleTests(unittest.TestCase):
@@ -604,6 +679,304 @@ class CoreModuleTests(unittest.TestCase):
         self.assertEqual(result.reference_error, "final_state_mismatch")
         with self.assertRaises(ReferenceRejected):
             module.revalidate_reference(initial.reference)
+
+    def test_title_patch_rejects_final_read_that_loses_absolute_alarm(self) -> None:
+        class AbsoluteAlarmDriftingAdapter(InMemoryAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                current = self._reminders["reminder-1"]
+                self._reminders["reminder-1"] = Snapshot(
+                    reminder={
+                        **dict(current.reminder),
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-17T00:00:00.000Z",
+                            }
+                        ],
+                    },
+                    guard=current.guard,
+                )
+
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                current = self._reminders[guard.reminder_id]
+                self._reminders[guard.reminder_id] = Snapshot(
+                    reminder={**dict(current.reminder), "alarms": []},
+                    guard=current.guard,
+                )
+                return outcome
+
+        module = CoreModule(
+            AbsoluteAlarmDriftingAdapter(),
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+        )
+        initial = module.read_exact("reminder-1")
+
+        result = module.change(
+            initial.reference,
+            {"kind": "patch", "patch": {"title": "Changed title"}},
+        )
+
+        self.assertIsNone(result.reference)
+        self.assertIsNone(result.final_reminder)
+        self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_closed_actions_preserve_every_alarm_semantic_kind(self) -> None:
+        actions = (
+            (
+                "title_patch",
+                False,
+                {"kind": "patch", "patch": {"title": "Changed title"}},
+            ),
+            (
+                "completion",
+                False,
+                {"kind": "set_completion", "completed": True},
+            ),
+            (
+                "reopen",
+                True,
+                {"kind": "set_completion", "completed": False},
+            ),
+            (
+                "move",
+                False,
+                {"kind": "move_to_list", "list_id": "list-beta"},
+            ),
+        )
+
+        for alarm_name, alarm in SEMANTIC_ALARMS.items():
+            for action_name, completed, action in actions:
+                with self.subTest(alarm=alarm_name, action=action_name):
+                    module = CoreModule(
+                        SemanticReminderAdapter(alarm=alarm, completed=completed),
+                        clock=DeterministicClock(),
+                        token_source=DeterministicTokens(),
+                    )
+                    initial = module.read_exact("reminder-1")
+
+                    result = module.change(initial.reference, action)
+
+                    self.assertEqual(result.reference, "rev1.opaque-2")
+                    self.assertEqual(result.final_reminder["alarms"], [alarm])
+
+    def test_alarm_drift_across_closed_actions_never_issues_a_reference(self) -> None:
+        actions = (
+            (
+                "title_patch",
+                False,
+                {"kind": "patch", "patch": {"title": "Changed title"}},
+            ),
+            (
+                "completion",
+                False,
+                {"kind": "set_completion", "completed": True},
+            ),
+            (
+                "reopen",
+                True,
+                {"kind": "set_completion", "completed": False},
+            ),
+            (
+                "move",
+                False,
+                {"kind": "move_to_list", "list_id": "list-beta"},
+            ),
+        )
+
+        for alarm_name, alarm in SEMANTIC_ALARMS.items():
+            for action_name, completed, action in actions:
+                with self.subTest(alarm=alarm_name, action=action_name):
+                    module = CoreModule(
+                        SemanticReminderAdapter(
+                            alarm=alarm,
+                            completed=completed,
+                            provider_drift={"alarms": []},
+                        ),
+                        clock=DeterministicClock(),
+                        token_source=DeterministicTokens(),
+                    )
+                    initial = module.read_exact("reminder-1")
+
+                    result = module.change(initial.reference, action)
+
+                    self.assertIsNone(result.reference)
+                    self.assertIsNone(result.final_reminder)
+                    self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_provider_alarm_transformations_never_issue_a_reference(self) -> None:
+        transformed = {
+            "absolute": {
+                "kind": "absolute",
+                "date_time": "2027-08-18T00:00:00.000Z",
+            },
+            "location": {
+                "kind": "location",
+                "proximity": "leave",
+                "location": {
+                    "title": "Office",
+                    "latitude": 37.5,
+                    "longitude": 127.0,
+                    "radius_meters": 200.0,
+                },
+            },
+            "writable_relative": {
+                "kind": "relative",
+                "offset_seconds": -1_800,
+            },
+            "read_only": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+                "read_only": True,
+                "action": {"type": "procedure", "url": "example:after"},
+            },
+        }
+
+        for alarm_name, alarm in SEMANTIC_ALARMS.items():
+            with self.subTest(alarm=alarm_name):
+                module = CoreModule(
+                    SemanticReminderAdapter(
+                        alarm=alarm,
+                        provider_drift={"alarms": [transformed[alarm_name]]},
+                    ),
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                initial = module.read_exact("reminder-1")
+
+                result = module.change(
+                    initial.reference,
+                    {"kind": "patch", "patch": {"title": "Changed title"}},
+                )
+
+                self.assertIsNone(result.reference)
+                self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_alarm_order_is_semantic_but_duplicate_multiplicity_is_preserved(
+        self,
+    ) -> None:
+        absolute = SEMANTIC_ALARMS["absolute"]
+        location = SEMANTIC_ALARMS["location"]
+        initial_alarms = [deepcopy(absolute), deepcopy(absolute), deepcopy(location)]
+        cases = (
+            (
+                "permuted",
+                [deepcopy(location), deepcopy(absolute), deepcopy(absolute)],
+                True,
+            ),
+            (
+                "duplicate_lost",
+                [deepcopy(location), deepcopy(absolute)],
+                False,
+            ),
+        )
+
+        for label, final_alarms, should_match in cases:
+            with self.subTest(label=label):
+                adapter = SemanticReminderAdapter(
+                    alarm=absolute,
+                    provider_drift={"alarms": final_alarms},
+                )
+                current = adapter._reminders["reminder-1"]
+                adapter._reminders["reminder-1"] = Snapshot(
+                    reminder={**dict(current.reminder), "alarms": initial_alarms},
+                    guard=current.guard,
+                )
+                module = CoreModule(
+                    adapter,
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                initial = module.read_exact("reminder-1")
+
+                result = module.change(
+                    initial.reference,
+                    {"kind": "patch", "patch": {"title": "Changed title"}},
+                )
+
+                if should_match:
+                    self.assertEqual(result.reference, "rev1.opaque-2")
+                else:
+                    self.assertIsNone(result.reference)
+                    self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_due_and_recurrence_are_stable_dependencies_for_unrelated_actions(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "due",
+                {"due": {"kind": "all_day", "date": "2027-09-01"}},
+            ),
+            ("recurrence", {"recurrence_rules": []}),
+        )
+        for label, provider_drift in cases:
+            with self.subTest(field=label):
+                module = CoreModule(
+                    SemanticReminderAdapter(
+                        alarm=SEMANTIC_ALARMS["absolute"],
+                        provider_drift=provider_drift,
+                    ),
+                    clock=DeterministicClock(),
+                    token_source=DeterministicTokens(),
+                )
+                initial = module.read_exact("reminder-1")
+
+                result = module.change(
+                    initial.reference,
+                    {"kind": "patch", "patch": {"title": "Changed title"}},
+                )
+
+                self.assertIsNone(result.reference)
+                self.assertEqual(result.reference_error, "final_state_mismatch")
+
+    def test_provider_owned_fields_are_excluded_from_semantic_projection(self) -> None:
+        before = {
+            "title": "Original title",
+            "alarms": [SEMANTIC_ALARMS["absolute"]],
+            "external_id": "provider-external-before",
+            "completion_date": None,
+            "created": "2027-01-01T00:00:00.000Z",
+            "last_modified": "2027-08-01T00:00:00.000Z",
+            "list_title": "Personal",
+            "source_id": "provider-source",
+            "source_title": "iCloud",
+        }
+
+        projection = canonical_action_projection(
+            before,
+            PatchAction({"title": "Changed title"}),
+        )
+
+        self.assertEqual(
+            STABLE_USER_FIELDS,
+            (
+                "title",
+                "notes",
+                "url",
+                "location",
+                "priority",
+                "completed",
+                "due",
+                "start",
+                "alarms",
+                "recurrence_rules",
+                "list_id",
+            ),
+        )
+        self.assertEqual(
+            projection,
+            {
+                "title": "Changed title",
+                "alarms": [SEMANTIC_ALARMS["absolute"]],
+            },
+        )
 
     def test_due_only_change_rejects_final_read_that_loses_relative_alarm(self) -> None:
         class RelativeAlarmDriftingAdapter(InMemoryAdapter):
@@ -1044,14 +1417,23 @@ class CoreModuleTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_reference")
 
     def test_committed_change_with_final_read_failure_consumes_reference(self) -> None:
-        adapter = InMemoryAdapter()
+        class FinalReadFailingAdapter(InMemoryAdapter):
+            def apply_action(
+                self,
+                guard: Guard,
+                action: PatchAction | SetCompletionAction | MoveToListAction,
+            ) -> MutationOutcome:
+                outcome = super().apply_action(guard, action)
+                self.fail_next_read = True
+                return outcome
+
+        adapter = FinalReadFailingAdapter()
         module = CoreModule(
             adapter,
             clock=DeterministicClock(),
             token_source=DeterministicTokens(),
         )
         initial = module.read_exact("reminder-1")
-        adapter.fail_next_read = True
 
         result = module.change(
             initial.reference,
@@ -1311,6 +1693,130 @@ class CoreModuleTests(unittest.TestCase):
             module.read_exact("reminder-1").reminder,
             {"id": "reminder-1", "title": "Changed on iPhone", "notes": "2%"},
         )
+
+    def test_stale_reference_is_consumed_before_cached_read_only_alarm_preflight(
+        self,
+    ) -> None:
+        adapter = ReadOnlyProcedureAlarmAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+            reference_ttl_seconds=30.0,
+        )
+        initial = module.read_exact("reminder-1")
+        adapter.external_patch("reminder-1", {"alarms": []})
+
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.change(
+                initial.reference,
+                {
+                    "kind": "patch",
+                    "patch": {
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-18T00:00:00.000Z",
+                            }
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        with self.assertRaises(ReferenceRejected) as replay:
+            module.change(
+                initial.reference,
+                {"kind": "patch", "patch": {"title": "No replay"}},
+            )
+        self.assertEqual(replay.exception.code, "invalid_reference")
+
+    def test_stale_reference_is_consumed_before_cached_relative_alarm_preflight(
+        self,
+    ) -> None:
+        adapter = SemanticReminderAdapter(
+            alarm=SEMANTIC_ALARMS["writable_relative"]
+        )
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+            reference_ttl_seconds=30.0,
+        )
+        initial = module.read_exact("reminder-1")
+        adapter.external_patch("reminder-1", {"alarms": [], "due": None})
+
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.change(
+                initial.reference,
+                {"kind": "patch", "patch": {"due": None}},
+            )
+
+        self.assertEqual(raised.exception.code, "concurrent_modification")
+        with self.assertRaises(ReferenceRejected) as replay:
+            module.change(
+                initial.reference,
+                {"kind": "patch", "patch": {"title": "No replay"}},
+            )
+        self.assertEqual(replay.exception.code, "invalid_reference")
+
+    def test_cross_store_reference_precedes_cached_alarm_preflight(self) -> None:
+        adapter = ReadOnlyProcedureAlarmAdapter()
+        module = CoreModule(
+            adapter,
+            clock=DeterministicClock(),
+            token_source=DeterministicTokens(),
+            reference_ttl_seconds=30.0,
+        )
+        initial = module.read_exact("reminder-1")
+        adapter.external_store_change("reminder-1", "store-beta")
+
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.change(
+                initial.reference,
+                {
+                    "kind": "patch",
+                    "patch": {
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-18T00:00:00.000Z",
+                            }
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_reference")
+
+    def test_expired_reference_precedes_cached_alarm_preflight(self) -> None:
+        clock = DeterministicClock()
+        module = CoreModule(
+            ReadOnlyProcedureAlarmAdapter(),
+            clock=clock,
+            token_source=DeterministicTokens(),
+            reference_ttl_seconds=30.0,
+        )
+        initial = module.read_exact("reminder-1")
+        clock.now = 130.0
+
+        with self.assertRaises(ReferenceRejected) as raised:
+            module.change(
+                initial.reference,
+                {
+                    "kind": "patch",
+                    "patch": {
+                        "alarms": [
+                            {
+                                "kind": "absolute",
+                                "date_time": "2027-08-18T00:00:00.000Z",
+                            }
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "expired_reference")
 
     def test_reference_is_bound_to_the_store_that_issued_it(self) -> None:
         adapter = InMemoryAdapter()

@@ -16,12 +16,22 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SCRIPTS_PATH = PLUGIN_ROOT / "scripts"
+if str(SCRIPTS_PATH) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_PATH))
 BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
 SCHEMA_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge_schema.json"
 SPEC = importlib.util.spec_from_file_location("eventkit_bridge", BRIDGE_PATH)
 assert SPEC and SPEC.loader
 eventkit_bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(eventkit_bridge)
+
+from reminders_service import (  # noqa: E402
+    MoveToListAction,
+    PatchAction,
+    SetCompletionAction,
+    canonical_action_projection,
+)
 
 
 def committed_helper_bytes() -> bytes:
@@ -735,23 +745,110 @@ class EventKitRequestValidationTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
         payload = json.loads(completed.stdout)
+        self.assertEqual(
+            payload["absolute_title_projection"],
+            {
+                "calendar_id": "CALENDAR-1",
+                "title": "Changed title",
+                "notes": "Stable notes",
+                "url": None,
+                "location": "Stable location",
+                "priority": 5,
+                "completed": False,
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "start": None,
+                "alarms": [
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-08-17T00:00:00.000Z",
+                    }
+                ],
+                "recurrence_rules": [],
+            },
+        )
+        alarm_kinds = {
+            "absolute": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+            },
+            "location": {
+                "kind": "location",
+                "proximity": "enter",
+                "location": {
+                    "title": "Office",
+                    "latitude": 37.5,
+                    "longitude": 127.0,
+                    "radius_meters": 100.0,
+                },
+            },
+            "writable_relative": {
+                "kind": "relative",
+                "offset_seconds": -900,
+            },
+            "read_only": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+                "read_only": True,
+                "action": {"type": "procedure", "url": "example:before"},
+            },
+        }
+        actions = {
+            "title_patch": (False, PatchAction({"title": "Changed title"})),
+            "completion": (False, SetCompletionAction(True)),
+            "reopen": (True, SetCompletionAction(False)),
+            "move": (False, MoveToListAction("CALENDAR-2")),
+        }
+        for alarm_name, alarm in alarm_kinds.items():
+            for action_name, (completed_state, action) in actions.items():
+                with self.subTest(alarm=alarm_name, action=action_name):
+                    before = {
+                        "title": "Original title",
+                        "notes": "Stable notes",
+                        "url": None,
+                        "location": "Stable location",
+                        "priority": 5,
+                        "completed": completed_state,
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "start": None,
+                        "alarms": [alarm],
+                        "recurrence_rules": [],
+                        "list_id": "CALENDAR-1",
+                    }
+                    native_projection = dict(
+                        payload["semantic_matrix"][alarm_name][action_name]
+                    )
+                    native_projection["list_id"] = native_projection.pop(
+                        "calendar_id"
+                    )
+                    self.assertEqual(
+                        native_projection,
+                        canonical_action_projection(before, action),
+                    )
         expected_due = {"kind": "all_day", "date": "2027-09-30"}
         expected_alarms = [
             {"kind": "relative", "offset_seconds": -1_209_600}
         ]
         self.assertEqual(
             payload["due_projection"],
-            {"due": expected_due, "alarms": expected_alarms},
+            {
+                "calendar_id": "CALENDAR-1",
+                "due": expected_due,
+                "alarms": expected_alarms,
+            },
         )
         self.assertEqual(
             payload["alarm_projection"],
-            {"due": expected_due, "alarms": expected_alarms},
+            {
+                "calendar_id": "CALENDAR-1",
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "alarms": expected_alarms,
+            },
         )
         self.assertEqual(
             payload["move_projection"],
             {
                 "calendar_id": "CALENDAR-2",
-                "due": expected_due,
+                "due": {"kind": "all_day", "date": "2027-08-31"},
                 "alarms": expected_alarms,
             },
         )
@@ -760,6 +857,8 @@ class EventKitRequestValidationTests(unittest.TestCase):
         self.assertIs(payload["move_drift_matched"], False)
         self.assertIs(payload["setter_drift_matched"], False)
         self.assertIs(payload["permuted_alarms_matched"], True)
+        self.assertIs(payload["permuted_duplicate_alarms_matched"], True)
+        self.assertIs(payload["lost_duplicate_alarm_matched"], False)
         read_only_alarm = {
             "kind": "absolute",
             "date_time": "2027-08-17T00:00:00.000Z",
@@ -768,11 +867,21 @@ class EventKitRequestValidationTests(unittest.TestCase):
         }
         self.assertEqual(
             payload["read_only_move_projection"],
-            {"calendar_id": "CALENDAR-2", "alarms": [read_only_alarm]},
+            {
+                "calendar_id": "CALENDAR-2",
+                "completed": False,
+                "due": None,
+                "alarms": [read_only_alarm],
+            },
         )
         self.assertEqual(
             payload["read_only_completion_projection"],
-            {"completed": True, "alarms": [read_only_alarm]},
+            {
+                "calendar_id": "CALENDAR-1",
+                "completed": True,
+                "due": None,
+                "alarms": [read_only_alarm],
+            },
         )
         self.assertIs(payload["read_only_move_drift_matched"], False)
         self.assertIs(payload["read_only_completion_drift_matched"], False)

@@ -35,8 +35,8 @@ class EventKitHelperDistributionTests(unittest.TestCase):
             ).read_bytes()
         )
 
-        self.assertEqual(payload["CFBundleShortVersionString"], "0.5.1")
-        self.assertEqual(payload["CFBundleVersion"], "0.5.1")
+        self.assertEqual(payload["CFBundleShortVersionString"], "0.5.2")
+        self.assertEqual(payload["CFBundleVersion"], "0.5.2")
         self.assertEqual(
             payload["CFBundleIdentifier"],
             build_eventkit_helper_app.BUNDLE_IDENTIFIER,
