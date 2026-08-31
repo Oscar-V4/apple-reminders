@@ -107,6 +107,12 @@ Starting with 0.5.0, Core uses the stable signed helper above instead of a
 locally compiled ad-hoc helper. macOS may ask for Reminders access again after
 this upgrade because the helper's code-signing identity changed.
 
+Before installing a future release, use the repository's
+[canonical release verifier](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md).
+It downloads the published ZIP and checksum again and verifies immutable
+release and SLSA attestations, exact tag ancestry, deterministic rebuilds, the
+source audit, and signed-helper manifest provenance without reading Reminders.
+
 ## First permission
 
 When requested, run `request_reminders_access` and answer the macOS prompt.

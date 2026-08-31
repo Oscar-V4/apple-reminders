@@ -61,7 +61,7 @@ class JavaScriptActionRuntimePinTests(unittest.TestCase):
         )
         self.assertEqual(
             artifact_refs(other_text, "download-artifact"),
-            [DOWNLOAD_ARTIFACT_NODE24] * 3,
+            [DOWNLOAD_ARTIFACT_NODE24] * 4,
         )
 
     def test_deprecated_node20_pins_cannot_escape_the_bound_workflow(self) -> None:
@@ -74,7 +74,7 @@ class JavaScriptActionRuntimePinTests(unittest.TestCase):
         self.assertNotIn(UPLOAD_ARTIFACT_PROVENANCE_BOUND, other_text)
         self.assertNotIn(DOWNLOAD_ARTIFACT_PROVENANCE_BOUND, other_text)
         self.assertEqual(other_text.count("# v7.0.1 (Node 24)"), 4)
-        self.assertEqual(other_text.count("# v8.0.1 (Node 24)"), 3)
+        self.assertEqual(other_text.count("# v8.0.1 (Node 24)"), 4)
 
 
 if __name__ == "__main__":

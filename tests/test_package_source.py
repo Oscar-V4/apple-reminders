@@ -31,8 +31,10 @@ import build_source_package  # noqa: E402
 # Issue #41 adds one allowlisted runtime-admission module plus its capability,
 # Doctor, and Core-first contract changes: 37,339 compressed bytes, producing a
 # deterministic 61-file, 1,852,666-byte archive without native-artifact changes.
-# The smallest three-decimal MiB ceiling, 1.767 MiB, leaves 167 bytes headroom.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.767 * 1024 * 1024)
+# Release-attestation documentation adds 1,506 compressed bytes to that
+# baseline, producing a deterministic 61-file, 1,854,172-byte archive.
+# The smallest three-decimal MiB ceiling, 1.769 MiB, leaves 758 bytes headroom.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.769 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -800,7 +802,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.732 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.769 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 

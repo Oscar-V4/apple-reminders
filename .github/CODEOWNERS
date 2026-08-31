@@ -14,3 +14,4 @@
 /scripts/prepare_signed_eventkit_helper.sh @Oscar-V4
 /scripts/setup_release_signing_credentials.sh @Oscar-V4
 /scripts/verify_eventkit_helper.py @Oscar-V4
+/scripts/verify_release_assets.py @Oscar-V4

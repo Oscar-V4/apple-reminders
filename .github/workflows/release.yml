@@ -473,8 +473,8 @@ jobs:
           compression-level: 0
           retention-days: 2
 
-  publish_release:
-    name: Publish verified GitHub Release
+  attest_release:
+    name: Attest exact release subjects without target code
     needs: verify_release
     if: >-
       github.repository == 'Oscar-V4/apple-reminders' &&
@@ -482,7 +482,127 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download the exact verified release payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: apple-reminders-release-${{ needs.verify_release.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apple-reminders-release
+
+      - name: Validate release subjects at the final privileged boundary
+        shell: bash
+        env:
+          CHECKSUMS_SHA256: ${{ needs.verify_release.outputs.checksums_sha256 }}
+          EXPECTED_TAG_COMMIT: ${{ needs.verify_release.outputs.tag_commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.verify_release.outputs.tag_object }}
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_NAME: ${{ needs.verify_release.outputs.package_name }}
+          PACKAGE_SHA256: ${{ needs.verify_release.outputs.package_sha256 }}
+          RELEASE_TAG: ${{ needs.verify_release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.verify_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" == "$RELEASE_TAG" ]]
+          [[ "$GITHUB_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$GITHUB_SHA" == "$EXPECTED_TAG_COMMIT" ]]
+          EXPECTED_WORKFLOW_REF="$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
+          [[ "$GITHUB_WORKFLOW_REF" == "$EXPECTED_WORKFLOW_REF" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$EXPECTED_TAG_COMMIT" ]]
+          [[ "$RELEASE_TAG" == "v$RELEASE_VERSION" ]]
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$EXPECTED_TAG_OBJECT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+          release_root="$RUNNER_TEMP/apple-reminders-release"
+          python3 - "$release_root" "$PACKAGE_NAME" <<'PY'
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = {sys.argv[2], "SHA256SUMS"}
+          if root.is_symlink() or not root.is_dir():
+              raise SystemExit("release attestation subject root is missing or unsafe")
+          actual = {path.name for path in root.iterdir()}
+          if actual != expected:
+              raise SystemExit(
+                  "release attestation subject inventory drift: "
+                  f"expected={sorted(expected)}, actual={sorted(actual)}"
+              )
+          for name in sorted(expected):
+              path = root / name
+              mode = path.lstat().st_mode
+              if path.is_symlink() or not stat.S_ISREG(mode):
+                  raise SystemExit(f"release attestation subject is unsafe: {name}")
+              if stat.S_IMODE(mode) not in {0o600, 0o644}:
+                  raise SystemExit(f"release attestation subject mode drift: {name}")
+          PY
+          [[ "$(sha256sum "$release_root/$PACKAGE_NAME" | awk '{print $1}')" == "$PACKAGE_SHA256" ]] || {
+            printf 'release package digest drift\n' >&2
+            exit 1
+          }
+          [[ "$(sha256sum "$release_root/SHA256SUMS" | awk '{print $1}')" == "$CHECKSUMS_SHA256" ]] || {
+            printf 'release checksum digest drift\n' >&2
+            exit 1
+          }
+          expected_checksum_line="$(printf '%s  %s' "$PACKAGE_SHA256" "$PACKAGE_NAME")"
+          [[ "$(cat "$release_root/SHA256SUMS")" == "$expected_checksum_line" ]]
+          (
+            cd "$release_root"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          current_tag_object="$(
+            gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha'
+          )"
+          current_tag_type="$(
+            gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type'
+          )"
+          current_tag_commit="$current_tag_object"
+          peel_depth=0
+          while [[ "$current_tag_type" == "tag" ]]; do
+            ((peel_depth += 1))
+            [[ "$peel_depth" -le 8 ]]
+            current_tag_type="$(
+              gh api "/repos/$GITHUB_REPOSITORY/git/tags/$current_tag_commit" --jq '.object.type'
+            )"
+            current_tag_commit="$(
+              gh api "/repos/$GITHUB_REPOSITORY/git/tags/$current_tag_commit" --jq '.object.sha'
+            )"
+          done
+          [[ "$current_tag_type" == "commit" ]]
+          [[ "$current_tag_object" == "$EXPECTED_TAG_OBJECT" ]]
+          [[ "$current_tag_commit" == "$EXPECTED_TAG_COMMIT" ]]
+
+      - name: Attest the exact release subjects
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/apple-reminders-release/${{ needs.verify_release.outputs.package_name }}
+            ${{ runner.temp }}/apple-reminders-release/SHA256SUMS
+
+  publish_release:
+    name: Publish verified GitHub Release
+    needs:
+      - verify_release
+      - attest_release
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      needs.verify_release.result == 'success' &&
+      needs.attest_release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
       contents: write
+      attestations: read
     steps:
       - name: Download the exact verified release payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
@@ -506,8 +626,17 @@ jobs:
           [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
           [[ "$GITHUB_REF_TYPE" == "tag" ]]
           [[ "$GITHUB_REF_NAME" == "$RELEASE_TAG" ]]
+          [[ "$GITHUB_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$GITHUB_SHA" == "$EXPECTED_TAG_COMMIT" ]]
+          EXPECTED_WORKFLOW_REF="$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
+          [[ "$GITHUB_WORKFLOW_REF" == "$EXPECTED_WORKFLOW_REF" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$EXPECTED_TAG_COMMIT" ]]
           [[ "$RELEASE_TAG" == "v$RELEASE_VERSION" ]]
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$EXPECTED_TAG_OBJECT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
 
           release_root="$RUNNER_TEMP/apple-reminders-release"
           python3 - "$release_root" "$PACKAGE_NAME" <<'PY'
@@ -543,7 +672,163 @@ jobs:
           current_tag_object="$(
             gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha'
           )"
+          current_tag_type="$(
+            gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type'
+          )"
+          current_tag_commit="$current_tag_object"
+          peel_depth=0
+          while [[ "$current_tag_type" == "tag" ]]; do
+            ((peel_depth += 1))
+            [[ "$peel_depth" -le 8 ]]
+            current_tag_type="$(
+              gh api "/repos/$GITHUB_REPOSITORY/git/tags/$current_tag_commit" --jq '.object.type'
+            )"
+            current_tag_commit="$(
+              gh api "/repos/$GITHUB_REPOSITORY/git/tags/$current_tag_commit" --jq '.object.sha'
+            )"
+          done
+          [[ "$current_tag_type" == "commit" ]]
           [[ "$current_tag_object" == "$EXPECTED_TAG_OBJECT" ]]
+          [[ "$current_tag_commit" == "$EXPECTED_TAG_COMMIT" ]]
+
+          package_attestation="$RUNNER_TEMP/release-package-attestation.json"
+          checksums_attestation="$RUNNER_TEMP/release-checksums-attestation.json"
+          gh attestation verify "$release_root/$PACKAGE_NAME" \
+            --repo "Oscar-V4/apple-reminders" \
+            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/release.yml" \
+            --signer-digest "$EXPECTED_TAG_COMMIT" \
+            --source-digest "$EXPECTED_TAG_COMMIT" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$package_attestation"
+          gh attestation verify "$release_root/SHA256SUMS" \
+            --repo "Oscar-V4/apple-reminders" \
+            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/release.yml" \
+            --signer-digest "$EXPECTED_TAG_COMMIT" \
+            --source-digest "$EXPECTED_TAG_COMMIT" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$checksums_attestation"
+          python3 - \
+            "$package_attestation" \
+            "$checksums_attestation" \
+            "$PACKAGE_NAME" \
+            "$PACKAGE_SHA256" \
+            "$CHECKSUMS_SHA256" \
+            "$RELEASE_TAG" \
+            "$EXPECTED_TAG_COMMIT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          package_results = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          checksums_results = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          package_name = sys.argv[3]
+          package_digest = sys.argv[4]
+          checksums_digest = sys.argv[5]
+          release_tag = sys.argv[6]
+          tag_commit = sys.argv[7]
+          repository = "Oscar-V4/apple-reminders"
+          workflow_path = ".github/workflows/release.yml"
+          ref = f"refs/tags/{release_tag}"
+          workflow_uri = f"https://github.com/{repository}/{workflow_path}@{ref}"
+          expected_certificate = {
+              "buildConfigDigest": tag_commit,
+              "buildConfigURI": workflow_uri,
+              "buildSignerDigest": tag_commit,
+              "buildSignerURI": workflow_uri,
+              "githubWorkflowRef": ref,
+              "githubWorkflowRepository": repository,
+              "githubWorkflowSHA": tag_commit,
+              "githubWorkflowTrigger": "push",
+              "runnerEnvironment": "github-hosted",
+              "sourceRepositoryDigest": tag_commit,
+              "sourceRepositoryRef": ref,
+              "sourceRepositoryURI": f"https://github.com/{repository}",
+              "subjectAlternativeName": workflow_uri,
+          }
+          expected_subjects = {
+              package_name: package_digest,
+              "SHA256SUMS": checksums_digest,
+          }
+          expected_workflow = {
+              "path": workflow_path,
+              "ref": ref,
+              "repository": f"https://github.com/{repository}",
+          }
+
+          def exact_bundles(results):
+              if not isinstance(results, list) or not results:
+                  raise SystemExit("release attestation verification returned no results")
+              bundles = set()
+              first_error = None
+              for item in results:
+                  try:
+                      verification = item["verificationResult"]
+                      certificate = verification["signature"]["certificate"]
+                      statement = verification["statement"]
+                      timestamps = verification["verifiedTimestamps"]
+                      if not isinstance(timestamps, list) or not timestamps:
+                          raise ValueError("release attestation verified timestamp is missing")
+                      for field, expected in expected_certificate.items():
+                          if certificate.get(field) != expected:
+                              raise ValueError(
+                                  f"release attestation workflow identity drift: {field}"
+                              )
+                      if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+                          raise ValueError("release attestation predicate drift")
+                      workflow = statement["predicate"]["buildDefinition"][
+                          "externalParameters"
+                      ]["workflow"]
+                      if workflow != expected_workflow:
+                          raise ValueError("release attestation workflow identity drift: parameters")
+                      subjects = statement.get("subject")
+                      if not isinstance(subjects, list) or len(subjects) != 2:
+                          raise ValueError("release attestation subject inventory drift")
+                      by_name = {}
+                      for subject in subjects:
+                          name = subject.get("name") if isinstance(subject, dict) else None
+                          if not isinstance(name, str) or name in by_name:
+                              raise ValueError("release attestation subject inventory drift")
+                          by_name[name] = subject
+                      if set(by_name) != set(expected_subjects):
+                          raise ValueError("release attestation subject inventory drift")
+                      for name, expected_digest in expected_subjects.items():
+                          if by_name[name].get("digest") != {"sha256": expected_digest}:
+                              raise ValueError(
+                                  f"release attestation subject digest drift: {name}"
+                              )
+                      attestation = item.get("attestation")
+                      if not isinstance(attestation, dict):
+                          raise ValueError("release attestation bundle is missing")
+                      bundles.add(
+                          json.dumps(attestation, sort_keys=True, separators=(",", ":"))
+                      )
+                  except (KeyError, TypeError, ValueError) as exc:
+                      if first_error is None:
+                          first_error = str(exc)
+              if not bundles:
+                  raise SystemExit(first_error or "no exact release attestation")
+              return bundles
+
+          common = exact_bundles(package_results) & exact_bundles(checksums_results)
+          if not common:
+              raise SystemExit("release subjects do not share one exact attestation")
+          PY
+
+          [[ "$(
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "/repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'
+          )" == "true" ]]
+          [[ "$(gh release create --help)" == *"Immutable Releases"* ]]
+          [[ "$(gh release view --help)" == *"isImmutable"* ]]
+          gh release verify --help >/dev/null
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'refusing to replace an existing GitHub Release\n' >&2
+            exit 1
+          fi
 
           release_flags=(--verify-tag)
           if [[ "$RELEASE_VERSION" == 0.* ]]; then
@@ -557,3 +842,41 @@ jobs:
             --target "$EXPECTED_TAG_COMMIT" \
             --title "Apple Reminders $RELEASE_TAG" \
             --generate-notes
+
+  verify_published_release:
+    name: Redownload and independently verify published release
+    needs: publish_release
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      needs.publish_release.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out the exact published tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Redownload assets and run the canonical verification path
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONHASHSEED: "0"
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_release_assets.py "$RELEASE_TAG" \
+            --repo "Oscar-V4/apple-reminders" \
+            --release-attestation-attempts 6 \
+            --retry-delay-seconds 5

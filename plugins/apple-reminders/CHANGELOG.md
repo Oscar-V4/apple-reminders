@@ -4,6 +4,17 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+### Added
+
+- Added SLSA provenance for both final GitHub Release subjects: the
+  deterministic plugin ZIP and `SHA256SUMS`. Publication now rechecks their
+  shared attestation, exact tag object and peeled commit, digests, inventory,
+  and `release.yml` workflow identity before the only contents-write step.
+- Added a canonical verifier that downloads immutable release assets again,
+  verifies GitHub release and SLSA attestations, audits source, performs two
+  byte-identical deterministic rebuilds, and proves signed-helper manifest
+  ancestry and provenance without accessing Apple Reminders data.
+
 ### Changed
 
 - Made Doctor metadata-only and non-executing by default. Core diagnosis no
@@ -19,6 +30,13 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   build/schema compatibility, and precise blocked reasons.
 - Made Core-first list/text/note/archive alternatives the default guidance for
   sections, tags, native attachments, and destructive recovery workflows.
+- Split OIDC/attestation write, release publication, and post-publication
+  verification into separate least-privilege jobs. Future publication requires
+  immutable releases; a final read-only macOS job verifies the published bytes.
+- Documented why an unsigned annotated tag or checksum file is not an
+  authenticity proof, and the protected two-PR bootstrap required to migrate
+  the seven provenance-bound helper artifact pins to Node 24 without making the
+  current signed-helper manifest stale.
 
 ### Fixed
 

@@ -459,6 +459,7 @@ class SigningWorkflowBoundaryTests(unittest.TestCase):
             "/scripts/eventkit_helper_app_info.plist",
             "/scripts/setup_release_signing_credentials.sh",
             "/scripts/verify_eventkit_helper.py",
+            "/scripts/verify_release_assets.py",
         ):
             self.assertIn(path, codeowners)
 
