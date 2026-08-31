@@ -225,7 +225,10 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
         if not isinstance(actual, Mapping):
             return False
         if field.endswith("alarms[]"):
-            if expected.get("_verification_unavailable") is True:
+            if (
+                expected.get("_verification_unavailable") is True
+                or actual.get("_verification_unavailable") is True
+            ):
                 return False
             expected_read_only = expected.get("read_only") is True
             actual_read_only = actual.get("read_only") is True
@@ -245,6 +248,15 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
     if isinstance(expected, list):
         if not isinstance(actual, list) or len(expected) != len(actual):
             return False
+        if field != "alarms":
+            return all(
+                _requested_value_matches(
+                    expected_item,
+                    actual_item,
+                    field=f"{field}[]",
+                )
+                for expected_item, actual_item in zip(expected, actual)
+            )
         unmatched = list(actual)
         for expected_item in expected:
             for index, actual_item in enumerate(unmatched):

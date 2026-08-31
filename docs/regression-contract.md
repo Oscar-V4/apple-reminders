@@ -271,10 +271,14 @@ even though optional MCP `outputSchema` descriptors are omitted from
     user-authored `title`, `notes`, `url`, `location`, `priority`, `completed`,
     `due`, `start`, complete `alarms` multiset, `recurrence_rules`, and exact
     destination list. Native `calendar_id` and public `list_id` are the same
-    semantic field. Identity is guarded separately. Provider-owned or derived
+    semantic field. Identity is guarded separately. Alarm order alone is
+    non-semantic; recurrence rules and their nested arrays retain canonical
+    order. Provider-owned or derived
     `external_id`, completion date, creation/modification timestamps,
     list/source display titles, and source identity are not semantic equality
-    inputs. Alarm order may change but duplicate multiplicity may not. Title
+    inputs. Alarm order may change but duplicate multiplicity may not. A lossy
+    marker on either the expected or observed alarm makes exact verification
+    impossible. Title
     patches, completion, reopen, and moves therefore preserve absolute,
     location, writable-relative, and read-only alarm semantics together with
     due and recurrence state. Any final mismatch stays pending and issues no

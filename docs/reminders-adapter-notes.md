@@ -73,8 +73,10 @@ state, due, start, complete alarm multiset, recurrence, and destination list.
 Native `calendar_id` and public `list_id` represent the same semantic field;
 identity is guarded separately. Provider-owned or derived external identity,
 completion date, creation/modification timestamps, list/source display titles,
-and source identity are deliberately excluded. Alarm ordering may change, but
-duplicate multiplicity may not.
+and source identity are deliberately excluded. Alarm ordering alone may
+change, but duplicate multiplicity may not; recurrence rules and their nested
+arrays retain canonical order. A lossy projection marker on either side of an
+alarm comparison prevents exact verification.
 
 After an EventKit save, the native helper performs a fresh
 `calendarItemWithIdentifier:` lookup and verifies that canonical projection

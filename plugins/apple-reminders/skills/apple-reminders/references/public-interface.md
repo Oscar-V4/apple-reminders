@@ -89,7 +89,7 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 ## Receipt rules
 
-Core revalidates the opaque Reference with a fresh exact read before action preflight, then verifies the final identifier-based read through one canonical semantic projection: the requested delta plus stable user-authored title, notes, URL, location, priority, completion state, due, start, complete alarms multiset, recurrence, and destination list. Alarm order is not semantic, but duplicate counts are. Provider-owned identity/display metadata and derived timestamps are excluded. Any preserved-field drift—including absolute, location, writable-relative, or read-only alarm loss or transformation—cannot produce `verified` or a fresh writable Reference.
+Core revalidates the opaque Reference with a fresh exact read before action preflight, then verifies the final identifier-based read through one canonical semantic projection: the requested delta plus stable user-authored title, notes, URL, location, priority, completion state, due, start, complete alarms multiset, recurrence, and destination list. Alarm order alone is not semantic, but duplicate counts are; recurrence arrays retain canonical order. A lossy alarm projection on either side cannot verify. Provider-owned identity/display metadata and derived timestamps are excluded. Any preserved-field drift—including absolute, location, writable-relative, or read-only alarm loss or transformation—cannot produce `verified` or a fresh writable Reference.
 
 - `unchanged`: no mutation was needed; a fresh reference may be returned.
 - `verified`: the final exact read matched; a fresh reference may be returned for an existing/created reminder.

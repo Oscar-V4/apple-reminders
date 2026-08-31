@@ -298,6 +298,28 @@ class CoreModuleTests(unittest.TestCase):
             )
         )
 
+    def test_only_alarm_arrays_are_order_insensitive(self) -> None:
+        expected = {
+            "recurrence_rules": [
+                {
+                    "frequency": "weekly",
+                    "interval": 1,
+                    "days_of_week": [{"day": "monday"}, {"day": "tuesday"}],
+                }
+            ]
+        }
+        reordered = {
+            "recurrence_rules": [
+                {
+                    "frequency": "weekly",
+                    "interval": 1,
+                    "days_of_week": [{"day": "tuesday"}, {"day": "monday"}],
+                }
+            ]
+        }
+
+        self.assertFalse(reminder_matches_fields(reordered, expected))
+
     def test_relative_alarm_action_drift_never_matches_display_write(self) -> None:
         expected = {
             "alarms": [{"kind": "relative", "offset_seconds": -900}]
@@ -328,6 +350,22 @@ class CoreModuleTests(unittest.TestCase):
             reminder_matches_fields(
                 {"alarms": [deepcopy(alarm)]},
                 {"alarms": [deepcopy(alarm)]},
+            )
+        )
+
+    def test_newly_lossy_actual_alarm_projection_is_never_verifiable(self) -> None:
+        expected = {
+            "kind": "absolute",
+            "date_time": "2027-08-17T00:00:00.000Z",
+            "read_only": True,
+            "action": {"type": "procedure", "url": "example:run"},
+        }
+        actual = {**deepcopy(expected), "_verification_unavailable": True}
+
+        self.assertFalse(
+            reminder_matches_fields(
+                {"alarms": [actual]},
+                {"alarms": [expected]},
             )
         )
 
