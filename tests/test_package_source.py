@@ -27,11 +27,12 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving narrowly reviewed room for the
 # signed universal Core helper; exact bytes remain visible in benchmarks.
-# v0.5.1 adds the dependency-verification implementation to both universal
-# native slices plus its reviewed Objective-C source. The signed candidate was
-# inspected before raising this ceiling: 84,688 bytes of binary growth and
-# 40,590 bytes of source growth account for the observed archive delta.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.72 * 1024 * 1024)
+# The v0.5.2 candidate retains the exact four-file signed app inventory. Against
+# v0.5.1, the universal executable grows by 144 bytes, the reviewed Objective-C
+# source by 6,023 bytes, and the complete 60-file deterministic package by
+# 9,249 bytes to 1,804,399. The 1.721 MiB ceiling leaves only 200 bytes of
+# reviewed headroom.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.721 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -376,7 +377,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.1")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.2")
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -655,8 +656,8 @@ class SourcePackagePolicyTests(unittest.TestCase):
             info_payload = plistlib.loads(
                 (REPO_ROOT / "scripts" / "eventkit_helper_app_info.plist").read_bytes()
             )
-            info_payload["CFBundleShortVersionString"] = "0.5.1"
-            info_payload["CFBundleVersion"] = "0.5.1"
+            info_payload["CFBundleShortVersionString"] = "0.5.2"
+            info_payload["CFBundleVersion"] = "0.5.2"
             info.write_bytes(plistlib.dumps(info_payload, sort_keys=True))
             executable.write_bytes(b"\xca\xfe\xba\xbe" + b"universal-helper")
             executable.chmod(0o755)
@@ -715,7 +716,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
                 "notarization_checked": True,
                 "notarized": True,
-                "plugin_version": "0.5.1",
+                "plugin_version": "0.5.2",
                 "signature": "developer-id",
                 "team_id": "V8347N9346",
             }
@@ -798,7 +799,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.72 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.721 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 

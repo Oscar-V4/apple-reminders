@@ -67,7 +67,7 @@ else:  # pragma: no cover - exercised by the stdio entry point
 
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
-SERVER_VERSION = "0.5.1"
+SERVER_VERSION = "0.5.2"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     LATEST_PROTOCOL_VERSION,

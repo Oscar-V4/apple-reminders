@@ -117,6 +117,10 @@ class ReferenceRejected(Exception):
         self.code = code
 
 
+class ReferenceRevalidationFailed(RuntimeError):
+    """The fresh exact read failed before mutation dispatch."""
+
+
 class ActionRejected(ValueError):
     """A requested Core action was not part of the closed Interface."""
 
@@ -180,6 +184,26 @@ RECEIPT_STATUSES = frozenset(
 )
 REFERENCE_ELIGIBLE_STATUSES = frozenset({"unchanged", "verified"})
 
+# The semantic projection contains user-authored state that Core must either
+# change deliberately or preserve exactly. Identity is guarded separately by
+# Snapshot/Guard. Provider-owned and derived fields such as external_id,
+# completion_date, created, last_modified, list/source titles, and source_id are
+# intentionally outside this projection because a provider may refresh them
+# without changing the user's Reminder semantics.
+STABLE_USER_FIELDS = (
+    "title",
+    "notes",
+    "url",
+    "location",
+    "priority",
+    "completed",
+    "due",
+    "start",
+    "alarms",
+    "recurrence_rules",
+    "list_id",
+)
+
 
 def _timestamp_matches(expected: str, actual: str) -> bool:
     try:
@@ -201,7 +225,10 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
         if not isinstance(actual, Mapping):
             return False
         if field.endswith("alarms[]"):
-            if expected.get("_verification_unavailable") is True:
+            if (
+                expected.get("_verification_unavailable") is True
+                or actual.get("_verification_unavailable") is True
+            ):
                 return False
             expected_read_only = expected.get("read_only") is True
             actual_read_only = actual.get("read_only") is True
@@ -221,6 +248,15 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
     if isinstance(expected, list):
         if not isinstance(actual, list) or len(expected) != len(actual):
             return False
+        if field != "alarms":
+            return all(
+                _requested_value_matches(
+                    expected_item,
+                    actual_item,
+                    field=f"{field}[]",
+                )
+                for expected_item, actual_item in zip(expected, actual)
+            )
         unmatched = list(actual)
         for expected_item in expected:
             for index, actual_item in enumerate(unmatched):
@@ -268,42 +304,37 @@ def _alarms_contain_read_only(value: Any) -> bool:
     )
 
 
+def canonical_action_projection(
+    before: Mapping[str, Any],
+    action: CoreAction,
+) -> dict[str, Any]:
+    """Return requested delta plus every stable user field to preserve."""
+
+    expected = {
+        field: copy.deepcopy(before[field])
+        for field in STABLE_USER_FIELDS
+        if field in before
+    }
+    if isinstance(action, PatchAction):
+        expected.update(copy.deepcopy(dict(action.patch)))
+    elif isinstance(action, SetCompletionAction):
+        expected["completed"] = action.completed
+    elif isinstance(action, MoveToListAction):
+        expected["list_id"] = action.list_id
+    return expected
+
+
 def reminder_matches_action(
     reminder: Mapping[str, Any],
     before: Mapping[str, Any],
     action: CoreAction,
 ) -> bool:
-    if isinstance(action, PatchAction):
-        expected_fields = dict(action.patch)
-        if {"due", "alarms"}.intersection(action.patch):
-            resulting_due = action.patch.get("due", before.get("due"))
-            resulting_alarms = action.patch.get("alarms", before.get("alarms"))
-            if _alarms_contain_relative(resulting_alarms):
-                expected_fields["due"] = resulting_due
-                expected_fields["alarms"] = resulting_alarms
-        if (
-            "alarms" not in action.patch
-            and _alarms_contain_read_only(before.get("alarms"))
-        ):
-            expected_fields["alarms"] = before.get("alarms")
-        return reminder_matches_fields(reminder, expected_fields)
-    if isinstance(action, SetCompletionAction):
-        if reminder.get("completed") is not action.completed:
-            return False
-        before_alarms = before.get("alarms")
-        if _alarms_contain_read_only(before_alarms):
-            return reminder_matches_fields(reminder, {"alarms": before_alarms})
-        return True
-    if isinstance(action, MoveToListAction):
-        expected_fields: dict[str, Any] = {"list_id": action.list_id}
-        before_alarms = before.get("alarms")
-        if _alarms_contain_relative(before_alarms):
-            expected_fields["due"] = before.get("due")
-            expected_fields["alarms"] = before_alarms
-        elif _alarms_contain_read_only(before_alarms):
-            expected_fields["alarms"] = before_alarms
-        return reminder_matches_fields(reminder, expected_fields)
-    return False
+    if not isinstance(action, (PatchAction, SetCompletionAction, MoveToListAction)):
+        return False
+    return reminder_matches_fields(
+        reminder,
+        canonical_action_projection(before, action),
+    )
 
 
 class CoreModule:
@@ -401,12 +432,21 @@ class CoreModule:
         a stale or cross-store grant is consumed before any native write.
         """
 
+        current = self._revalidated_snapshot(reference)
+        return current.guard
+
+    def _revalidated_snapshot(
+        self,
+        reference: str,
+    ) -> Snapshot:
         grant = self._active_grant(reference)
         try:
             current = self._read_snapshot(grant.guard.reminder_id)
-        except Exception:
+        except Exception as exc:
             self._references.pop(reference, None)
-            raise
+            raise ReferenceRevalidationFailed(
+                "The change reference could not be revalidated; read the Reminder again"
+            ) from exc
         if current.guard != grant.guard:
             self._references.pop(reference, None)
             code = (
@@ -418,7 +458,7 @@ class CoreModule:
                 code,
                 "The Reminder changed; read it again before applying a change",
             )
-        return grant.guard
+        return current
 
     def invalidate_reference(self, reference: str) -> None:
         """Consume a grant after a committed or outcome-unknown native write."""
@@ -427,21 +467,22 @@ class CoreModule:
 
     def change(self, reference: str, raw_action: Mapping[str, Any]) -> ChangeResult:
         action = self._parse_action(raw_action)
-        grant = self._active_grant(reference)
+        current = self._revalidated_snapshot(reference)
+        before = current.reminder
         if isinstance(action, PatchAction):
             replacement = action.patch.get("alarms")
             if (
                 isinstance(replacement, list)
                 and bool(replacement)
-                and _alarms_contain_read_only(grant.reminder.get("alarms"))
+                and _alarms_contain_read_only(before.get("alarms"))
             ):
                 raise ActionRejected(
                     "A non-empty alarms replacement cannot preserve an existing "
                     "read-only alarm; omit alarms or explicitly clear the array"
                 )
-            resulting_due = action.patch.get("due", grant.reminder.get("due"))
+            resulting_due = action.patch.get("due", before.get("due"))
             resulting_alarms = action.patch.get(
-                "alarms", grant.reminder.get("alarms")
+                "alarms", before.get("alarms")
             )
             if resulting_due is None and _alarms_contain_relative(
                 resulting_alarms
@@ -451,7 +492,7 @@ class CoreModule:
                     "or clear/replace the relative alarm in the same patch"
                 )
         try:
-            outcome = self._adapter.apply_action(grant.guard, action)
+            outcome = self._adapter.apply_action(current.guard, action)
         except AdapterConflict as exc:
             self._references.pop(reference, None)
             raise ReferenceRejected(
@@ -489,7 +530,7 @@ class CoreModule:
                 mutation_state=outcome.mutation_state,
             )
         try:
-            final_snapshot = self._read_snapshot(grant.guard.reminder_id)
+            final_snapshot = self._read_snapshot(current.guard.reminder_id)
         except Exception:
             return ChangeResult(
                 receipt=receipt,
@@ -498,7 +539,7 @@ class CoreModule:
                 mutation_state=outcome.mutation_state,
                 reference_error="final_read_failed",
             )
-        if not reminder_matches_action(final_snapshot.reminder, grant.reminder, action):
+        if not reminder_matches_action(final_snapshot.reminder, before, action):
             self._references.pop(reference, None)
             return ChangeResult(
                 receipt=receipt,

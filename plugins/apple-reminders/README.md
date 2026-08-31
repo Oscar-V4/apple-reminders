@@ -66,10 +66,10 @@ section or attachment inspection do not invoke `clang`.
 
 ## Quick Start
 
-Install the pinned 0.5.1 repo-marketplace release:
+Install the pinned 0.5.2 repo-marketplace release:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.1
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 

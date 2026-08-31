@@ -66,17 +66,27 @@ trigger cannot be represented losslessly, preservation remains fail-closed:
 the mutation may commit, but the receipt stays verification-pending rather than
 claiming an exact match from a lossy projection.
 
-Due-relative verification treats the anchor and alarm as one semantic unit. If
-the resulting Reminder contains a relative alarm, a due-only or alarm-only
-change compares both `due` and `alarms`; a list/account move compares the
-destination (`calendar_id` natively and `list_id` publicly), `due`, and
-`alarms`. After an EventKit save, the native helper performs a fresh
-`calendarItemWithIdentifier:` lookup and verifies the Reminder returned by that
-lookup instead of refreshing or trusting the pre-save object. The public Core
-Module then performs a separate exact identifier read and repeats the expanded
-comparison before returning a verified final Reminder or fresh Reference. A
-provider transformation observed by either read therefore cannot be reported
-as verified.
+Existing-Reminder verification uses one semantic projection instead of
+alarm-type-specific dependency branches. It combines the requested delta with
+the stable user-authored title, notes, URL, location, priority, completion
+state, due, start, complete alarm multiset, recurrence, and destination list.
+Native `calendar_id` and public `list_id` represent the same semantic field;
+identity is guarded separately. Provider-owned or derived external identity,
+completion date, creation/modification timestamps, list/source display titles,
+and source identity are deliberately excluded. Alarm ordering alone may
+change, but duplicate multiplicity may not; recurrence rules and their nested
+arrays retain canonical order. A lossy projection marker on either side of an
+alarm comparison prevents exact verification.
+
+After an EventKit save, the native helper performs a fresh
+`calendarItemWithIdentifier:` lookup and verifies that canonical projection
+instead of refreshing or trusting the pre-save object. Public Core first
+revalidates the opaque Reference with another exact read before any cached
+read-only/relative alarm preflight, then performs a separate final identifier
+read and applies the same projection before returning a verified Reminder or
+fresh Reference. Absolute, location, writable-relative, or read-only alarm
+loss/transformation, due or recurrence drift, and stale preflight state
+therefore cannot be reported as verified.
 
 The Python normalizer rejects Boolean offsets, and the Objective-C boundary
 independently checks `CFBooleanGetTypeID()` before treating an `NSNumber` as an

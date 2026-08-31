@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import plistlib
@@ -16,12 +17,23 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
+SCRIPTS_PATH = PLUGIN_ROOT / "scripts"
+if str(SCRIPTS_PATH) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_PATH))
 BRIDGE_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge.py"
 SCHEMA_PATH = PLUGIN_ROOT / "scripts" / "eventkit_bridge_schema.json"
 SPEC = importlib.util.spec_from_file_location("eventkit_bridge", BRIDGE_PATH)
 assert SPEC and SPEC.loader
 eventkit_bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(eventkit_bridge)
+
+from reminders_service import (  # noqa: E402
+    MoveToListAction,
+    PatchAction,
+    SetCompletionAction,
+    canonical_action_projection,
+    reminder_matches_fields,
+)
 
 
 def committed_helper_bytes() -> bytes:
@@ -735,23 +747,110 @@ class EventKitRequestValidationTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
         payload = json.loads(completed.stdout)
+        self.assertEqual(
+            payload["absolute_title_projection"],
+            {
+                "calendar_id": "CALENDAR-1",
+                "title": "Changed title",
+                "notes": "Stable notes",
+                "url": None,
+                "location": "Stable location",
+                "priority": 5,
+                "completed": False,
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "start": None,
+                "alarms": [
+                    {
+                        "kind": "absolute",
+                        "date_time": "2027-08-17T00:00:00.000Z",
+                    }
+                ],
+                "recurrence_rules": [],
+            },
+        )
+        alarm_kinds = {
+            "absolute": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+            },
+            "location": {
+                "kind": "location",
+                "proximity": "enter",
+                "location": {
+                    "title": "Office",
+                    "latitude": 37.5,
+                    "longitude": 127.0,
+                    "radius_meters": 100.0,
+                },
+            },
+            "writable_relative": {
+                "kind": "relative",
+                "offset_seconds": -900,
+            },
+            "read_only": {
+                "kind": "absolute",
+                "date_time": "2027-08-17T00:00:00.000Z",
+                "read_only": True,
+                "action": {"type": "procedure", "url": "example:before"},
+            },
+        }
+        actions = {
+            "title_patch": (False, PatchAction({"title": "Changed title"})),
+            "completion": (False, SetCompletionAction(True)),
+            "reopen": (True, SetCompletionAction(False)),
+            "move": (False, MoveToListAction("CALENDAR-2")),
+        }
+        for alarm_name, alarm in alarm_kinds.items():
+            for action_name, (completed_state, action) in actions.items():
+                with self.subTest(alarm=alarm_name, action=action_name):
+                    before = {
+                        "title": "Original title",
+                        "notes": "Stable notes",
+                        "url": None,
+                        "location": "Stable location",
+                        "priority": 5,
+                        "completed": completed_state,
+                        "due": {"kind": "all_day", "date": "2027-08-31"},
+                        "start": None,
+                        "alarms": [alarm],
+                        "recurrence_rules": [],
+                        "list_id": "CALENDAR-1",
+                    }
+                    native_projection = dict(
+                        payload["semantic_matrix"][alarm_name][action_name]
+                    )
+                    native_projection["list_id"] = native_projection.pop(
+                        "calendar_id"
+                    )
+                    self.assertEqual(
+                        native_projection,
+                        canonical_action_projection(before, action),
+                    )
         expected_due = {"kind": "all_day", "date": "2027-09-30"}
         expected_alarms = [
             {"kind": "relative", "offset_seconds": -1_209_600}
         ]
         self.assertEqual(
             payload["due_projection"],
-            {"due": expected_due, "alarms": expected_alarms},
+            {
+                "calendar_id": "CALENDAR-1",
+                "due": expected_due,
+                "alarms": expected_alarms,
+            },
         )
         self.assertEqual(
             payload["alarm_projection"],
-            {"due": expected_due, "alarms": expected_alarms},
+            {
+                "calendar_id": "CALENDAR-1",
+                "due": {"kind": "all_day", "date": "2027-08-31"},
+                "alarms": expected_alarms,
+            },
         )
         self.assertEqual(
             payload["move_projection"],
             {
                 "calendar_id": "CALENDAR-2",
-                "due": expected_due,
+                "due": {"kind": "all_day", "date": "2027-08-31"},
                 "alarms": expected_alarms,
             },
         )
@@ -760,6 +859,8 @@ class EventKitRequestValidationTests(unittest.TestCase):
         self.assertIs(payload["move_drift_matched"], False)
         self.assertIs(payload["setter_drift_matched"], False)
         self.assertIs(payload["permuted_alarms_matched"], True)
+        self.assertIs(payload["permuted_duplicate_alarms_matched"], True)
+        self.assertIs(payload["lost_duplicate_alarm_matched"], False)
         read_only_alarm = {
             "kind": "absolute",
             "date_time": "2027-08-17T00:00:00.000Z",
@@ -768,11 +869,21 @@ class EventKitRequestValidationTests(unittest.TestCase):
         }
         self.assertEqual(
             payload["read_only_move_projection"],
-            {"calendar_id": "CALENDAR-2", "alarms": [read_only_alarm]},
+            {
+                "calendar_id": "CALENDAR-2",
+                "completed": False,
+                "due": None,
+                "alarms": [read_only_alarm],
+            },
         )
         self.assertEqual(
             payload["read_only_completion_projection"],
-            {"completed": True, "alarms": [read_only_alarm]},
+            {
+                "calendar_id": "CALENDAR-1",
+                "completed": True,
+                "due": None,
+                "alarms": [read_only_alarm],
+            },
         )
         self.assertIs(payload["read_only_move_drift_matched"], False)
         self.assertIs(payload["read_only_completion_drift_matched"], False)
@@ -800,6 +911,158 @@ class EventKitRequestValidationTests(unittest.TestCase):
         self.assertEqual(
             payload["parsed_fractional_date"],
             "2027-01-14T23:00:00.123Z",
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS EventKit")
+    def test_public_matcher_mirrors_native_non_alarm_order_and_lossy_actual_rules(
+        self,
+    ) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper = root / "projection-parity.m"
+            binary = root / "projection-parity"
+            wrapper.write_text(
+                f'''\
+#define main AppleRemindersProductionMain
+#include "{source.as_posix()}"
+#undef main
+
+int main(void) {{
+    @autoreleasepool {{
+        NSDictionary *expectedRecurrence = @{{
+            @"recurrence_rules" : @[@{{
+                @"frequency" : @"weekly",
+                @"interval" : @1,
+                @"days_of_week" : @[
+                    @{{ @"day" : @"monday" }},
+                    @{{ @"day" : @"tuesday" }},
+                ],
+            }}],
+        }};
+        NSDictionary *reorderedRecurrence = @{{
+            @"recurrence_rules" : @[@{{
+                @"frequency" : @"weekly",
+                @"interval" : @1,
+                @"days_of_week" : @[
+                    @{{ @"day" : @"tuesday" }},
+                    @{{ @"day" : @"monday" }},
+                ],
+            }}],
+        }};
+        NSDictionary *expectedAlarm = @{{
+            @"alarms" : @[@{{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+                @"read_only" : @YES,
+                @"action" : @{{
+                    @"type" : @"procedure",
+                    @"url" : @"example:run",
+                }},
+            }}],
+        }};
+        NSDictionary *newlyLossyAlarm = @{{
+            @"alarms" : @[@{{
+                @"kind" : @"absolute",
+                @"date_time" : @"2027-08-17T00:00:00.000Z",
+                @"read_only" : @YES,
+                @"action" : @{{
+                    @"type" : @"procedure",
+                    @"url" : @"example:run",
+                }},
+                @"_verification_unavailable" : @YES,
+            }}],
+        }};
+        NSDictionary *payload = @{{
+            @"recurrence_order_matched" : @(
+                ProjectionMatches(expectedRecurrence, reorderedRecurrence)),
+            @"newly_lossy_alarm_matched" : @(
+                ProjectionMatches(expectedAlarm, newlyLossyAlarm)),
+        }};
+        NSData *output = [NSJSONSerialization dataWithJSONObject:payload
+                                                         options:NSJSONWritingSortedKeys
+                                                           error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        return 0;
+    }}
+}}
+''',
+                encoding="utf-8",
+            )
+            compiled = subprocess.run(
+                [
+                    "clang",
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "EventKit",
+                    "-framework",
+                    "CoreLocation",
+                    str(wrapper),
+                    "-o",
+                    str(binary),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            completed = subprocess.run(
+                [str(binary)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        native = json.loads(completed.stdout)
+        expected_recurrence = {
+            "recurrence_rules": [
+                {
+                    "frequency": "weekly",
+                    "interval": 1,
+                    "days_of_week": [{"day": "monday"}, {"day": "tuesday"}],
+                }
+            ]
+        }
+        reordered_recurrence = {
+            "recurrence_rules": [
+                {
+                    "frequency": "weekly",
+                    "interval": 1,
+                    "days_of_week": [{"day": "tuesday"}, {"day": "monday"}],
+                }
+            ]
+        }
+        expected_alarm = {
+            "alarms": [
+                {
+                    "kind": "absolute",
+                    "date_time": "2027-08-17T00:00:00.000Z",
+                    "read_only": True,
+                    "action": {"type": "procedure", "url": "example:run"},
+                }
+            ]
+        }
+        newly_lossy_alarm = copy.deepcopy(expected_alarm)
+        newly_lossy_alarm["alarms"][0]["_verification_unavailable"] = True
+
+        self.assertIs(native["recurrence_order_matched"], False)
+        self.assertEqual(
+            reminder_matches_fields(reordered_recurrence, expected_recurrence),
+            native["recurrence_order_matched"],
+        )
+        self.assertIs(native["newly_lossy_alarm_matched"], False)
+        self.assertEqual(
+            reminder_matches_fields(newly_lossy_alarm, expected_alarm),
+            native["newly_lossy_alarm_matched"],
         )
 
     def test_native_save_verifies_through_a_fresh_identifier_lookup(self) -> None:

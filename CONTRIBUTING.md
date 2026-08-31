@@ -176,6 +176,10 @@ must continue to pass `scripts/validate_minis_export.py`.
   into “confirmed on iPhone” or guaranteed iCloud/shared-list delivery.
 - Preserve `committed_verification_pending`, `partial_success`,
   `failed_no_mutation`, and `failed_manual_repair_required` distinctions.
+- Verify existing-Reminder mutations at both native and public seams with the
+  canonical requested-delta-plus-stable-user-state projection. Preserve alarm
+  duplicate counts while ignoring order; exclude only the documented
+  provider-owned or derived fields. Any mismatch must issue no fresh `rev1`.
 - Preserve the real-use regressions behind the smaller Interface: visible URL
   final read, ReminderKit image/section saves, exact-list section scope,
   fresh-revision tag changes, create idempotency, concurrency rejection, and
