@@ -68,6 +68,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/live_smoke.py \
 For source-only Doctor output, run
 `PYTHONDONTWRITEBYTECODE=1 python3 plugins/apple-reminders/scripts/reminders_doctor.py --compact`;
 add `--detail-level full` only for one specific warning or blocked capability.
+The default is metadata-only and starts no developer tool. Add
+`--run-experimental-toolchain-check` only when explicitly testing a
+CLT-required Experimental capability; it never installs developer tools.
 
 This command writes to the maintainer's real Reminders store and must never run
 in CI. It creates a uniquely named synthetic list, exercises public Core and

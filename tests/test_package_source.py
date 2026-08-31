@@ -27,12 +27,11 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving narrowly reviewed room for the
 # signed universal Core helper; exact bytes remain visible in benchmarks.
-# The v0.5.2 candidate retains the exact four-file signed app inventory. Against
-# v0.5.1, the universal executable grows by 144 bytes, the reviewed Objective-C
-# source by 6,023 bytes, and the complete 60-file deterministic package by
-# 9,249 bytes to 1,804,399. The 1.721 MiB ceiling leaves only 200 bytes of
-# reviewed headroom.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.721 * 1024 * 1024)
+# The v0.5.2 candidate retains the exact four-file signed app inventory. The
+# reviewed no-Xcode Doctor contract adds 10,928 compressed bytes without
+# changing native provenance, bringing the 60-file package to 1,815,327 bytes.
+# The 1.732 MiB ceiling leaves only 807 bytes of reviewed headroom.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.732 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -799,7 +798,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertLessEqual(
             archive_size,
             RELEASE_ARCHIVE_HARD_CEILING_BYTES,
-            "release archive exceeded its 1.721 MiB hard ceiling; review runtime "
+            "release archive exceeded its 1.732 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )
 

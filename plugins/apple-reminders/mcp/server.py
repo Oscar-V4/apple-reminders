@@ -682,15 +682,18 @@ def invoke_doctor(
             },
             True,
         )
+    argv = [
+        sys.executable,
+        str(path),
+        "--compact",
+        "--detail-level",
+        str(arguments.get("detail_level", "summary")),
+    ]
+    if arguments.get("execution_mode") == "experimental_toolchain":
+        argv.append("--run-experimental-toolchain-check")
     try:
         completed = run_bounded_process(
-            [
-                sys.executable,
-                str(path),
-                "--compact",
-                "--detail-level",
-                str(arguments.get("detail_level", "summary")),
-            ],
+            argv,
             cwd=PLUGIN_ROOT,
             timeout_s=ADAPTER_TIMEOUT_SECONDS,
             stdout_limit=MAX_ADAPTER_STDOUT_BYTES,

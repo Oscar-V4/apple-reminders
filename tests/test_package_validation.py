@@ -97,6 +97,14 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("do not invoke `clang`", readme)
         self.assertIn("compile three private Objective-C helpers", readme)
         self.assertIn("therefore require Xcode Command Line Tools", readme)
+        self.assertIn("Stable Core", readme)
+        self.assertIn("Experimental, compiler-free private", readme)
+        self.assertIn("Experimental, CLT-required private", readme)
+        self.assertIn("`execution_mode=metadata_only`", readme)
+        self.assertIn("`execution_mode=experimental_toolchain`", readme)
+        self.assertIn("does not run `xcode-select` or `clang`", readme)
+        self.assertIn("already denied or later revoked", readme)
+        self.assertIn("does not show the first-time prompt again", readme)
         self.assertIn(
             "End users do not need an Apple Developer Program membership",
             readme,

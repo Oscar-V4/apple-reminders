@@ -26,6 +26,12 @@ def sample_full_report() -> dict[str, object]:
         "ok": True,
         "status": "degraded",
         "summary": {"blocked": 0, "ok": 1, "skipped": 0, "unknown": 0, "warning": 1},
+        "execution": {
+            "mode": "metadata_only",
+            "developer_tool_process_attempted": False,
+            "compiler_process_attempted": False,
+            "install_request_attempted": False,
+        },
         "privacy": {
             "content_free": True,
             "reminder_rows_read": False,
@@ -48,6 +54,7 @@ def sample_full_report() -> dict[str, object]:
             },
         },
         "capabilities": {
+            "runtime_boundaries": reminders_doctor.runtime_boundary_metadata(),
             "sqlite_schema_reads": {"status": "ok", "basis": "content_free_schema_probe"},
             "sqlite_writes": {
                 "status": "unknown",
@@ -89,6 +96,12 @@ class DoctorSummaryCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["detail_level"], "summary")
         self.assertTrue(report["privacy"]["content_free"])
+        self.assertEqual(report["execution"]["mode"], "metadata_only")
+        self.assertFalse(report["execution"]["compiler_process_attempted"])
+        self.assertEqual(
+            set(report["capabilities"]["runtime_boundaries"]),
+            {"core", "compiler_free_private", "compiler_required_private"},
+        )
         self.assertNotIn("details", report["checks"]["platform"])
         self.assertEqual(
             report["capabilities"]["command_schema"],
@@ -113,6 +126,25 @@ class DoctorSummaryCliTests(unittest.TestCase):
             )
         )
 
+    def test_cli_toolchain_gate_is_explicitly_opt_in(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(
+            reminders_doctor, "collect_report", return_value=sample_full_report()
+        ) as collect, mock.patch.object(reminders_doctor.sys, "stdout", output):
+            reminders_doctor.main(["--compact"])
+
+        collect.assert_called_once_with(syntax_check=False)
+
+        output = io.StringIO()
+        with mock.patch.object(
+            reminders_doctor, "collect_report", return_value=sample_full_report()
+        ) as collect, mock.patch.object(reminders_doctor.sys, "stdout", output):
+            reminders_doctor.main(
+                ["--compact", "--run-experimental-toolchain-check"]
+            )
+
+        collect.assert_called_once_with(syntax_check=True)
+
 
 class DoctorSummaryMcpContractTests(unittest.TestCase):
     def test_doctor_tool_exposes_summary_default_and_explicit_full_mode(self) -> None:
@@ -126,6 +158,38 @@ class DoctorSummaryMcpContractTests(unittest.TestCase):
         detail = doctor["inputSchema"]["properties"]["detail_level"]
         self.assertEqual(detail["enum"], ["summary", "full"])
         self.assertEqual(detail["default"], "summary")
+
+    def test_doctor_tool_makes_experimental_toolchain_execution_opt_in(self) -> None:
+        schema = json.loads(
+            (PLUGIN_ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8")
+        )
+        doctor = next(
+            tool for tool in schema["tools"] if tool["name"] == "diagnose_reminders"
+        )
+
+        execution_mode = doctor["inputSchema"]["properties"]["execution_mode"]
+        self.assertEqual(
+            execution_mode["enum"],
+            ["metadata_only", "experimental_toolchain"],
+        )
+        self.assertEqual(execution_mode["default"], "metadata_only")
+        self.assertIn("only", execution_mode["description"].casefold())
+
+    def test_doctor_schema_has_an_exact_recently_deleted_recovery_scope(self) -> None:
+        schema = json.loads(
+            (PLUGIN_ROOT / "schemas/mcp-tools.json").read_text(encoding="utf-8")
+        )
+        doctor = next(
+            tool for tool in schema["tools"] if tool["name"] == "diagnose_reminders"
+        )
+
+        scope = doctor["inputSchema"]["properties"]["scope"]
+        scopes = scope["enum"]
+        self.assertIn("recovery", scopes)
+        description = scope["description"]
+        self.assertIn("Stable Core", description)
+        self.assertIn("compiler-free private", description)
+        self.assertIn("CLT-required private", description)
 
     def test_mcp_initialize_instructions_do_not_repeat_a_long_playbook(self) -> None:
         server = load_server_module()

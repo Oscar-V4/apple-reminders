@@ -201,13 +201,18 @@ to the type decoded from byte-identical data and is not treated as corruption.
 Core work does not run Doctor as onboarding. If an operation reports a relevant
 permission, environment, bundle, build, schema, or capability failure, the next
 action may be `request_reminders_access` or targeted `diagnose_reminders`. A
-An image/section/Recovery helper build failure does not globally block Core or
+image/section/Recovery helper build failure does not globally block Core or
 the other private-store capabilities.
 
-Diagnosis is content-free. It can inspect toolchain, filesystem metadata,
-permission symptoms, and schema/capability metadata, but not reminder titles,
-notes, list/section/tag names, attachment contents, caches, journals, or backup
-contents.
+Diagnosis is content-free. Its default `metadata_only` execution mode reads
+only bounded filesystem, application, SQLite schema, and capability metadata;
+it does not start `xcode-select`, `clang`, EventKit, Reminders, or a permission
+prompt. The explicit `experimental_toolchain` mode is accepted only for a
+related Native Extension or Recovery scope. It runs
+`xcode-select -p` first and never invokes the `/usr/bin/clang` shim when no
+developer directory is selected. Neither mode runs `xcode-select --install`.
+Diagnosis never reads reminder titles, notes, list/section/tag names,
+attachment contents, caches, journals, or backup contents.
 
 ## Production and test boundaries
 

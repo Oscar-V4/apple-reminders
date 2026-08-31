@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from reminders_contracts import (  # noqa: E402
     REQUIRED_TABLES as CONTRACT_REQUIRED_TABLES,
     command_schema_requirements,
+    runtime_boundary_metadata,
 )
 from bounded_process import (  # noqa: E402
     ProcessError,
@@ -593,6 +594,7 @@ def inspect_helper_toolchain(
     home = paths["home"]
     source = paths["helper_source"]
     clang = which("clang")
+    xcode_select = which("xcode-select")
     source_exists = source.is_file()
     source_readable = source_exists and os.access(source, os.R_OK)
     public_frameworks = {
@@ -607,6 +609,12 @@ def inspect_helper_toolchain(
         "clang": {
             "available": clang is not None,
             "path": clang,
+        },
+        "developer_tools": {
+            "selection_tool_available": xcode_select is not None,
+            "selection_check_attempted": False,
+            "selected": None,
+            "install_requested": False,
         },
         "helper_source": {
             "path": redacted_path(source, home),
@@ -640,6 +648,39 @@ def inspect_helper_toolchain(
             "Helper prerequisites exist, but the non-linking syntax check was skipped.",
             details=details,
         )
+    if xcode_select is None:
+        return check_result(
+            STATUS_WARNING,
+            "developer_tools_unavailable",
+            "The active developer directory could not be checked safely.",
+            details=details,
+        )
+    details["developer_tools"]["selection_check_attempted"] = True
+    try:
+        selection = runner([xcode_select, "-p"], timeout=5.0)
+    except (ProcessTimeoutError, ProcessLaunchError, ProcessError) as exc:
+        error = structured_error(
+            "developer_tools_probe_failed",
+            "The active developer directory check could not complete.",
+            exception=exc,
+        )
+        return check_result(
+            STATUS_WARNING,
+            error["code"],
+            error["message"],
+            details=details,
+            errors=[error],
+        )
+    details["developer_tools"].update(_diagnostic_metadata(selection))
+    if selection.returncode != 0:
+        details["developer_tools"]["selected"] = False
+        return check_result(
+            STATUS_WARNING,
+            "developer_tools_unavailable",
+            "No active developer directory is selected; clang was not invoked.",
+            details=details,
+        )
+    details["developer_tools"]["selected"] = True
     argv = [
         clang,
         "-x",
@@ -1072,16 +1113,22 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
     store_ready = checks["store_access"]["status"] in {STATUS_OK, STATUS_WARNING}
     command_details = checks["command_schema"].get("details", {}).get("commands", {})
     helper_ready = checks["helper_toolchain"]["status"] == STATUS_OK
+    helper_metadata_only = (
+        checks["helper_toolchain"]["status"] == STATUS_UNKNOWN
+        and checks["helper_toolchain"].get("code") == "helper_syntax_check_skipped"
+    )
     framework_check = checks["private_frameworks"]
     framework_items = framework_check.get("details", {}).get("frameworks", {})
     canonical_framework_paths_absent = bool(framework_items) and all(
         item.get("exists") is False for item in framework_items.values()
     )
     framework_statically_available = framework_check["status"] == STATUS_OK
-    reminderkit_unknown = helper_ready and (
+    reminderkit_unknown = (helper_ready or helper_metadata_only) and (
         framework_statically_available or canonical_framework_paths_absent
     )
-    if not helper_ready:
+    if helper_metadata_only and framework_statically_available:
+        reminderkit_basis = "toolchain_metadata_only_not_probed"
+    elif not helper_ready and not helper_metadata_only:
         reminderkit_basis = "static_prerequisites_failed"
     elif framework_statically_available:
         reminderkit_basis = "static_prerequisites_passed_runtime_not_probed"
@@ -1092,6 +1139,7 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
     else:
         reminderkit_basis = "static_prerequisites_failed"
     return {
+        "runtime_boundaries": runtime_boundary_metadata(),
         "sqlite_schema_reads": {
             "status": STATUS_OK if store_ready else STATUS_BLOCKED,
             "basis": "content_free_schema_probe",
@@ -1135,7 +1183,7 @@ def collect_report(
     paths: dict[str, Any] | None = None,
     *,
     system_info: dict[str, Any] | None = None,
-    syntax_check: bool = True,
+    syntax_check: bool = False,
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., ProcessResult] = run_static_command,
     connector: Callable[..., sqlite3.Connection] = sqlite3.connect,
@@ -1179,12 +1227,27 @@ def collect_report(
         result["status"] == STATUS_WARNING for result in checks.values()
     )
     overall_status = "blocked" if blocked else "degraded" if degraded else "ready"
+    helper_details = helper_check.get("details", {})
+    developer_tools = helper_details.get("developer_tools", {})
+    syntax_details = helper_details.get("syntax_check", {})
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "doctor": DOCTOR_NAME,
         "ok": not blocked,
         "status": overall_status,
         "summary": _summary(checks),
+        "execution": {
+            "mode": (
+                "experimental_toolchain" if syntax_check else "metadata_only"
+            ),
+            "developer_tool_process_attempted": (
+                developer_tools.get("selection_check_attempted") is True
+            ),
+            "compiler_process_attempted": syntax_details.get("attempted") is True,
+            "install_request_attempted": (
+                developer_tools.get("install_requested") is True
+            ),
+        },
         "privacy": {
             "content_free": True,
             "reminder_rows_read": False,
@@ -1242,7 +1305,15 @@ def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
 
     return {
         key: report[key]
-        for key in ("schema_version", "doctor", "ok", "status", "summary", "privacy")
+        for key in (
+            "schema_version",
+            "doctor",
+            "ok",
+            "status",
+            "summary",
+            "execution",
+            "privacy",
+        )
         if key in report
     } | {
         "detail_level": "summary",
@@ -1257,9 +1328,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Content-free Apple Reminders onboarding and capability gate"
     )
     parser.add_argument(
-        "--skip-helper-syntax-check",
+        "--run-experimental-toolchain-check",
         action="store_true",
-        help="Skip the non-linking clang syntax check (no executable is ever built).",
+        help=(
+            "Opt in to the Experimental private-helper clang syntax check "
+            "(no executable is ever built)."
+        ),
     )
     parser.add_argument(
         "--compact", action="store_true", help="Emit compact JSON instead of pretty JSON."
@@ -1275,7 +1349,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    full_report = collect_report(syntax_check=not args.skip_helper_syntax_check)
+    full_report = collect_report(
+        syntax_check=args.run_experimental_toolchain_check
+    )
     report = (
         summarize_report(full_report)
         if args.detail_level == "summary"

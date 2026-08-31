@@ -291,6 +291,34 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertNotIn("xcode-select --install", result["next_action"]["message"])
         validate_public_result("list_reminder_lists", result)
 
+    def test_core_build_failure_never_recommends_a_compiler_or_install_prompt(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "list_calendars",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "list_calendars",
+                "error": {
+                    "code": "unexpected_error",
+                    "reason_code": "native_helper_build_failed",
+                    "message": "The Core helper could not be prepared",
+                    "retryable": False,
+                },
+            },
+            is_error=True,
+        )
+
+        result = facade(eventkit).list_reminder_lists({})
+
+        message = result["next_action"]["message"]
+        self.assertIn("scope=packaging", message)
+        self.assertIn("execution_mode=metadata_only", message)
+        self.assertNotIn("compiler", message.casefold())
+        self.assertNotIn("xcode-select", message)
+        validate_public_result("list_reminder_lists", result)
+
     def test_exact_read_maps_backend_not_found_category_to_public_not_found(self) -> None:
         eventkit = FakeEventKit()
         eventkit.queue(
@@ -592,6 +620,41 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "permission_denied")
         self.assertEqual(result["data"]["authorization"], "denied")
         self.assertTrue(result["data"]["prompt_expected"])
+        self.assertNotIn("next_action", result)
+        validate_public_result("request_reminders_access", result)
+
+    def test_already_denied_or_revoked_access_does_not_expect_another_prompt(self) -> None:
+        eventkit = FakeEventKit()
+        eventkit.queue(
+            "request_access",
+            {
+                "schema_version": 1,
+                "ok": False,
+                "status": "failed_no_mutation",
+                "operation": "request_access",
+                "error": {
+                    "code": "permission_denied",
+                    "reason_code": "reminders_access_denied",
+                    "message": "Reminders access remains denied",
+                    "retryable": False,
+                    "details": {
+                        "authorization_before": "denied",
+                        "authorization": "denied",
+                        "request_attempted": True,
+                        "prompt_expected": False,
+                        "prompt_observed": None,
+                        "prompted_explicitly": True,
+                    },
+                },
+            },
+            is_error=True,
+        )
+
+        result = facade(eventkit).request_reminders_access({})
+
+        self.assertEqual(result["error"]["code"], "permission_denied")
+        self.assertEqual(result["data"]["authorization_before"], "denied")
+        self.assertFalse(result["data"]["prompt_expected"])
         self.assertNotIn("next_action", result)
         validate_public_result("request_reminders_access", result)
 

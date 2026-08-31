@@ -2,6 +2,19 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## Unreleased
+
+### Changed
+
+- Made Doctor metadata-only and non-executing by default. Core diagnosis no
+  longer starts developer-tool shims; the private-helper syntax gate now
+  requires explicit Experimental toolchain mode and checks `xcode-select -p`
+  before `clang`.
+- Added structured Stable Core, compiler-free private, and CLT-required private
+  capability boundaries plus an exact Recovery diagnosis scope.
+- Clarified Finder-launched Python discovery, new-task plugin reloads, and the
+  separate first-request, denied/revoked, and signed-helper-update TCC paths.
+
 ## 0.5.2 — 2026-09-01
 
 ### Changed

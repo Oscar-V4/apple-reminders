@@ -1940,7 +1940,7 @@
     {
       "name": "diagnose_reminders",
       "title": "Diagnose Reminders",
-      "description": "Run one content-free diagnosis and report the requested area, defaulting to a small Core summary. Static private-framework path absence is inconclusive.",
+      "description": "Run one content-free diagnosis and report the requested area, defaulting to a small, non-executing Core summary. Developer tools run only through the explicit Experimental toolchain mode; static private-framework path absence is inconclusive.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1952,9 +1952,11 @@
               "sections",
               "tags",
               "attachments",
+              "recovery",
               "packaging"
             ],
-            "default": "core"
+            "default": "core",
+            "description": "core diagnoses Stable Core. tags plus read-only native inspection and URL-only attachment paths are compiler-free private capabilities. Section mutation, image attachment mutation, and exact recovery are CLT-required private capabilities; native_extension and attachments may span both private boundaries."
           },
           "detail_level": {
             "enum": [
@@ -1962,6 +1964,14 @@
               "full"
             ],
             "default": "summary"
+          },
+          "execution_mode": {
+            "enum": [
+              "metadata_only",
+              "experimental_toolchain"
+            ],
+            "default": "metadata_only",
+            "description": "metadata_only never starts developer tools. experimental_toolchain is the only mode that may run the private-helper compiler gate and is only for an explicitly requested Experimental capability diagnosis."
           }
         },
         "additionalProperties": false
