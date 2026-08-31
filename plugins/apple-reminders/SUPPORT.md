@@ -2,7 +2,7 @@
 
 ## Before filing an issue
 
-Confirm that you are using the latest tagged release on macOS with Apple Reminders available. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure.
+Confirm that you are using the latest tagged release on macOS with Apple Reminders available. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run metadata-only summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure. Opt in to Experimental toolchain diagnosis only for a CLT-required capability failure.
 
 ## What to include
 

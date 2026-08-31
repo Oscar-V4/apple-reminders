@@ -43,6 +43,12 @@ creation or moves, image-attachment changes, and exact Recently Deleted
 inspection or recovery compile three private Objective-C helpers locally and
 therefore require Xcode Command Line Tools.
 
+| Runtime boundary | Included paths | Command Line Tools |
+|---|---|---|
+| **Stable Core** | Core reads and changes through the bundled signed EventKit helper | Not required; Core never invokes `clang`. |
+| **Experimental, compiler-free private** | Tag mutation, URL-only attachment mutation, and read-only native section, tag, or attachment inspection | Not required; these paths never invoke `clang`. |
+| **Experimental, CLT-required private** | Section mutation, image-attachment mutation, and exact Recently Deleted inspection or recovery | Required by the requested operation; compiler diagnosis is separately opt-in. |
+
 End users do not need an Apple Developer Program membership. Maintainers use it
 only to sign and notarize the bundled Core release helper.
 
@@ -89,6 +95,12 @@ this upgrade because the helper's code-signing identity changed.
 When requested, run `request_reminders_access` and answer the macOS prompt.
 The tool can report its request but cannot observe the prompt itself; denial
 does not trigger an automatic prompt loop. Normal first use needs no Doctor.
+If access was already denied or later revoked, running the access tool again
+does not show the first-time prompt again. Re-enable Reminders access for the
+signed helper in **System Settings → Privacy & Security**, then retry one
+bounded Core read. Do not reset TCC. A signed-helper identity change can make
+macOS ask again after an update; the plugin reports the authorization state but
+still cannot claim that it observed the prompt.
 
 ## Public Interface
 
@@ -129,14 +141,23 @@ dependency.
 ## Diagnosis and troubleshooting
 
 Use `diagnose_reminders` only after a relevant failure. Its bounded default is
-content-free and can target the affected capability.
+content-free and can target the affected capability. The default
+`execution_mode=metadata_only` does not run `xcode-select` or `clang`. Only an
+explicit `execution_mode=experimental_toolchain` request for an Experimental
+Native Extension or Recovery failure may run the private-helper
+toolchain gate. That gate checks `xcode-select -p` first, never runs
+`xcode-select --install`, and does not invoke the `/usr/bin/clang` shim when no
+active developer directory is selected.
 
 Common cases:
 
 - **Unsupported Python:** install Python 3.11+ via Homebrew or python.org, then
   restart Codex.
-- **Permission required:** allow the explicit `request_reminders_access` step,
-  review the macOS prompt, then retry once.
+- **Permission not determined:** run the explicit `request_reminders_access`
+  step once, review the macOS prompt, then retry the original operation once.
+- **Permission denied or revoked:** do not loop the access request. Re-enable
+  the signed helper under **System Settings → Privacy & Security**, then retry
+  one bounded Core read. Do not reset TCC.
 - **Reference stale or consumed:** call `read_reminder` again and retry with the
   new Reference. Do not replay the old token.
 - **Verification pending:** read the exact reminder before deciding whether to
@@ -144,9 +165,11 @@ Common cases:
 - **Bundled Core helper unavailable:** reinstall the same reviewed release tag,
   then run targeted diagnosis if the failure persists. Core does not silently
   compile or download a replacement.
-- **Section/image/Recovery helper build failure:** run targeted diagnosis; for a
-  missing compiler run `xcode-select --install`, finish installation, and
-  restart Codex. Core remains independently usable.
+- **Section/image/Recovery helper build failure:** Core remains independently
+  usable. Run metadata-only targeted diagnosis first. Run Experimental
+  toolchain diagnosis only if you want to test that CLT-required capability;
+  if it reports no active developer directory, you may then choose to run
+  `xcode-select --install`, finish installation, and restart Codex.
 - **Plugin changes are not visible:** start a new Codex task after install,
   upgrade, removal, or re-addition so tool discovery is refreshed.
 

@@ -18,6 +18,14 @@ This matrix audits the current checked-out public interface as composed user jou
 | **Unsafe composition** | Individually valid calls become unsafe when ordered or scoped incorrectly. |
 | **Intentional boundary** | The capability is deliberately absent; the workflow must state the limit and fail closed. |
 
+## Runtime dependency boundary
+
+| Runtime boundary | Paths | Xcode Command Line Tools |
+| --- | --- | --- |
+| **Stable Core** | Core reads and changes through the bundled signed EventKit helper | Not required; Core and default diagnosis never invoke `clang`. |
+| **Experimental, compiler-free private** | Tag mutation, URL-only attachment mutation, and read-only native section, tag, or attachment inspection | Not required; no runtime compilation. |
+| **Experimental, CLT-required private** | Section mutation, image-attachment mutation, and exact Recently Deleted inspection or recovery | Required by the requested operation; compiler diagnosis is a separate explicit opt-in. |
+
 ## Capability and workflow matrix
 
 | Journey or capability | Classification | Current contract | Boundary or follow-up |

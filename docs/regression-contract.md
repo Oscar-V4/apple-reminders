@@ -306,6 +306,13 @@ Normal bounded work runs without Doctor preflight. `diagnose_reminders` is used
 only after a relevant permission, environment, build, schema, or native
 capability failure. It is content-free and a Native failure does not block Core.
 A missing private-framework path alone is inconclusive on shared-cache systems.
+The default `execution_mode=metadata_only` must execute no developer-tool
+process and must never invoke `clang` or request installation. Only an explicit
+`experimental_toolchain` request for a related Native Extension or Recovery
+scope may run the toolchain gate. That gate must run
+`xcode-select -p` first and stop before `/usr/bin/clang` when no active
+developer directory is selected. Doctor results must retain the Stable Core,
+compiler-free private, and CLT-required private boundary metadata.
 
 ## Performance guardrails
 

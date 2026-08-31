@@ -17,6 +17,39 @@ SchemaProfile = dict[str, SchemaRequirements]
 SchemaBoundary = Literal["runtime", "diagnostic"]
 
 
+def runtime_boundary_metadata() -> dict[str, object]:
+    """Return the shared, non-probing compiler/runtime capability boundary."""
+
+    return {
+        "core": {
+            "maturity": "stable",
+            "requires_command_line_tools": False,
+            "compiler_invocation": "never",
+            "paths": ["core"],
+        },
+        "compiler_free_private": {
+            "maturity": "experimental",
+            "requires_command_line_tools": False,
+            "compiler_invocation": "never",
+            "paths": [
+                "tag_mutation",
+                "url_only_attachment_mutation",
+                "read_only_native_inspection",
+            ],
+        },
+        "compiler_required_private": {
+            "maturity": "experimental",
+            "requires_command_line_tools": True,
+            "compiler_invocation": "explicit_diagnosis_or_operation_only",
+            "paths": [
+                "section_mutation",
+                "image_attachment_mutation",
+                "exact_recently_deleted",
+            ],
+        },
+    }
+
+
 def _fields(names: str) -> set[str]:
     return set(names.split())
 

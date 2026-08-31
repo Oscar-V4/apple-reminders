@@ -9,6 +9,8 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from reminders_contracts import runtime_boundary_metadata
+
 
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DIAGNOSIS_CHECKS = {
@@ -24,10 +26,17 @@ DIAGNOSIS_CHECKS = {
     "attachments": frozenset(
         {"helper_toolchain", "private_frameworks", "command_schema", "store_access"}
     ),
+    "recovery": frozenset(
+        {"helper_toolchain", "private_frameworks", "command_schema", "store_access"}
+    ),
     "packaging": frozenset(
-        {"platform", "helper_toolchain", "local_artifacts", "redaction", "command_schema"}
+        {"platform", "local_artifacts", "redaction", "command_schema"}
     ),
 }
+EXECUTION_MODES = frozenset({"metadata_only", "experimental_toolchain"})
+EXPERIMENTAL_TOOLCHAIN_SCOPES = frozenset(
+    {"native_extension", "sections", "attachments", "recovery"}
+)
 PUBLIC_ERROR_CODES = frozenset(
     {
         "invalid_input",
@@ -153,7 +162,9 @@ class DiagnosticsFacade:
             }
 
     def _diagnose(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        unknown = sorted(set(arguments) - {"scope", "detail_level"})
+        unknown = sorted(
+            set(arguments) - {"scope", "detail_level", "execution_mode"}
+        )
         if unknown:
             raise DiagnosticsError(
                 "invalid_input",
@@ -174,7 +185,29 @@ class DiagnosticsFacade:
                 "invalid_detail_level",
                 "detail_level must be summary or full.",
             )
-        raw = self._doctor_call({"detail_level": detail})
+        execution_mode = arguments.get("execution_mode", "metadata_only")
+        if execution_mode not in EXECUTION_MODES:
+            raise DiagnosticsError(
+                "invalid_input",
+                "invalid_execution_mode",
+                "execution_mode must be metadata_only or experimental_toolchain.",
+            )
+        if (
+            execution_mode == "experimental_toolchain"
+            and scope not in EXPERIMENTAL_TOOLCHAIN_SCOPES
+        ):
+            raise DiagnosticsError(
+                "invalid_input",
+                "experimental_toolchain_scope_required",
+                "Experimental toolchain execution requires an explicitly related private-helper scope.",
+            )
+        raw = self._doctor_call(
+            {
+                "scope": scope,
+                "detail_level": detail,
+                "execution_mode": execution_mode,
+            }
+        )
         if not isinstance(raw, Mapping):
             raise DiagnosticsError(
                 "unexpected_error",
@@ -204,6 +237,55 @@ class DiagnosticsFacade:
                 "schema_mismatch",
                 "doctor_not_content_free",
                 "The Doctor did not satisfy its content-free privacy contract.",
+            )
+        execution_raw = raw.get("execution")
+        execution_fields = (
+            "developer_tool_process_attempted",
+            "compiler_process_attempted",
+            "install_request_attempted",
+        )
+        if (
+            not isinstance(execution_raw, Mapping)
+            or execution_raw.get("mode") != execution_mode
+            or any(
+                not isinstance(execution_raw.get(field), bool)
+                for field in execution_fields
+            )
+        ):
+            raise DiagnosticsError(
+                "schema_mismatch",
+                "doctor_execution_unattested",
+                "The Doctor did not attest its requested execution mode.",
+            )
+        if execution_raw.get("install_request_attempted") is not False:
+            raise DiagnosticsError(
+                "schema_mismatch",
+                "doctor_install_request_forbidden",
+                "Diagnosis must never request developer-tool installation.",
+            )
+        if execution_mode == "metadata_only" and any(
+            execution_raw.get(field) is True
+            for field in (
+                "developer_tool_process_attempted",
+                "compiler_process_attempted",
+            )
+        ):
+            raise DiagnosticsError(
+                "schema_mismatch",
+                "metadata_diagnosis_executed_process",
+                "Metadata-only diagnosis must not execute developer tools.",
+            )
+        expected_boundaries = runtime_boundary_metadata()
+        capabilities = (
+            raw.get("capabilities")
+            if isinstance(raw.get("capabilities"), Mapping)
+            else {}
+        )
+        if capabilities.get("runtime_boundaries") != expected_boundaries:
+            raise DiagnosticsError(
+                "schema_mismatch",
+                "doctor_runtime_boundaries_mismatch",
+                "The Doctor returned inconsistent runtime capability boundaries.",
             )
         checks_raw = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
         checks: list[dict[str, Any]] = []
@@ -263,6 +345,15 @@ class DiagnosticsFacade:
             "data": {
                 "overall": overall,
                 "scope": scope,
+                "execution_mode": execution_mode,
+                "execution": {
+                    "mode": execution_mode,
+                    **{
+                        field: execution_raw[field]
+                        for field in execution_fields
+                    },
+                },
+                "capability_boundaries": expected_boundaries,
                 "summary": summary[:4000],
                 "environment_fingerprint": self._fingerprint(),
                 "checks": checks,

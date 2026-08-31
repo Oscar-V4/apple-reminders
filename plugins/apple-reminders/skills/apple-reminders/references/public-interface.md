@@ -85,7 +85,7 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 ## Diagnostics
 
-`diagnose_reminders {scope?, detail_level?}` runs one content-free diagnosis and reports the requested area. Use it only after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, and `packaging`.
+`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area. Use it only after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only the explicit `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; it never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
 
 ## Receipt rules
 

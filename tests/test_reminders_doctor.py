@@ -37,7 +37,11 @@ def fake_runner(
 
 
 def fake_which(command: str) -> str | None:
-    return f"/usr/bin/{command}" if command == "clang" else None
+    return (
+        f"/usr/bin/{command}"
+        if command in {"clang", "xcode-select"}
+        else None
+    )
 
 
 class DoctorFixture:
@@ -268,6 +272,43 @@ class ContentFreeSchemaTests(unittest.TestCase):
 
 
 class StaticDependencyTests(unittest.TestCase):
+    def test_missing_developer_directory_never_invokes_clang_shim(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(
+            argv: list[str], *, timeout: float = 20.0
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(argv)
+            if argv == ["/usr/bin/xcode-select", "-p"]:
+                return subprocess.CompletedProcess(
+                    argv,
+                    2,
+                    "",
+                    "xcode-select: error: unable to get active developer directory",
+                )
+            raise AssertionError(f"unexpected developer tool invocation: {argv}")
+
+        def which(command: str) -> str | None:
+            return {
+                "xcode-select": "/usr/bin/xcode-select",
+                "clang": "/usr/bin/clang",
+            }.get(command)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            result = reminders_doctor.inspect_helper_toolchain(
+                fixture.paths,
+                syntax_check=True,
+                which=which,
+                runner=runner,
+            )
+
+        self.assertEqual(commands, [["/usr/bin/xcode-select", "-p"]])
+        self.assertEqual(result["status"], "warning")
+        self.assertEqual(result["code"], "developer_tools_unavailable")
+        self.assertFalse(result["details"]["syntax_check"]["attempted"])
+        self.assertFalse(result["details"]["developer_tools"]["install_requested"])
+
     def test_static_command_uses_explicit_diagnostic_output_budgets(self) -> None:
         completed = subprocess.CompletedProcess(["clang"], 0, "", "")
         with mock.patch.object(
@@ -313,7 +354,11 @@ class StaticDependencyTests(unittest.TestCase):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
                 fixture = DoctorFixture(Path(temporary))
 
-                def failing_runner(*_: object, **__: object) -> object:
+                def failing_runner(
+                    argv: list[str], **__: object
+                ) -> subprocess.CompletedProcess[str]:
+                    if argv == ["/usr/bin/xcode-select", "-p"]:
+                        return subprocess.CompletedProcess(argv, 0, "", "")
                     raise failure
 
                 result = reminders_doctor.inspect_helper_toolchain(
@@ -343,9 +388,10 @@ class StaticDependencyTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(len(commands), 1)
-        self.assertIn("-fsyntax-only", commands[0])
-        self.assertNotIn("-o", commands[0])
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0], ["/usr/bin/xcode-select", "-p"])
+        self.assertIn("-fsyntax-only", commands[1])
+        self.assertNotIn("-o", commands[1])
         self.assertFalse(
             result["details"]["syntax_check"]["mutating_build_attempted"]
         )
@@ -357,6 +403,8 @@ class StaticDependencyTests(unittest.TestCase):
         def failing_runner(
             argv: list[str], *, timeout: float = 20.0
         ) -> subprocess.CompletedProcess[str]:
+            if argv == ["/usr/bin/xcode-select", "-p"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
             return subprocess.CompletedProcess(argv, 1, "", "PRIVATE DIAGNOSTIC")
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -405,7 +453,7 @@ class PermissionAndAccountTests(unittest.TestCase):
                 runner=runner,
             )
 
-        self.assertTrue(commands)
+        self.assertEqual(commands, [])
         permissions = report["checks"]["permissions"]["details"]
         self.assertNotIn("automation", permissions)
         self.assertEqual(permissions["reminders"]["status"], "unknown")
@@ -481,6 +529,67 @@ class LocalArtifactTests(unittest.TestCase):
 
 
 class ReportContractTests(unittest.TestCase):
+    def test_default_report_declares_runtime_boundaries_without_processes(self) -> None:
+        commands: list[list[str]] = []
+
+        def forbidden_runner(
+            argv: list[str], *, timeout: float = 20.0
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(argv)
+            raise AssertionError(f"metadata-only Doctor executed a process: {argv}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            report = reminders_doctor.collect_report(
+                fixture.paths,
+                system_info=DARWIN_INFO,
+                which=fake_which,
+                runner=forbidden_runner,
+            )
+
+        self.assertEqual(commands, [])
+        self.assertEqual(
+            report["execution"],
+            {
+                "mode": "metadata_only",
+                "developer_tool_process_attempted": False,
+                "compiler_process_attempted": False,
+                "install_request_attempted": False,
+            },
+        )
+        boundaries = report["capabilities"]["runtime_boundaries"]
+        self.assertEqual(
+            boundaries["core"],
+            {
+                "maturity": "stable",
+                "requires_command_line_tools": False,
+                "compiler_invocation": "never",
+                "paths": ["core"],
+            },
+        )
+        self.assertEqual(
+            boundaries["compiler_free_private"]["paths"],
+            [
+                "tag_mutation",
+                "url_only_attachment_mutation",
+                "read_only_native_inspection",
+            ],
+        )
+        self.assertFalse(
+            boundaries["compiler_free_private"]["requires_command_line_tools"]
+        )
+        self.assertEqual(
+            boundaries["compiler_required_private"]["paths"],
+            [
+                "section_mutation",
+                "image_attachment_mutation",
+                "exact_recently_deleted",
+            ],
+        )
+        self.assertTrue(
+            boundaries["compiler_required_private"]["requires_command_line_tools"]
+        )
+
     def test_missing_canonical_framework_paths_require_a_runtime_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = DoctorFixture(Path(temporary))
@@ -551,7 +660,7 @@ class ReportContractTests(unittest.TestCase):
             report["capabilities"]["reminderkit_image_attachments"],
             {
                 "status": "unknown",
-                "basis": "static_prerequisites_passed_runtime_not_probed",
+                "basis": "toolchain_metadata_only_not_probed",
                 "requires_runtime_verification": True,
             },
         )
@@ -561,6 +670,8 @@ class ReportContractTests(unittest.TestCase):
         def failing_runner(
             argv: list[str], *, timeout: float = 20.0
         ) -> subprocess.CompletedProcess[str]:
+            if argv == ["/usr/bin/xcode-select", "-p"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
             return subprocess.CompletedProcess(argv, 1, "", "compile failure")
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -568,6 +679,7 @@ class ReportContractTests(unittest.TestCase):
             report = reminders_doctor.collect_report(
                 fixture.paths,
                 system_info=DARWIN_INFO,
+                syntax_check=True,
                 which=fake_which,
                 runner=failing_runner,
             )

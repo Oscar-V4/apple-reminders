@@ -212,11 +212,18 @@ from pathlib import Path
 Path(__file__).with_suffix(".argv").write_text(
     json.dumps(sys.argv[1:]), encoding="utf-8"
 )
+experimental = "--run-experimental-toolchain-check" in sys.argv[1:]
 print(json.dumps({
     "schema_version": 1,
     "doctor": "apple-reminders-doctor",
     "ok": False,
     "status": "blocked",
+    "execution": {
+        "mode": "experimental_toolchain" if experimental else "metadata_only",
+        "developer_tool_process_attempted": experimental,
+        "compiler_process_attempted": experimental,
+        "install_request_attempted": False
+    },
     "privacy": {
         "content_free": True,
         "reminder_rows_read": False,
@@ -227,6 +234,36 @@ print(json.dumps({
         "write_attempted": False,
         "application_launched": False,
         "private_framework_loaded": False
+    },
+    "capabilities": {
+        "runtime_boundaries": {
+            "core": {
+                "maturity": "stable",
+                "requires_command_line_tools": False,
+                "compiler_invocation": "never",
+                "paths": ["core"]
+            },
+            "compiler_free_private": {
+                "maturity": "experimental",
+                "requires_command_line_tools": False,
+                "compiler_invocation": "never",
+                "paths": [
+                    "tag_mutation",
+                    "url_only_attachment_mutation",
+                    "read_only_native_inspection"
+                ]
+            },
+            "compiler_required_private": {
+                "maturity": "experimental",
+                "requires_command_line_tools": True,
+                "compiler_invocation": "explicit_diagnosis_or_operation_only",
+                "paths": [
+                    "section_mutation",
+                    "image_attachment_mutation",
+                    "exact_recently_deleted"
+                ]
+            }
+        }
     },
     "checks": {
         "permissions": {
@@ -1718,6 +1755,45 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(
             doctor_argv,
             ["--compact", "--detail-level", "summary"],
+        )
+
+    def test_experimental_diagnosis_is_the_only_stdio_path_enabling_toolchain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            doctor = Path(temporary) / "mock_doctor.py"
+            mock_doctor(doctor)
+
+            responses = run_server(
+                [
+                    initialize(),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "diagnose_reminders",
+                            "arguments": {
+                                "scope": "native_extension",
+                                "execution_mode": "experimental_toolchain",
+                            },
+                        },
+                    },
+                ],
+                doctor_path=doctor,
+            )
+            doctor_argv = json.loads(
+                doctor.with_suffix(".argv").read_text(encoding="utf-8")
+            )
+
+        diagnosed = responses[1]["result"]
+        self.assertFalse(diagnosed["isError"], diagnosed)
+        self.assertEqual(
+            doctor_argv,
+            [
+                "--compact",
+                "--detail-level",
+                "summary",
+                "--run-experimental-toolchain-check",
+            ],
         )
 
     def test_malformed_eventkit_collection_is_returned_as_an_mcp_error(self) -> None:
