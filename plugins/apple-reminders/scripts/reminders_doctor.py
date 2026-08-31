@@ -33,6 +33,15 @@ from reminders_contracts import (  # noqa: E402
     command_schema_requirements,
     runtime_boundary_metadata,
 )
+from experimental_capabilities import (  # noqa: E402
+    CAPABILITY_SPECS,
+    DeveloperToolchainProbe,
+    detect_runtime_identity,
+    evaluate_capability,
+    resolve_selected_clang,
+    runtime_identity_from_diagnostics,
+    stable_core_capability,
+)
 from bounded_process import (  # noqa: E402
     ProcessError,
     ProcessLaunchError,
@@ -69,6 +78,7 @@ CACHE_DIR = HOME / "Library/Caches/apple-reminders-codex"
 CACHE_FILE = CACHE_DIR / "cache.json"
 REQUIRED_TABLES = set(CONTRACT_REQUIRED_TABLES)
 COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("diagnostic")
+RUNTIME_COMMAND_SCHEMA_REQUIREMENTS = command_schema_requirements("runtime")
 DOCTOR_STDOUT_LIMIT_BYTES = 256 * 1024
 DOCTOR_STDERR_LIMIT_BYTES = 1024 * 1024
 
@@ -162,10 +172,11 @@ def redacted_path(path: Path, home: Path | None = None) -> str:
 
 
 def discover_system_info() -> dict[str, str | None]:
-    mac_version, _, _ = platform.mac_ver()
+    identity = detect_runtime_identity()
     return {
         "system": platform.system() or None,
-        "macos_version": mac_version or None,
+        "macos_version": identity.macos_version,
+        "macos_build": identity.macos_build,
         "kernel_release": platform.release() or None,
         "machine": platform.machine() or None,
         "python_version": platform.python_version() or None,
@@ -262,9 +273,12 @@ def schema_fingerprint(schema: dict[str, set[str]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def command_schema_capabilities(schema: dict[str, set[str]]) -> dict[str, Any]:
+def _command_schema_capabilities(
+    schema: dict[str, set[str]],
+    profile: dict[str, dict[str, set[str]]],
+) -> dict[str, Any]:
     capabilities: dict[str, Any] = {}
-    for command, requirements in sorted(COMMAND_SCHEMA_REQUIREMENTS.items()):
+    for command, requirements in sorted(profile.items()):
         missing_tables = sorted(set(requirements) - set(schema))
         missing_columns = {
             table: sorted(columns - schema.get(table, set()))
@@ -278,10 +292,27 @@ def command_schema_capabilities(schema: dict[str, set[str]]) -> dict[str, Any]:
             "supported": supported,
             "contract_level": "minimum_static_fields",
             "runtime_verification_required": True,
+            "schema_fingerprint": schema_fingerprint(
+                {
+                    table: schema.get(table, set())
+                    for table in sorted(requirements)
+                    if table in schema
+                }
+            ),
             "missing_tables": missing_tables,
             "missing_columns": missing_columns,
         }
     return capabilities
+
+
+def command_schema_capabilities(schema: dict[str, set[str]]) -> dict[str, Any]:
+    return _command_schema_capabilities(schema, COMMAND_SCHEMA_REQUIREMENTS)
+
+
+def runtime_command_schema_capabilities(
+    schema: dict[str, set[str]],
+) -> dict[str, Any]:
+    return _command_schema_capabilities(schema, RUNTIME_COMMAND_SCHEMA_REQUIREMENTS)
 
 
 def _classify_sqlite_error(error: sqlite3.Error) -> tuple[str, str]:
@@ -329,6 +360,9 @@ def inspect_db(
                     | set().union(
                         *(set(req) for req in COMMAND_SCHEMA_REQUIREMENTS.values())
                     )
+                    | set().union(
+                        *(set(req) for req in RUNTIME_COMMAND_SCHEMA_REQUIREMENTS.values())
+                    )
                 )
             )
             schema = {
@@ -342,6 +376,7 @@ def inspect_db(
                     connection.execute("select count(*) from ZREMCDACCOUNT").fetchone()[0]
                 )
             commands = command_schema_capabilities(schema)
+            runtime_commands = runtime_command_schema_capabilities(schema)
             base.update(
                 {
                     "status": STATUS_OK
@@ -363,6 +398,7 @@ def inspect_db(
                         "names_read": False,
                     },
                     "command_schema": commands,
+                    "runtime_admission_schema": runtime_commands,
                     "errors": [],
                 }
             )
@@ -525,6 +561,20 @@ def aggregate_command_schema(store_check: dict[str, Any]) -> dict[str, Any]:
             for item in databases
             if item.get("command_schema", {}).get(command, {}).get("supported") is True
         ]
+        fingerprints = sorted(
+            {
+                str(fingerprint)
+                for item in databases
+                if item.get("command_schema", {}).get(command, {}).get("supported")
+                is True
+                and isinstance(
+                    fingerprint := item.get("command_schema", {})
+                    .get(command, {})
+                    .get("schema_fingerprint"),
+                    str,
+                )
+            }
+        )
         commands[command] = {
             "status": STATUS_OK if supporting else STATUS_BLOCKED,
             "code": "schema_supported" if supporting else "schema_mismatch",
@@ -532,6 +582,7 @@ def aggregate_command_schema(store_check: dict[str, Any]) -> dict[str, Any]:
             "supporting_store_refs": supporting,
             "contract_level": "minimum_static_fields",
             "runtime_verification_required": True,
+            "schema_fingerprints": fingerprints,
             "required_fields": static_command_requirements()[command],
         }
     supported_count = sum(item["supported"] for item in commands.values())
@@ -590,11 +641,11 @@ def inspect_helper_toolchain(
     syntax_check: bool = True,
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., ProcessResult] = run_static_command,
+    toolchain_resolver: Callable[[], DeveloperToolchainProbe] | None = None,
 ) -> dict[str, Any]:
+    del which
     home = paths["home"]
     source = paths["helper_source"]
-    clang = which("clang")
-    xcode_select = which("xcode-select")
     source_exists = source.is_file()
     source_readable = source_exists and os.access(source, os.R_OK)
     public_frameworks = {
@@ -607,11 +658,13 @@ def inspect_helper_toolchain(
     }
     details: dict[str, Any] = {
         "clang": {
-            "available": clang is not None,
-            "path": clang,
+            "available": None,
+            "source": "selected_developer_directory",
+            "probe_reason": "not_probed_metadata_only",
+            "path_reported": False,
         },
         "developer_tools": {
-            "selection_tool_available": xcode_select is not None,
+            "selection_tool_available": None,
             "selection_check_attempted": False,
             "selected": None,
             "install_requested": False,
@@ -633,7 +686,7 @@ def inspect_helper_toolchain(
         for name, item in public_frameworks.items()
         if not item["exists"] or not item["readable"]
     ]
-    if clang is None or not source_readable or missing_frameworks:
+    if not source_readable or missing_frameworks:
         return check_result(
             STATUS_WARNING,
             "helper_build_prerequisites_missing",
@@ -648,41 +701,38 @@ def inspect_helper_toolchain(
             "Helper prerequisites exist, but the non-linking syntax check was skipped.",
             details=details,
         )
-    if xcode_select is None:
+    toolchain = (toolchain_resolver or resolve_selected_clang)()
+    clang = toolchain.compiler_path
+    details["clang"].update(
+        {
+            "available": toolchain.available,
+            "probe_reason": toolchain.reason_code,
+        }
+    )
+    details["developer_tools"].update(
+        {
+            "selection_tool_available": (
+                toolchain.reason_code != "xcode_select_unavailable"
+            ),
+            "selection_check_attempted": toolchain.selection_attempted,
+            "selected": (
+                True
+                if toolchain.available or toolchain.reason_code == "compiler_required"
+                else False
+                if toolchain.reason_code == "developer_directory_unselected"
+                else None
+            ),
+        }
+    )
+    if clang is None:
         return check_result(
             STATUS_WARNING,
-            "developer_tools_unavailable",
-            "The active developer directory could not be checked safely.",
+            "helper_build_prerequisites_missing",
+            "The selected developer directory does not provide a usable clang.",
             details=details,
         )
-    details["developer_tools"]["selection_check_attempted"] = True
-    try:
-        selection = runner([xcode_select, "-p"], timeout=5.0)
-    except (ProcessTimeoutError, ProcessLaunchError, ProcessError) as exc:
-        error = structured_error(
-            "developer_tools_probe_failed",
-            "The active developer directory check could not complete.",
-            exception=exc,
-        )
-        return check_result(
-            STATUS_WARNING,
-            error["code"],
-            error["message"],
-            details=details,
-            errors=[error],
-        )
-    details["developer_tools"].update(_diagnostic_metadata(selection))
-    if selection.returncode != 0:
-        details["developer_tools"]["selected"] = False
-        return check_result(
-            STATUS_WARNING,
-            "developer_tools_unavailable",
-            "No active developer directory is selected; clang was not invoked.",
-            details=details,
-        )
-    details["developer_tools"]["selected"] = True
     argv = [
-        clang,
+        str(clang),
         "-x",
         "objective-c",
         "-fobjc-arc",
@@ -1109,6 +1159,56 @@ def inspect_redaction_contract(paths: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _diagnostic_experimental_capabilities(
+    checks: dict[str, Any],
+    *,
+    helper_ready: bool,
+) -> dict[str, Any]:
+    identity = runtime_identity_from_diagnostics(
+        dict(checks["platform"].get("details", {})),
+        dict(checks["reminders_app"].get("details", {})),
+    )
+    databases = checks["store_access"].get("details", {}).get("databases", [])
+    usable_databases = [
+        item
+        for item in databases
+        if isinstance(item, dict) and item.get("status") == STATUS_OK
+    ]
+    capabilities: dict[str, Any] = {}
+    for capability_id, spec in sorted(CAPABILITY_SPECS.items()):
+        decisions = [
+            evaluate_capability(
+                capability_id,
+                identity,
+                schema_fingerprint=(
+                    item.get("runtime_admission_schema", {})
+                    .get(spec.schema_command, {})
+                    .get("schema_fingerprint")
+                    if item.get("runtime_admission_schema", {})
+                    .get(spec.schema_command, {})
+                    .get("supported")
+                    is True
+                    else None
+                ),
+                compiler_available=helper_ready,
+            )
+            for item in usable_databases
+        ] or [
+            evaluate_capability(
+                capability_id,
+                identity,
+                schema_fingerprint=None,
+                compiler_available=helper_ready,
+            )
+        ]
+        # The adapter may select any usable store after reading private counts,
+        # which this content-free doctor intentionally does not inspect. The
+        # aggregate therefore fails closed if one candidate is rejected.
+        decision = next((item for item in decisions if not item.allowed), decisions[0])
+        capabilities[capability_id] = decision.to_public_dict()
+    return capabilities
+
+
 def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
     store_ready = checks["store_access"]["status"] in {STATUS_OK, STATUS_WARNING}
     command_details = checks["command_schema"].get("details", {}).get("commands", {})
@@ -1138,8 +1238,21 @@ def derive_capabilities(checks: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         reminderkit_basis = "static_prerequisites_failed"
+    identity = runtime_identity_from_diagnostics(
+        dict(checks["platform"].get("details", {})),
+        dict(checks["reminders_app"].get("details", {})),
+    )
     return {
         "runtime_boundaries": runtime_boundary_metadata(),
+        "stable_core": stable_core_capability(
+            identity,
+            platform_supported=checks["platform"]["status"] != STATUS_BLOCKED,
+            reminders_available=checks["reminders_app"]["status"] != STATUS_BLOCKED,
+        ),
+        "experimental_internals": _diagnostic_experimental_capabilities(
+            checks,
+            helper_ready=helper_ready,
+        ),
         "sqlite_schema_reads": {
             "status": STATUS_OK if store_ready else STATUS_BLOCKED,
             "basis": "content_free_schema_probe",
@@ -1187,6 +1300,7 @@ def collect_report(
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., ProcessResult] = run_static_command,
     connector: Callable[..., sqlite3.Connection] = sqlite3.connect,
+    toolchain_resolver: Callable[[], DeveloperToolchainProbe] | None = None,
 ) -> dict[str, Any]:
     configured = paths or default_paths()
     platform_check = inspect_platform(system_info)
@@ -1194,7 +1308,11 @@ def collect_report(
     store_check = inspect_store_access(configured, connector=connector)
     command_check = aggregate_command_schema(store_check)
     helper_check = inspect_helper_toolchain(
-        configured, syntax_check=syntax_check, which=which, runner=runner
+        configured,
+        syntax_check=syntax_check,
+        which=which,
+        runner=runner,
+        toolchain_resolver=toolchain_resolver,
     )
     framework_check = inspect_private_frameworks(configured)
     permission_check = inspect_permission_symptoms(store_check)

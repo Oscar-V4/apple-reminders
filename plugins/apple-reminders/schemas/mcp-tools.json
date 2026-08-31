@@ -1940,7 +1940,7 @@
     {
       "name": "diagnose_reminders",
       "title": "Diagnose Reminders",
-      "description": "Run one content-free diagnosis and report the requested area, defaulting to a small, non-executing Core summary. Developer tools run only through the explicit Experimental toolchain mode; static private-framework path absence is inconclusive.",
+      "description": "Run one content-free diagnosis and report the requested area plus Stable or Experimental tier, compiler requirement, runtime/build/schema state, and the precise blocked reason. The default is a small, non-executing Core summary; developer tools run only through explicit Experimental toolchain mode, and static private-framework path absence is inconclusive.",
       "inputSchema": {
         "type": "object",
         "properties": {

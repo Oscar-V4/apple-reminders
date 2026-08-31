@@ -9,15 +9,21 @@ With this plugin, Codex can extract action items and dates, create reminders in
 the right lists, brief upcoming work, and safely organize or update reminders
 with verified read-backs.
 
+The runtime has two explicit support tiers. **Stable Core** uses documented
+EventKit and remains available independently. **Experimental Internals** use
+private ReminderKit or the Reminders SQLite store and are admitted only for an
+exact reviewed macOS version/build, Reminders version/build, and command-schema
+fingerprint. Unknown builds fail before private mutation.
+
 Try prompts like:
 
 - `Turn these meeting notes into one reminder per action item, preserving owners and deadlines, then add them to my Project list.`
 - `Create one reminder per screenshot in my Job Search list. Keep any dates and useful details you find.`
 - `Show me everything overdue, due today, and coming up this week.`
-- `Organize my Inbox reminders into sensible sections. Show me the plan before changing anything.`
+- `Move the reminders for this project into my Project Archive list after showing me the plan.`
 
-The first three prompts use Core. Section organization is an optional Native
-Extension feature and requires Xcode Command Line Tools.
+These prompts use Core. Section, tag, native attachment, and exact recovery
+work is Experimental and is not an onboarding default.
 
 This repository hosts an independent, open-source community plugin for Apple
 Reminders. Its MCP server and macOS adapters run locally, while tool results
@@ -49,6 +55,12 @@ therefore require Xcode Command Line Tools.
 | **Experimental, compiler-free private** | Tag mutation, URL-only attachment mutation, and read-only native section, tag, or attachment inspection | Not required; these paths never invoke `clang`. |
 | **Experimental, CLT-required private** | Section mutation, image-attachment mutation, and exact Recently Deleted inspection or recovery | Required by the requested operation; compiler diagnosis is separately opt-in. |
 
+Command Line Tools are only a dependency for helper-backed paths; their
+presence, a successful compile, or a selector check is never compatibility
+evidence. Experimental work also needs an exact immutable build/schema
+allowlist match. Missing build metadata reports `runtime_unverified`; a new or
+unlisted build reports `unsupported_build`. Neither condition disables Core.
+
 End users do not need an Apple Developer Program membership. Maintainers use it
 only to sign and notarize the bundled Core release helper.
 
@@ -65,10 +77,15 @@ python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 ```
 
 If you plan to create or move sections, change image attachments, or inspect or
-recover one exact Recently Deleted item, also run `xcode-select -p`. If that
-command fails, run `xcode-select --install`, finish installation, and restart
-Codex. Core, tag assignments, native URL attachment operations, and read-only
-section or attachment inspection do not invoke `clang`.
+recover one exact Recently Deleted item, also run `/usr/bin/xcode-select -p`.
+If that command fails, run `xcode-select --install`, finish installation, and
+restart Codex. Runtime admission ignores `PATH` clang entries and the
+`/usr/bin/clang` installer shim; it accepts only an executable at a fixed path
+under the selected developer directory. Core and compiler-free private paths do not invoke `clang`. These include tag assignments, native URL attachment
+operations, and read-only section or attachment inspection.
+
+This check confirms only that a compiler is installed. It does not enable an
+unallowlisted build or prove a private mutation safe.
 
 ## Quick Start
 
@@ -110,12 +127,13 @@ smaller than the internal development surface:
 | Module | Public tools |
 |---|---|
 | Core | `request_reminders_access`, `list_reminder_lists`, `fetch_reminders`, `read_reminder`, `create_reminder`, `change_reminder`, `delete_reminder`, `ensure_reminder_list` |
-| Native Extension | `inspect_reminder_native`, `create_reminder_section`, `organize_reminder`, `change_reminder_attachment` |
-| Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
+| Experimental Native Extension | `inspect_reminder_native`, `create_reminder_section`, `organize_reminder`, `change_reminder_attachment` |
+| Experimental Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
 | Diagnostics | `diagnose_reminders` |
 
-Core reads and non-URL writes remain usable if a Native capability is missing.
-URL writes are hybrid and may report partial success. See the
+Core reads and non-URL writes remain usable if every Experimental capability is
+missing. URL writes are hybrid EventKit plus private native attachment work and
+may report partial success; use a note link for a Core-only alternative. See the
 [capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
 for exact evidence and intentionally withheld operations.
 
@@ -133,10 +151,11 @@ named read-back evidence, not convergence to every device or shared-list member.
 Skills grant no macOS permission. The local MCP validates inputs and Receipts;
 Core launches only the reviewed helper bundled in the installed plugin and does
 not download or automatically compile a fallback. A missing or invalid bundle
-fails before mutation. Version-sensitive private paths remain behind exact
-read-back gates. Only section writes, image-attachment changes, and exact
-Recently Deleted inspection or recovery retain a separate local-build
-dependency.
+fails before mutation. Version-sensitive private paths first pass the exact
+build/schema admission gate and remain behind exact read-back gates. Only
+section writes, image-attachment changes, and exact Recently Deleted inspection
+or recovery retain a separate local-build dependency. There is no automatic
+SQLite, AppleScript, UI-automation, or helper fallback.
 
 ## Diagnosis and troubleshooting
 
@@ -169,7 +188,11 @@ Common cases:
   usable. Run metadata-only targeted diagnosis first. Run Experimental
   toolchain diagnosis only if you want to test that CLT-required capability;
   if it reports no active developer directory, you may then choose to run
-  `xcode-select --install`, finish installation, and restart Codex.
+  `xcode-select --install`, finish installation, and restart Codex. A compiler
+  does not override `runtime_unverified` or `unsupported_build`.
+- **Experimental build blocked:** keep using Core or choose the documented
+  substitute in the capability matrix. Do not retry, bypass the gate, or treat
+  a static schema/compiler check as approval.
 - **Plugin changes are not visible:** start a new Codex task after install,
   upgrade, removal, or re-addition so tool discovery is refreshed.
 
@@ -210,7 +233,9 @@ For a full uninstall, also run
 ## Internals and contribution
 
 The closed contract is `plugins/apple-reminders/schemas/mcp-tools.json`.
-See the [architecture guide](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/architecture.md)
+See the [architecture guide](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/architecture.md),
+the [Experimental threat model](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/experimental-internals-threat-model.md),
+the [runtime-gate decision](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/decisions/0020-fail-closed-experimental-runtime-gate.md),
 and [contribution checks](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
 
 ## Local files and privacy

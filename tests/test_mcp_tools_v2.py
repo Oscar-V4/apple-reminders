@@ -385,6 +385,7 @@ class McpToolsV2SchemaTests(unittest.TestCase):
         scope = self.by_name["diagnose_reminders"]["inputSchema"]["properties"][
             "scope"
         ]["enum"]
+        self.assertIn("recovery", scope)
         self.assertNotIn("maintenance", scope)
         self.assertNotIn("snapshots", scope)
 

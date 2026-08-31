@@ -27,11 +27,12 @@ import build_source_package  # noqa: E402
 # The deterministic allowlist is the primary content boundary. This hard ceiling
 # catches gross package growth while leaving narrowly reviewed room for the
 # signed universal Core helper; exact bytes remain visible in benchmarks.
-# The v0.5.2 candidate retains the exact four-file signed app inventory. The
-# reviewed no-Xcode Doctor contract adds 10,928 compressed bytes without
-# changing native provenance, bringing the 60-file package to 1,815,327 bytes.
-# The 1.732 MiB ceiling leaves only 807 bytes of reviewed headroom.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.732 * 1024 * 1024)
+# The v0.5.2 no-Xcode baseline is the reviewed 60-file, 1,815,327-byte archive.
+# Issue #41 adds one allowlisted runtime-admission module plus its capability,
+# Doctor, and Core-first contract changes: 37,339 compressed bytes, producing a
+# deterministic 61-file, 1,852,666-byte archive without native-artifact changes.
+# The smallest three-decimal MiB ceiling, 1.767 MiB, leaves 167 bytes headroom.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.767 * 1024 * 1024)
 PUBLIC_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -322,6 +323,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 Path("scripts/bounded_process.py"),
                 Path("scripts/durable_idempotency.py"),
                 Path("scripts/eventkit_protocol.py"),
+                Path("scripts/experimental_capabilities.py"),
                 Path("scripts/reminders_image_input.py"),
                 Path("scripts/remkit_recover.m"),
                 Path("scripts/reminders_service.py"),

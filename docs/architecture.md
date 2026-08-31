@@ -88,6 +88,12 @@ user-facing promise.
      Python/SQLite, while section and image writes invoke compiled ReminderKit
      helpers.
    - Keeps Core usable when a private capability is unavailable.
+   - Admits a private command only when the exact macOS version/build,
+     Reminders version/build, command-schema fingerprint, and any required
+     compiler match immutable repository evidence. There is no runtime opt-out.
+   - Resolves helper compilers only from fixed `/usr/bin/xcode-select -p` and a
+     fixed path under its selected developer directory; `PATH` and compiler
+     environment overrides cannot grant admission.
 5. **Recovery Module**
    - Lists Recently Deleted items without write authority and issues a
      short-lived `del1` only after an exact deleted-item read.
@@ -140,6 +146,9 @@ user-facing promise.
      Python/SQLite adapter and do not invoke `clang`. Only the helper-backed
      paths require Xcode Command Line Tools.
    - Are not a second public API and are not a fallback for skills.
+   - Run the shared Experimental preflight after pure input validation and
+     before store resolution or mutation dispatch. Mutating functions repeat
+     their minimum schema check at the transaction boundary.
 
 There is no equivalent hosted Codex connector for the user's local native
 Reminders store, so a bundled local MCP is warranted. That server remains a
@@ -200,9 +209,11 @@ to the type decoded from byte-identical data and is not treated as corruption.
 
 Core work does not run Doctor as onboarding. If an operation reports a relevant
 permission, environment, bundle, build, schema, or capability failure, the next
-action may be `request_reminders_access` or targeted `diagnose_reminders`. A
-image/section/Recovery helper build failure does not globally block Core or
-the other private-store capabilities.
+action may be `request_reminders_access` or targeted `diagnose_reminders`. An
+image/section/Recovery helper build failure does not globally block Core or the
+other private-store capabilities. Diagnosis reports `stable_core` separately
+from `experimental_internals`, and distinguishes `runtime_unverified`,
+`unsupported_build`, `compiler_required`, and schema-fingerprint mismatch.
 
 Diagnosis is content-free. Its default `metadata_only` execution mode reads
 only bounded filesystem, application, SQLite schema, and capability metadata;

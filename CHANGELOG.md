@@ -14,6 +14,20 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   capability boundaries plus an exact Recovery diagnosis scope.
 - Clarified Finder-launched Python discovery, new-task plugin reloads, and the
   separate first-request, denied/revoked, and signed-helper-update TCC paths.
+- Split runtime capability reporting into Stable Core and Experimental
+  Internals, including compiler requirement, runtime verification state, exact
+  build/schema compatibility, and precise blocked reasons.
+- Made Core-first list/text/note/archive alternatives the default guidance for
+  sections, tags, native attachments, and destructive recovery workflows.
+
+### Fixed
+
+- Added an immutable exact macOS/Reminders build and command-schema allowlist
+  before every private mutation and exact recovery path. Missing metadata,
+  unknown builds, schema drift, and missing required Command Line Tools now fail
+  before private dispatch without disabling Stable Core.
+- Preserved partial native failure and recovery mismatch as explicit
+  pending/no-write outcomes instead of falling back or reporting success.
 
 ## 0.5.2 — 2026-09-01
 

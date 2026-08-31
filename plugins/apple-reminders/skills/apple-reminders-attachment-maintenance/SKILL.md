@@ -5,12 +5,20 @@ description: Inspect, attach, copy, replace, or delete Apple Reminders image and
 
 # Apple Reminders Attachments
 
-Resolve one exact Reminder and attachment target, then use the guarded Native Extension. Never fall back to direct SQLite or an unexposed adapter write.
+Native attachments are Experimental Internals. Prefer a Core-safe note link or
+plain-text image description unless the user explicitly requests a native
+attachment. Never fall back to direct SQLite or an unexposed adapter write.
 
 ## Workflow
 
-1. Resolve a bounded candidate set, then call `read_reminder` for the exact destination and fresh opaque reference. Stop on duplicate titles.
-2. Call `inspect_reminder_native` with `kind=reminder`, that reference, and `include=["attachments","sync"]`. Filter by attachment type when useful.
+1. Resolve whether the goal can be met with a contextual URL in `notes` or a
+   text description. Use that Stable Core substitute by default.
+2. For an explicitly requested native attachment, run
+   `diagnose_reminders {scope:"attachments"}` first. Continue only when the
+   exact action's Experimental capability is `available=true`; stop on
+   `runtime_unverified`, `unsupported_build`, `compiler_required`, or schema
+   mismatch. Then call `read_reminder` for the exact destination and fresh
+   opaque reference and inspect the exact native state.
 3. Resolve exactly one local source image, URL, existing destination `attachment_id`, or exact active source Reminder plus image attachment ID. For cross-reminder copy, call `read_reminder` and native attachment inspection for the source immediately before the write. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
 4. Call `change_reminder_attachment` with the fresh reference and exactly one action.
 5. Treat only `verified` or `unchanged` as completed after exact destination read-back. On pending or partial status, surface recovery guidance and perform no automatic second write.
@@ -38,7 +46,9 @@ Cross-Reminder copy can place several source images as separate attachments on o
 
 ## URL behavior
 
-- A URL supplied to Core `create_reminder` or `change_reminder` is already a combined EventKit + visible-attachment operation. Do not add it again after `verified`.
+- A URL supplied to Core `create_reminder` or `change_reminder` is a hybrid
+  EventKit plus private visible-attachment operation. For Core-only capture,
+  preserve the link in `notes`. Do not add a hybrid URL again after `verified`.
 - If a later same-URL Core patch finds the matching URL plus another URL attachment, it intentionally performs no write and returns an ambiguity. Call `read_reminder`, inspect the exact native attachment IDs, and delete only a user-intended stale object; never infer that every non-matching link is the old URL.
 - Use `attach_url` here for an additional URL attachment or explicit recovery after resolving a partial Core write.
 - Clearing Core `patch.url` does not delete attachment objects. Use an exact attachment ID for deletion.
@@ -48,6 +58,8 @@ Cross-Reminder copy can place several source images as separate attachments on o
 - `mobile_visible_likely` means CloudKit/mobile-sync evidence, not direct iPhone-screen confirmation.
 - Local Mac rendering alone is not mobile evidence.
 - Bulk attachment audit/repair apply, raw attachment export, and backup/Snapshot apply are withheld. A request to repair many local-only attachments may receive bounded inspection, diagnosis, and a proposal, but not a private maintenance write.
+- A compiler is only a dependency for image helper paths; it never overrides an
+  unallowlisted build or missing runtime evidence.
 - Image removal follows the adapter's recoverable object lifecycle; do not hard-delete copied files.
 
 ## Output

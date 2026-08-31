@@ -37,6 +37,33 @@ EXECUTION_MODES = frozenset({"metadata_only", "experimental_toolchain"})
 EXPERIMENTAL_TOOLCHAIN_SCOPES = frozenset(
     {"native_extension", "sections", "attachments", "recovery"}
 )
+DIAGNOSIS_CAPABILITIES = {
+    "core": ("stable_core",),
+    "access": ("stable_core",),
+    "native_extension": (
+        "section_create_mutation",
+        "section_move_mutation",
+        "tag_assignment_mutation",
+        "image_attachment_mutation",
+        "url_attachment_mutation",
+        "attachment_delete_mutation",
+        "recently_deleted_exact_inspection",
+        "recently_deleted_recovery",
+    ),
+    "sections": ("section_create_mutation", "section_move_mutation"),
+    "tags": ("tag_assignment_mutation",),
+    "attachments": (
+        "image_attachment_mutation",
+        "url_attachment_mutation",
+        "attachment_delete_mutation",
+    ),
+    "recovery": (
+        "recently_deleted_inventory",
+        "recently_deleted_exact_inspection",
+        "recently_deleted_recovery",
+    ),
+    "packaging": ("stable_core",),
+}
 PUBLIC_ERROR_CODES = frozenset(
     {
         "invalid_input",
@@ -98,6 +125,43 @@ def _public_error(exc: DiagnosticsError) -> dict[str, Any]:
         "message": (str(exc) or "Diagnosis failed.")[:2000],
         "retryable": exc.retryable,
     }
+
+
+def _project_capabilities(raw: Any, scope: str) -> list[dict[str, Any]]:
+    if not isinstance(raw, Mapping):
+        return []
+    stable = raw.get("stable_core")
+    experimental = raw.get("experimental_internals")
+    selected: list[dict[str, Any]] = []
+    for name in DIAGNOSIS_CAPABILITIES.get(scope, ()):
+        candidate = (
+            stable
+            if name == "stable_core"
+            else experimental.get(name)
+            if isinstance(experimental, Mapping)
+            else None
+        )
+        if not isinstance(candidate, Mapping):
+            continue
+        projected = {
+            key: candidate[key]
+            for key in (
+                "capability",
+                "support_tier",
+                "api_boundary",
+                "compiler_requirement",
+                "build_compatibility",
+                "schema_compatibility",
+                "runtime_state",
+                "reason_code",
+                "available",
+                "runtime_verification_required",
+            )
+            if isinstance(candidate.get(key), (str, bool))
+        }
+        if projected.get("capability") == name:
+            selected.append(projected)
+    return selected
 
 
 class DiagnosticsFacade:
@@ -357,6 +421,7 @@ class DiagnosticsFacade:
                 "summary": summary[:4000],
                 "environment_fingerprint": self._fingerprint(),
                 "checks": checks,
+                "capabilities": _project_capabilities(raw.get("capabilities"), str(scope)),
                 "privacy": {
                     "content_free": True,
                     "reminder_content_read": False,

@@ -24,6 +24,9 @@ QUICK_CAPTURE_EVALS = (
 SCHEMA = PLUGIN / "schemas" / "mcp-tools.json"
 CORE_RUNTIME = PLUGIN / "mcp" / "v2_core.py"
 MATRIX = ROOT / "docs" / "workflow-capability-matrix.md"
+RUNTIME_GATE_ADR = (
+    ROOT / "docs" / "decisions" / "0020-fail-closed-experimental-runtime-gate.md"
+)
 
 
 def read(path: Path) -> str:
@@ -160,7 +163,7 @@ class WorkflowHardeningTests(unittest.TestCase):
                 {"kind", "source_reference", "attachment_id", "idempotency_key"},
             )
             self.assertIn(
-                "Cross-reminder image copy | **Supported with platform boundary**",
+                "Cross-reminder image copy | **Experimental, admitted only**",
                 matrix,
             )
             self.assertIn('{"kind":"copy_image"', public_interface)
@@ -173,6 +176,36 @@ class WorkflowHardeningTests(unittest.TestCase):
         else:
             self.assertIn("Cross-reminder image copy | **Intentional boundary**", matrix)
             self.assertNotIn('{"kind":"copy_image"', public_interface)
+
+    def test_default_guidance_is_core_first_and_private_blocks_are_terminal(
+        self,
+    ) -> None:
+        primary = read(PRIMARY_SKILL)
+        quick = read(QUICK_CAPTURE_SKILL)
+        organize = read(ORGANIZE_SKILL)
+        attachment = read(ATTACHMENT_SKILL)
+        matrix = read(MATRIX)
+        readme = read(ROOT / "README.md")
+        runtime_gate_adr = read(RUNTIME_GATE_ADR)
+
+        for phrase in (
+            "Stable Core",
+            "Experimental Internals",
+            "runtime_unverified",
+            "unsupported_build",
+            "compiler_required",
+        ):
+            self.assertIn(phrase, primary + "\n" + readme)
+        self.assertIn("contextual URL in `notes`", quick)
+        self.assertIn("move to a dedicated archive Reminder", primary)
+        self.assertIn("Default to Stable Core organization", organize)
+        self.assertIn("Prefer a Core-safe note link", attachment)
+        self.assertIn("Core-first alternatives", matrix)
+        self.assertIn("App Intents and Shortcuts review", runtime_gate_adr)
+        self.assertIn("Shortcuts tag support", runtime_gate_adr)
+        self.assertIn("ignores `PATH` clang entries", readme)
+        self.assertIn("`/usr/bin/xcode-select -p`", runtime_gate_adr)
+        self.assertNotIn("Organize my Inbox reminders into sensible sections", readme)
 
     def test_cleanup_chunks_and_completed_brief_semantics_are_durable(self) -> None:
         organize = read(ORGANIZE_SKILL)
