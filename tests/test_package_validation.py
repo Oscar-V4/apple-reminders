@@ -53,7 +53,8 @@ class PluginValidationTests(unittest.TestCase):
         featured_examples = readme.split("Try prompts like:", 1)[1].split(
             "This repository hosts", 1
         )[0]
-        self.assertIn("The first three prompts use Core", featured_examples)
+        self.assertIn("These prompts use Core", featured_examples)
+        self.assertNotIn("sensible sections", featured_examples)
         self.assertNotIn("links", featured_examples.casefold())
         self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
         self.assertIn(

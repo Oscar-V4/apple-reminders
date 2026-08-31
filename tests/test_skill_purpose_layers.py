@@ -638,15 +638,15 @@ class PurposeSkillLayerTests(unittest.TestCase):
         for name in SKILL_NAMES:
             self.assertIn(f"${name}", skill_text)
 
-    def test_primary_skill_starts_with_core_and_diagnoses_only_after_failure(self) -> None:
+    def test_primary_skill_starts_core_without_doctor_and_gates_experimental(self) -> None:
         skill_text = (PLUGIN_ROOT / "skills/apple-reminders/SKILL.md").read_text(
             encoding="utf-8"
         )
 
         core_instruction = "Start with the requested bounded Core operation"
-        diagnosis_instruction = "Use `diagnose_reminders` only for a relevant environment or Native Extension failure"
+        diagnosis_instruction = "Use `diagnose_reminders` for an explicitly requested Experimental capability"
         self.assertIn(core_instruction, skill_text)
-        self.assertIn("Do not run Doctor or capability preflight first", skill_text)
+        self.assertIn("Do not run Doctor for\n   ordinary Core work", skill_text)
         self.assertIn("request access once and retry the original operation once", skill_text)
         self.assertIn(diagnosis_instruction, skill_text)
         self.assertLess(skill_text.index(core_instruction), skill_text.index(diagnosis_instruction))

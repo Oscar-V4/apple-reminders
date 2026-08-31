@@ -14,7 +14,11 @@ Preserve wording, choose an exact destination, and create each intended Reminder
 3. If asked to create a list, use `ensure_reminder_list` with exact `source_id`, exact name, and a fresh idempotency key. The public interface does not set list color or emblem.
 4. Call `create_reminder` with exact `list_id`, preserved title, and a unique idempotency key. For multi-capture, process at most 25 items one at a time; stop on the first ambiguous, pending, partial, or failed result. Include only supplied or delegated fields.
 5. Use typed due values. A timed due includes RFC 3339 offset and IANA timezone. Alerts belong in `alarms`; add one only when the user requests a notification. Preserve relative wording such as “2 weeks before” as a due-anchored relative alarm instead of converting it to an absolute date.
-6. Pass a supplied URL in the same create call. A verified result already includes the visible native URL attachment and final exact read; do not attach it again.
+6. Preserve a contextual URL in `notes` for a Stable Core capture. The `url`
+   field is a hybrid EventKit plus private native-attachment operation; use it
+   only when the user explicitly wants that behavior and targeted attachment
+   diagnosis reports the exact Experimental URL capability available. A
+   verified hybrid result must not be attached again.
 7. On `verified` or `unchanged`, report the returned exact state, ID, and fresh reference. An extra `read_reminder` is unnecessary unless the returned result lacks a final reference.
 8. On `partial_success` or `committed_verification_pending`, report which items are verified, uncreated, or uncertain; perform only the indicated read-only step before retry.
 
@@ -39,14 +43,21 @@ All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their
 
 ## Image follow-up
 
-- Attach a source screenshot or photo only when the user asks.
-- Create the Reminder first. Use the returned fresh reference with `change_reminder_attachment` and action `attach_image`.
+- By default, summarize a source screenshot/photo in the Reminder notes or store
+  a user-provided remote reference in notes. Do not sync a private local path.
+- Attach a native image only when the user explicitly asks and
+  `diagnose_reminders {scope:"attachments"}` reports the image capability
+  available. Create the Reminder through Core first, then use its fresh
+  reference with action `attach_image`.
 - Resolve exactly one absolute regular non-symlink PNG or JPEG within the 25 MiB, 16,384-pixel-per-dimension, and 40,000,000-pixel limits; include a fresh attachment idempotency key.
 - Treat `mobile_visible_likely` as sync evidence, not direct iPhone confirmation.
 
 When a newly created Reminder is the destination for consolidation, verify the create first. For each image that already belongs to another active Reminder, read both exact Reminders and use `change_reminder_attachment` action `copy_image` with the fresh destination `reference`, fresh `source_reference`, exact source image `attachment_id`, and a unique idempotency key. Both input references are consumed after dispatch; use the returned fresh destination reference and re-read the source before the next copy. Finish and verify all copies before any source deletion.
 
-For a URL on an existing Reminder, call `read_reminder` and use `change_reminder` with a `patch.url`. Use `change_reminder_attachment` with `attach_url` only for an additional attachment or explicit recovery from a partial hybrid write.
+For a Core-only URL on an existing Reminder, call `read_reminder` and patch the
+link into `notes`. Use `patch.url` or `change_reminder_attachment` only when the
+user explicitly requests native URL behavior, the capability is admitted, or an
+exact partial hybrid result requires its documented recovery flow.
 
 ## Output
 

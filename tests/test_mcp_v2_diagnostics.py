@@ -397,6 +397,90 @@ class DiagnosticsFacadeTests(unittest.TestCase):
         self.assertIn("local_artifacts", check_names)
         self.assertNotIn("helper_toolchain", check_names)
 
+    def test_capability_projection_distinguishes_support_and_runtime_boundaries(
+        self,
+    ) -> None:
+        def doctor(arguments: dict[str, Any]) -> dict[str, Any]:
+            attestations = diagnostic_attestations()
+            return {
+                "ok": True,
+                "status": "degraded",
+                "checks": {
+                    "helper_toolchain": {
+                        "status": "blocked",
+                        "code": "clang_missing",
+                        "message": "The helper compiler is unavailable.",
+                    }
+                },
+                "execution": attestations["execution"],
+                "capabilities": {
+                    **attestations["capabilities"],
+                    "stable_core": {
+                        "capability": "stable_core",
+                        "support_tier": "stable_core",
+                        "api_boundary": "documented_eventkit",
+                        "compiler_requirement": "not_required",
+                        "build_compatibility": "not_applicable",
+                        "schema_compatibility": "not_applicable",
+                        "runtime_state": "documented_api",
+                        "reason_code": "documented_eventkit_core",
+                        "available": True,
+                        "runtime_verification_required": False,
+                    },
+                    "experimental_internals": {
+                        "image_attachment_mutation": {
+                            "capability": "image_attachment_mutation",
+                            "support_tier": "experimental_internals",
+                            "api_boundary": "private_apple_internals",
+                            "compiler_requirement": "required",
+                            "build_compatibility": "allowlisted",
+                            "schema_compatibility": "unverified",
+                            "runtime_state": "runtime_unverified",
+                            "reason_code": "compiler_required",
+                            "available": False,
+                            "runtime_verification_required": True,
+                        },
+                        "url_attachment_mutation": {
+                            "capability": "url_attachment_mutation",
+                            "support_tier": "experimental_internals",
+                            "api_boundary": "private_apple_internals",
+                            "compiler_requirement": "not_required",
+                            "build_compatibility": "unsupported",
+                            "schema_compatibility": "unverified",
+                            "runtime_state": "runtime_unverified",
+                            "reason_code": "unsupported_build",
+                            "available": False,
+                            "runtime_verification_required": True,
+                        },
+                    },
+                },
+                "privacy": deepcopy(CONTENT_FREE_PRIVACY),
+            }
+
+        facade = DiagnosticsFacade(
+            doctor_call=doctor,
+            environment_fingerprint=lambda: FINGERPRINT,
+        )
+        result = facade.call("diagnose_reminders", {"scope": "attachments"})
+
+        projected = {
+            item["capability"]: item for item in result["data"]["capabilities"]
+        }
+        self.assertEqual(
+            projected["image_attachment_mutation"]["compiler_requirement"],
+            "required",
+        )
+        self.assertEqual(
+            projected["image_attachment_mutation"]["reason_code"],
+            "compiler_required",
+        )
+        self.assertEqual(
+            projected["url_attachment_mutation"]["reason_code"],
+            "unsupported_build",
+        )
+        self.assertNotIn("stable_core", projected)
+        validate_public_result("diagnose_reminders", result)
+
     def test_withheld_maintenance_scopes_never_call_doctor(self) -> None:
         for scope in ("maintenance", "snapshots"):
             with self.subTest(scope=scope):

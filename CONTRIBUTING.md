@@ -261,6 +261,24 @@ Changes involving private ReminderKit or the Reminders database must document:
 - preconditions, read-back evidence, partial-failure behavior, and recovery;
 - why the feature remains blocked when any prerequisite is unknown.
 
+Compatibility is positive admission, not a range inference. A private mutation
+may be added to `experimental_capabilities.py` only when one reviewed evidence
+row binds the exact macOS version/build, Reminders version/build, command-schema
+fingerprint, semantic mutation, and read-back. Missing evidence leaves the
+capability disabled. Do not add environment-variable bypasses, minimum-version
+wildcards, compiler-only approval, selector-only approval, or automatic fallback
+writes. Command Line Tools are a dependency, not compatibility evidence.
+Resolve an Experimental helper compiler only through fixed
+`/usr/bin/xcode-select -p` and a fixed compiler-relative path beneath its
+selected developer directory. Never trust `PATH`, a `/usr/bin/clang` installer
+shim, `DEVELOPER_DIR`/`TOOLCHAINS` overrides, or a caller-supplied compiler.
+
+Synthetic tests must prove that unknown builds, incomplete runtime metadata,
+schema drift, and missing required compilers fail before store resolution or
+mutation dispatch. Separate tests must preserve conservative pending/manual
+classification after partial native failure and reject recovery guard mismatch
+before save.
+
 Keep this private integration out of OpenMinis contributions unless that
 project explicitly accepts the dependency. Use only `minis/apple-reminders/`
 for the reduced public command surface.

@@ -53,6 +53,12 @@ from reminders_image_input import (  # noqa: E402
     ValidatedImage,
     validate_image_input,
 )
+from experimental_capabilities import (  # noqa: E402
+    capability_for_adapter_command,
+    detect_runtime_identity,
+    evaluate_capability,
+    resolve_selected_clang,
+)
 
 
 HOME = Path.home()
@@ -530,11 +536,162 @@ def require_command_capability(con: sqlite3.Connection, command: str) -> dict[st
     return capability
 
 
+def _experimental_capability_failure(
+    decision: Any,
+    *,
+    mutation: bool,
+) -> None:
+    public = decision.to_public_dict()
+    reason_code = str(public["reason_code"])
+    code = (
+        "schema_mismatch"
+        if reason_code in {"schema_unverified", "schema_fingerprint_mismatch"}
+        else "unsupported_capability"
+    )
+    messages = {
+        "runtime_unverified": (
+            "This Experimental capability has no exact runtime compatibility evidence."
+        ),
+        "unsupported_build": (
+            "This macOS and Reminders build is not allowlisted for the Experimental capability."
+        ),
+        "compiler_required": (
+            "This Experimental capability requires Xcode Command Line Tools."
+        ),
+        "schema_unverified": (
+            "The private Reminders schema could not be matched to reviewed compatibility evidence."
+        ),
+        "schema_fingerprint_mismatch": (
+            "The private Reminders schema differs from the allowlisted build evidence."
+        ),
+    }
+    error_type = MutationNotStartedError if mutation else AdapterError
+    raise error_type(
+        messages.get(reason_code, "The Experimental capability is unavailable."),
+        code=code,
+        reason_code=reason_code,
+        capability=public,
+    )
+
+
+def preflight_experimental_command(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Enforce build/toolchain/schema evidence before an Experimental dispatch.
+
+    Unknown builds and missing helper toolchains fail before the Reminders store
+    is even opened.  An allowlisted build then receives a read-only command
+    schema check; mutating command functions repeat their schema guard at the
+    transaction boundary to close the preflight-to-write race.
+    """
+
+    spec = capability_for_adapter_command(
+        str(getattr(args, "command", "")),
+        backend=getattr(args, "backend", None),
+        image=getattr(args, "image", None),
+        url=getattr(args, "url", None),
+    )
+    if spec is None:
+        return None
+    identity = detect_runtime_identity()
+    build_decision = evaluate_capability(
+        spec.capability_id,
+        identity,
+        schema_fingerprint=None,
+        compiler_available=True,
+    )
+    if build_decision.reason_code != "schema_unverified":
+        _experimental_capability_failure(build_decision, mutation=spec.mutation)
+    compiler_probe = (
+        resolve_selected_clang()
+        if spec.compiler_requirement == "required"
+        else None
+    )
+    compiler_available = bool(compiler_probe and compiler_probe.available)
+    if compiler_probe and compiler_probe.compiler_path is not None:
+        setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
+    if spec.compiler_requirement == "required" and not compiler_available:
+        compiler_decision = evaluate_capability(
+            spec.capability_id,
+            identity,
+            schema_fingerprint=None,
+            compiler_available=False,
+        )
+        _experimental_capability_failure(compiler_decision, mutation=spec.mutation)
+
+    db = resolve_database(getattr(args, "db", None))
+    con = connect_read_only(db)
+    try:
+        schema = command_capability(con, spec.schema_command)
+    finally:
+        con.close()
+    decision = evaluate_capability(
+        spec.capability_id,
+        identity,
+        schema_fingerprint=str(schema.get("schema_fingerprint") or "") or None,
+        compiler_available=compiler_available,
+    )
+    if not schema.get("supported") or not decision.allowed:
+        _experimental_capability_failure(decision, mutation=spec.mutation)
+    public = decision.to_public_dict()
+    public["schema_gate"] = "minimum_fields_and_exact_fingerprint"
+    setattr(args, "_experimental_capability", public)
+    return public
+
+
+def receipt_capability(
+    args: argparse.Namespace,
+    schema_capability: dict[str, Any],
+) -> dict[str, Any]:
+    runtime = getattr(args, "_experimental_capability", None)
+    if not isinstance(runtime, dict):
+        return schema_capability
+    return {**schema_capability, **runtime}
+
+
+def require_image_helper_compiler(args: argparse.Namespace) -> None:
+    """Resolve the conditional delete route before any image helper dispatch."""
+
+    compiler_probe = resolve_selected_clang()
+    if compiler_probe.compiler_path is not None:
+        setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
+        return
+    capability = dict(getattr(args, "_experimental_capability", {}) or {})
+    capability.update(
+        {
+            "capability": "image_attachment_mutation",
+            "support_tier": "experimental_internals",
+            "compiler_requirement": "required",
+            "runtime_state": "runtime_unverified",
+            "reason_code": "compiler_required",
+            "available": False,
+        }
+    )
+    raise MutationNotStartedError(
+        "This Experimental image capability requires Xcode Command Line Tools.",
+        code="unsupported_capability",
+        reason_code="compiler_required",
+        capability=capability,
+    )
+
+
+def require_private_helper_compiler() -> Path:
+    """Return the fixed selected clang path or fail before helper preparation."""
+
+    compiler_probe = resolve_selected_clang()
+    if compiler_probe.compiler_path is not None:
+        return compiler_probe.compiler_path
+    raise MutationNotStartedError(
+        "This Experimental helper requires selected Xcode Command Line Tools.",
+        code="unsupported_capability",
+        reason_code="compiler_required",
+        compiler_probe=compiler_probe.reason_code,
+    )
+
+
 def usable_dbs() -> list[Path]:
     paths: list[Path] = []
     for db in sorted(STORES.glob("*.sqlite")):
         try:
-            con = connect(db)
+            con = connect_read_only(db)
             try:
                 if REQUIRED_TABLES <= table_names(con):
                     paths.append(db)
@@ -546,7 +703,7 @@ def usable_dbs() -> list[Path]:
 
 
 def db_counts(db: Path) -> dict[str, int | None]:
-    con = connect(db)
+    con = connect_read_only(db)
     try:
         counts = {
             "lists": con.execute(
@@ -1625,6 +1782,7 @@ def reminderkit_attach_helper() -> Path:
     source = Path(__file__).resolve().with_name("remkit_attach_image.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit helper source not found: {source.name}")
+    clang = require_private_helper_compiler()
     helper = CACHE_DIR / "remkit_attach_image"
     ensure_private_dir(CACHE_DIR)
     lock_path = CACHE_DIR / "remkit_attach_image.lock"
@@ -1638,9 +1796,6 @@ def reminderkit_attach_helper() -> Path:
         )
         if not needs_build:
             return helper
-        clang = shutil.which("clang")
-        if not clang:
-            raise AdapterError("clang is required to build the ReminderKit attachment helper")
         temp_handle = tempfile.NamedTemporaryFile(
             prefix=".remkit_attach_image.",
             dir=CACHE_DIR,
@@ -1693,6 +1848,7 @@ def reminderkit_sections_helper() -> Path:
     source = Path(__file__).resolve().with_name("remkit_sections.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit section helper source not found: {source.name}")
+    clang = require_private_helper_compiler()
     helper = CACHE_DIR / "remkit_sections"
     ensure_private_dir(CACHE_DIR)
     lock_path = CACHE_DIR / "remkit_sections.lock"
@@ -1706,9 +1862,6 @@ def reminderkit_sections_helper() -> Path:
         )
         if not needs_build:
             return helper
-        clang = shutil.which("clang")
-        if not clang:
-            raise AdapterError("clang is required to build the ReminderKit section helper")
         temp_handle = tempfile.NamedTemporaryFile(
             prefix=".remkit_sections.",
             dir=CACHE_DIR,
@@ -1759,6 +1912,7 @@ def reminderkit_recover_helper() -> Path:
     source = Path(__file__).resolve().with_name("remkit_recover.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit recovery helper source not found: {source.name}")
+    clang = require_private_helper_compiler()
     helper = CACHE_DIR / "remkit_recover"
     ensure_private_dir(CACHE_DIR)
     lock_path = CACHE_DIR / "remkit_recover.lock"
@@ -1772,9 +1926,6 @@ def reminderkit_recover_helper() -> Path:
         )
         if not needs_build:
             return helper
-        clang = shutil.which("clang")
-        if not clang:
-            raise AdapterError("clang is required to build the ReminderKit recovery helper")
         temp_handle = tempfile.NamedTemporaryFile(
             prefix=".remkit_recover.", dir=CACHE_DIR, delete=False
         )
@@ -3222,6 +3373,9 @@ def cmd_recover_deleted_reminder(args: argparse.Namespace) -> int:
         },
         callback=lambda: recover_deleted_reminder_once(args),
     )
+    runtime_capability = getattr(args, "_experimental_capability", None)
+    if isinstance(runtime_capability, dict):
+        result.setdefault("capability", runtime_capability)
     json_out(result)
     return 0 if result.get("status") in SUCCESS_RECEIPT_STATUSES else 1
 
@@ -3284,7 +3438,9 @@ def cmd_add_tag(args: argparse.Namespace) -> int:
     operation_id = new_operation_id()
     con = connect(db)
     try:
-        capability = require_command_capability(con, "tag_assignment_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "tag_assignment_db")
+        )
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
@@ -3426,7 +3582,9 @@ def cmd_remove_tag(args: argparse.Namespace) -> int:
     operation_id = new_operation_id()
     con = connect(db)
     try:
-        capability = require_command_capability(con, "tag_assignment_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "tag_assignment_db")
+        )
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
@@ -3560,7 +3718,9 @@ def cmd_create_section_reminderkit(args: argparse.Namespace) -> int:
     db = resolve_database(None)
     con = connect(db)
     try:
-        capability = require_command_capability(con, "create_section_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "create_section_db")
+        )
         list_row = find_list(con, name=args.list, list_id=args.list_id)
         existing_row = con.execute(
             """
@@ -3732,7 +3892,9 @@ def cmd_create_section(args: argparse.Namespace) -> int:
     db = resolve_database(args.db, write=True)
     con = connect(db)
     try:
-        capability = require_command_capability(con, "create_section_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "create_section_db")
+        )
         con.execute("begin immediate")
         list_row = find_list(con, name=args.list, list_id=args.list_id)
         existing = con.execute(
@@ -3871,7 +4033,9 @@ def cmd_move_to_section_reminderkit(args: argparse.Namespace) -> int:
     db = resolve_database(None)
     con = connect(db)
     try:
-        capability = require_command_capability(con, "move_to_section_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "move_to_section_db")
+        )
         reminder = find_reminder(
             con,
             reminder_id=args.id,
@@ -4047,7 +4211,9 @@ def cmd_move_to_section(args: argparse.Namespace) -> int:
     operation_id = new_operation_id()
     con = connect(db)
     try:
-        capability = require_command_capability(con, "move_to_section_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "move_to_section_db")
+        )
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
@@ -4519,7 +4685,9 @@ def attach_image_once(args: argparse.Namespace) -> dict[str, Any]:
     image = Path(args.image).expanduser().resolve()
     con = connect(db)
     try:
-        capability = require_command_capability(con, "attachment_mutation_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "attachment_mutation_db")
+        )
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
             reminder,
@@ -4744,7 +4912,9 @@ def copy_image_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
     pending_warning: dict[str, Any] | None = None
     pending_error: dict[str, Any] | None = None
     try:
-        capability = require_command_capability(con, "attachment_mutation_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "attachment_mutation_db")
+        )
         source = find_reminder(con, reminder_id=source_id)
         destination = find_reminder(con, reminder_id=destination_id)
         require_reminder_version(source, args.if_source_version, required=True)
@@ -5031,7 +5201,9 @@ def cmd_attach_url(args: argparse.Namespace) -> int:
     operation_id = new_operation_id()
     con = connect(db)
     try:
-        capability = require_command_capability(con, "attachment_mutation_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "attachment_mutation_db")
+        )
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
@@ -5144,7 +5316,9 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
     con: sqlite3.Connection | None = connect(db)
     native_removal_verified = False
     try:
-        capability = require_command_capability(con, "attachment_mutation_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "attachment_mutation_db")
+        )
         con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
         require_reminder_version(
@@ -5170,6 +5344,7 @@ def cmd_delete_attachment(args: argparse.Namespace) -> int:
             )
         before_attachment = attachment_payload(selected)
         if int(selected["Z_ENT"]) == IMAGE_ATTACHMENT_ENT:
+            require_image_helper_compiler(args)
             con.rollback()
             con.close()
             con = None
@@ -5300,7 +5475,9 @@ def replace_attachment_once(args: argparse.Namespace) -> dict[str, Any]:
     committed = False
     native_removal_verified = False
     try:
-        capability = require_command_capability(con, "attachment_mutation_db")
+        capability = receipt_capability(
+            args, require_command_capability(con, "attachment_mutation_db")
+        )
         if args.url:
             con.execute("begin immediate")
         reminder = find_reminder(con, reminder_id=args.id, title=args.title, list_name=args.list)
@@ -5879,6 +6056,7 @@ def main(argv: list[str] | None = None) -> int:
             args.image = str(validated_image.path)
             args._validated_image = validated_image
             args._validated_image_sha256 = validated_image.sha256
+        preflight_experimental_command(args)
         return args.func(args)
     except AdapterError as exc:
         if getattr(args, "command", None) in MUTATION_COMMANDS:

@@ -19,6 +19,7 @@ SPEC = importlib.util.spec_from_file_location("reminders_doctor", DOCTOR_PATH)
 assert SPEC and SPEC.loader
 reminders_doctor = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reminders_doctor)
+import experimental_capabilities  # noqa: E402
 
 
 DARWIN_INFO = {
@@ -27,6 +28,11 @@ DARWIN_INFO = {
     "kernel_release": "25.5.0",
     "machine": "arm64",
     "python_version": "3.14.6",
+}
+DARWIN_ALLOWLISTED_INFO = {
+    **DARWIN_INFO,
+    "macos_version": "26.5.2",
+    "macos_build": "25F84",
 }
 
 
@@ -41,6 +47,18 @@ def fake_which(command: str) -> str | None:
         f"/usr/bin/{command}"
         if command in {"clang", "xcode-select"}
         else None
+    )
+
+
+def fake_toolchain_resolver(
+) -> experimental_capabilities.DeveloperToolchainProbe:
+    return experimental_capabilities.DeveloperToolchainProbe(
+        Path(
+            "/Selected/Developer/Toolchains/"
+            "XcodeDefault.xctoolchain/usr/bin/clang"
+        ),
+        "compiler_available",
+        True,
     )
 
 
@@ -112,9 +130,13 @@ class DoctorFixture:
             table: set() for table in reminders_doctor.REQUIRED_TABLES
         }
         schema["ZREMCDACCOUNT"] = {"Z_PK", "ZNAME"}
-        for requirements in reminders_doctor.COMMAND_SCHEMA_REQUIREMENTS.values():
-            for table, columns in requirements.items():
-                schema.setdefault(table, set()).update(columns)
+        for profile in (
+            reminders_doctor.COMMAND_SCHEMA_REQUIREMENTS,
+            reminders_doctor.RUNTIME_COMMAND_SCHEMA_REQUIREMENTS,
+        ):
+            for requirements in profile.values():
+                for table, columns in requirements.items():
+                    schema.setdefault(table, set()).update(columns)
         return schema
 
     @classmethod
@@ -272,42 +294,35 @@ class ContentFreeSchemaTests(unittest.TestCase):
 
 
 class StaticDependencyTests(unittest.TestCase):
-    def test_missing_developer_directory_never_invokes_clang_shim(self) -> None:
-        commands: list[list[str]] = []
-
-        def runner(
-            argv: list[str], *, timeout: float = 20.0
-        ) -> subprocess.CompletedProcess[str]:
-            commands.append(argv)
-            if argv == ["/usr/bin/xcode-select", "-p"]:
-                return subprocess.CompletedProcess(
-                    argv,
-                    2,
-                    "",
-                    "xcode-select: error: unable to get active developer directory",
-                )
-            raise AssertionError(f"unexpected developer tool invocation: {argv}")
-
-        def which(command: str) -> str | None:
-            return {
-                "xcode-select": "/usr/bin/xcode-select",
-                "clang": "/usr/bin/clang",
-            }.get(command)
-
+    def test_unselected_developer_directory_never_invokes_clang(self) -> None:
+        runner = mock.Mock(
+            side_effect=AssertionError("clang syntax check must not run")
+        )
+        unavailable = experimental_capabilities.DeveloperToolchainProbe(
+            None,
+            "developer_directory_unselected",
+            True,
+        )
         with tempfile.TemporaryDirectory() as temporary:
             fixture = DoctorFixture(Path(temporary))
             result = reminders_doctor.inspect_helper_toolchain(
                 fixture.paths,
                 syntax_check=True,
-                which=which,
                 runner=runner,
+                toolchain_resolver=lambda: unavailable,
             )
 
-        self.assertEqual(commands, [["/usr/bin/xcode-select", "-p"]])
         self.assertEqual(result["status"], "warning")
-        self.assertEqual(result["code"], "developer_tools_unavailable")
-        self.assertFalse(result["details"]["syntax_check"]["attempted"])
+        self.assertEqual(result["code"], "helper_build_prerequisites_missing")
+        self.assertEqual(
+            result["details"]["clang"]["probe_reason"],
+            "developer_directory_unselected",
+        )
+        self.assertTrue(
+            result["details"]["developer_tools"]["selection_check_attempted"]
+        )
         self.assertFalse(result["details"]["developer_tools"]["install_requested"])
+        runner.assert_not_called()
 
     def test_static_command_uses_explicit_diagnostic_output_budgets(self) -> None:
         completed = subprocess.CompletedProcess(["clang"], 0, "", "")
@@ -363,7 +378,9 @@ class StaticDependencyTests(unittest.TestCase):
 
                 result = reminders_doctor.inspect_helper_toolchain(
                     fixture.paths,
+                    syntax_check=True,
                     which=fake_which,
+                    toolchain_resolver=fake_toolchain_resolver,
                     runner=failing_runner,
                 )
 
@@ -383,15 +400,21 @@ class StaticDependencyTests(unittest.TestCase):
             fixture = DoctorFixture(Path(temporary))
             result = reminders_doctor.inspect_helper_toolchain(
                 fixture.paths,
+                syntax_check=True,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=runner,
             )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(len(commands), 2)
-        self.assertEqual(commands[0], ["/usr/bin/xcode-select", "-p"])
-        self.assertIn("-fsyntax-only", commands[1])
-        self.assertNotIn("-o", commands[1])
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            commands[0][0],
+            "/Selected/Developer/Toolchains/"
+            "XcodeDefault.xctoolchain/usr/bin/clang",
+        )
+        self.assertIn("-fsyntax-only", commands[0])
+        self.assertNotIn("-o", commands[0])
         self.assertFalse(
             result["details"]["syntax_check"]["mutating_build_attempted"]
         )
@@ -411,7 +434,9 @@ class StaticDependencyTests(unittest.TestCase):
             fixture = DoctorFixture(Path(temporary))
             result = reminders_doctor.inspect_helper_toolchain(
                 fixture.paths,
+                syntax_check=True,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=failing_runner,
             )
             encoded = json.dumps(result)
@@ -450,6 +475,7 @@ class PermissionAndAccountTests(unittest.TestCase):
                 fixture.paths,
                 system_info=DARWIN_INFO,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=runner,
             )
 
@@ -531,12 +557,18 @@ class LocalArtifactTests(unittest.TestCase):
 class ReportContractTests(unittest.TestCase):
     def test_default_report_declares_runtime_boundaries_without_processes(self) -> None:
         commands: list[list[str]] = []
+        resolver_calls: list[bool] = []
 
         def forbidden_runner(
             argv: list[str], *, timeout: float = 20.0
         ) -> subprocess.CompletedProcess[str]:
             commands.append(argv)
             raise AssertionError(f"metadata-only Doctor executed a process: {argv}")
+
+        def forbidden_resolver(
+        ) -> experimental_capabilities.DeveloperToolchainProbe:
+            resolver_calls.append(True)
+            raise AssertionError("metadata-only Doctor probed the developer toolchain")
 
         with tempfile.TemporaryDirectory() as temporary:
             fixture = DoctorFixture(Path(temporary))
@@ -545,9 +577,11 @@ class ReportContractTests(unittest.TestCase):
                 system_info=DARWIN_INFO,
                 which=fake_which,
                 runner=forbidden_runner,
+                toolchain_resolver=forbidden_resolver,
             )
 
         self.assertEqual(commands, [])
+        self.assertEqual(resolver_calls, [])
         self.assertEqual(
             report["execution"],
             {
@@ -590,6 +624,102 @@ class ReportContractTests(unittest.TestCase):
             boundaries["compiler_required_private"]["requires_command_line_tools"]
         )
 
+    def test_experimental_diagnosis_fails_closed_across_usable_stores(
+        self,
+    ) -> None:
+        evidence = experimental_capabilities.COMPATIBILITY_ALLOWLIST[
+            "url_attachment_mutation"
+        ][0]
+        fingerprint = next(iter(evidence.schema_fingerprints))
+
+        def runtime_schema(value: str) -> dict[str, dict[str, object]]:
+            return {
+                "attachment_mutation_db": {
+                    "supported": True,
+                    "schema_fingerprint": value,
+                }
+            }
+
+        checks = {
+            "platform": {"details": DARWIN_ALLOWLISTED_INFO},
+            "reminders_app": {
+                "details": {"version": "7.0", "build": "3976"}
+            },
+            "store_access": {
+                "details": {
+                    "databases": [
+                        {
+                            "status": "ok",
+                            "runtime_admission_schema": runtime_schema(fingerprint),
+                        },
+                        {
+                            "status": "ok",
+                            "runtime_admission_schema": runtime_schema("0" * 64),
+                        },
+                    ]
+                }
+            },
+        }
+
+        capabilities = reminders_doctor._diagnostic_experimental_capabilities(
+            checks, helper_ready=True
+        )
+
+        url = capabilities["url_attachment_mutation"]
+        self.assertFalse(url["available"])
+        self.assertEqual(url["reason_code"], "schema_fingerprint_mismatch")
+
+    def test_support_boundary_keeps_core_independent_and_reports_schema_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            report = reminders_doctor.collect_report(
+                fixture.paths,
+                system_info=DARWIN_ALLOWLISTED_INFO,
+                syntax_check=True,
+                which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
+                runner=fake_runner,
+            )
+
+        stable = report["capabilities"]["stable_core"]
+        image = report["capabilities"]["experimental_internals"][
+            "image_attachment_mutation"
+        ]
+        tag = report["capabilities"]["experimental_internals"][
+            "tag_assignment_mutation"
+        ]
+        self.assertTrue(stable["available"])
+        self.assertEqual(stable["support_tier"], "stable_core")
+        self.assertFalse(image["available"])
+        self.assertEqual(image["build_compatibility"], "allowlisted")
+        self.assertEqual(image["reason_code"], "schema_fingerprint_mismatch")
+        self.assertEqual(tag["build_compatibility"], "no_evidence")
+        self.assertEqual(tag["reason_code"], "runtime_unverified")
+
+    def test_unknown_build_is_not_promoted_by_passing_static_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = DoctorFixture(Path(temporary))
+            report = reminders_doctor.collect_report(
+                fixture.paths,
+                system_info={
+                    **DARWIN_INFO,
+                    "macos_version": "26.6",
+                    "macos_build": "25G99",
+                },
+                which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
+                runner=fake_runner,
+            )
+
+        url = report["capabilities"]["experimental_internals"][
+            "url_attachment_mutation"
+        ]
+        self.assertFalse(url["available"])
+        self.assertEqual(url["reason_code"], "unsupported_build")
+        self.assertEqual(url["runtime_state"], "runtime_unverified")
+
     def test_missing_canonical_framework_paths_require_a_runtime_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = DoctorFixture(Path(temporary))
@@ -604,6 +734,7 @@ class ReportContractTests(unittest.TestCase):
                 fixture.paths,
                 system_info=DARWIN_INFO,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=fake_runner,
             )
 
@@ -628,6 +759,7 @@ class ReportContractTests(unittest.TestCase):
                 fixture.paths,
                 system_info=DARWIN_INFO,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=fake_runner,
             )
 
@@ -681,6 +813,7 @@ class ReportContractTests(unittest.TestCase):
                 system_info=DARWIN_INFO,
                 syntax_check=True,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=failing_runner,
             )
 
@@ -706,6 +839,7 @@ class ReportContractTests(unittest.TestCase):
                 fixture.paths,
                 system_info=DARWIN_INFO,
                 which=fake_which,
+                toolchain_resolver=fake_toolchain_resolver,
                 runner=fake_runner,
             )
 

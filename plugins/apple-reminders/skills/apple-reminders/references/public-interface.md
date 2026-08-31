@@ -2,6 +2,11 @@
 
 Use these MCP tools directly. The adapter, EventKit bridge, ReminderKit helpers, and private store are implementation details; do not invoke their writes as fallbacks.
 
+Core is the Stable, documented EventKit tier. Sections, tag assignments, native
+attachments, and Recently Deleted are Experimental Internals. Before an
+Experimental mutation, targeted diagnosis must report the exact capability as
+available; blocked build/schema/compiler results are terminal no-write outcomes.
+
 ## Core
 
 - `request_reminders_access {}`: explicitly request macOS Reminders access once.
@@ -50,9 +55,17 @@ A returned relative alarm without `read_only:true` is in the faithful writable s
 
 The deleted item's `account_id` and a destination Reminder List's `source.id` identify the same account boundary used by recovery. Compare those exact values before choosing among duplicate list titles.
 
-This recovery surface is bounded by the local 30-day Recently Deleted retention window and depends on compatible private ReminderKit frameworks and local Reminders store schema. It is macOS-only and version-sensitive. A successful local UI observation or recovery run is evidence for that Mac and moment, not a generic platform, account, iCloud, or iPhone guarantee.
+This recovery surface is bounded by the local 30-day Recently Deleted retention
+window and depends on an exact allowlisted macOS/Reminders build, recovery schema
+fingerprint, Command Line Tools for exact inspection/recovery, and compatible
+private frameworks. A successful run is evidence for that exact environment and
+moment, not a generic platform, account, iCloud, or iPhone guarantee.
 
 ## Native Extension
+
+These tools are Experimental. Prefer separate Reminder Lists or textual
+grouping for sections/tags, note links for URLs, and note descriptions/links for
+images. Use the native actions only for explicit intent after targeted diagnosis.
 
 - `inspect_reminder_native`: use `kind=reminder` with a reference and requested `include` values; `kind=sections` with exact `list_id`; or `kind=tags` with an optional account/query bound.
 - `create_reminder_section {list_id, name}`: create or repair one exact-list section with native read-back evidence.
@@ -76,16 +89,16 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 | Resource | Public operations | Intentional boundary |
 | --- | --- | --- |
-| Reminder | list/read/create/change/complete/move/delete; exact Recently Deleted recovery | no title-only mutation or bulk write without bounded review |
+| Reminder | Stable list/read/create/change/complete/move/delete; Experimental exact Recently Deleted recovery | no title-only mutation or bulk write without bounded review |
 | Reminder List | list and exact-account create-or-return | no rename, delete, color, or emblem write |
-| Section | exact-list inspect/create and Reminder move | no rename or delete; names are list-scoped |
-| Tag | bounded inspect and exact Reminder assignment add/remove | no global unused-label row deletion |
-| Attachment | inspect metadata; attach/copy/replace/delete closed actions | no raw export/download, private path disclosure, or bulk repair apply |
+| Section | Experimental exact-list inspect/create and Reminder move | prefer list/text grouping; no rename or delete |
+| Tag | Experimental bounded inspect and exact assignment add/remove | prefer text labels; no global unused-label row deletion |
+| Attachment | Experimental inspect/attach/copy/replace/delete | prefer notes; no raw export/download, private path disclosure, or bulk repair apply |
 | Due/alarm/recurrence | typed due; absolute, due-anchored relative, or coordinate-backed location alarms; one validated recurrence rule | relative alarms require a due value; no invented or messaging alarm |
 
 ## Diagnostics
 
-`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area. Use it only after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only the explicit `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; it never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
+`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area, support tier, compiler requirement, build/schema compatibility, runtime state, and precise block reason. Use it before an explicitly requested Experimental mutation or after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only explicit `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; it never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
 
 ## Receipt rules
 

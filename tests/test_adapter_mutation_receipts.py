@@ -497,6 +497,9 @@ class MutationReceiptTests(unittest.TestCase):
             seed_catalog_fixture(database)
             with (
                 mock.patch.object(adapter, "resolve_database", return_value=database),
+                mock.patch.object(
+                    adapter, "preflight_experimental_command", return_value=None
+                ),
                 mock.patch.object(adapter, "json_out") as output,
             ):
                 exit_code = adapter.main(

@@ -18,6 +18,8 @@ from mcp.v2_recovery import (
     DeletedSnapshot,
     RecoveryFacade,
     RecoveryOutcome,
+    recovery_error_message,
+    recovery_reason_code,
 )
 from mcp.v2_recovery_backend import RecoveryBackend
 from mcp.v2_transport import DispatchCertainty, TransportResult
@@ -211,6 +213,24 @@ class RecoveryFacadeTests(unittest.TestCase):
             token_source=lambda: next(tokens),
             clock=lambda: self.now[0],
         )
+
+    def test_runtime_admission_reasons_remain_precise_and_path_free(self) -> None:
+        cases = (
+            ("unsupported_capability", "runtime_unverified"),
+            ("unsupported_capability", "unsupported_build"),
+            ("unsupported_capability", "compiler_required"),
+            ("schema_mismatch", "schema_unverified"),
+            ("schema_mismatch", "schema_fingerprint_mismatch"),
+        )
+        for code, reason_code in cases:
+            with self.subTest(code=code, reason_code=reason_code):
+                self.assertEqual(
+                    recovery_reason_code(code, reason_code),
+                    reason_code,
+                )
+                message = recovery_error_message(code, reason_code)
+                self.assertTrue(message)
+                self.assertNotIn("/Users/", message)
 
     def test_list_is_bounded_and_never_issues_recovery_reference(self) -> None:
         result = self.facade.call(

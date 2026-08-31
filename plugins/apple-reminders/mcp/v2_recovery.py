@@ -34,6 +34,7 @@ RECOVERY_PUBLIC_REASON_CODES = frozenset(
         "adapter_unavailable",
         "concurrent_modification",
         "cross_account_restore_not_supported",
+        "compiler_required",
         "database_resolution_failed",
         "deleted_image_bytes_mismatch",
         "deleted_image_bytes_unavailable",
@@ -61,6 +62,10 @@ RECOVERY_PUBLIC_REASON_CODES = frozenset(
         "recovery_not_dispatched",
         "recovery_post_write_verification_failed",
         "recovery_readback_mismatch",
+        "runtime_unverified",
+        "schema_fingerprint_mismatch",
+        "schema_unverified",
+        "unsupported_build",
     }
 )
 RECOVERY_DEFAULT_REASON_BY_CODE = {
@@ -183,6 +188,12 @@ def recovery_error_message(code: str, reason_code: str) -> str:
     if code == "permission_denied":
         return "Reminders access is unavailable for this local operation."
     if code == "unsupported_capability":
+        if reason_code == "unsupported_build":
+            return "This macOS and Reminders build is unsupported for Recently Deleted."
+        if reason_code == "runtime_unverified":
+            return "Exact runtime compatibility is unverified for Recently Deleted."
+        if reason_code == "compiler_required":
+            return "Recently Deleted requires Xcode Command Line Tools on this build."
         return "Recently Deleted recovery is unsupported in this local environment."
     if code == "invalid_input":
         return "The Recently Deleted request is invalid."
@@ -191,6 +202,10 @@ def recovery_error_message(code: str, reason_code: str) -> str:
     if code == "sync_pending":
         return "Recovery needs a fresh exact read before another mutation."
     if code == "schema_mismatch":
+        if reason_code == "schema_fingerprint_mismatch":
+            return "The local Recently Deleted schema fingerprint is not allowlisted."
+        if reason_code == "schema_unverified":
+            return "The local Recently Deleted schema lacks the exact verified contract."
         return "The local Recently Deleted schema is incompatible with this plugin build."
     return "The local Recently Deleted operation failed without a safe public detail."
 
