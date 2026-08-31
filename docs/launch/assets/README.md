@@ -4,7 +4,8 @@
 1200×630 GitHub social preview. It was derived from the reviewed project-owned
 cover with OpenAI image editing, resized to the exact target dimensions, and
 visually checked for exact copy, safe margins, and thumbnail legibility. Its
-SHA-256 is:
+source commit is `9e86c384ce9463df3e97b2cb88441c7341fde033`. Its SHA-256
+is:
 
 ```text
 91a3f60e194eab13c1dc04a89492d3b13fdc83d24e002a5dc0a94e73c48ed140

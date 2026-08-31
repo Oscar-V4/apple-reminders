@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "plugin_ref": "v0.5.2",
+  "codex_version": "0.1.0",
+  "hardware": "apple_silicon",
+  "macos_version": "14.7",
+  "python": {
+    "version": "3.12.10",
+    "source": "homebrew"
+  },
+  "xcode": "absent",
+  "command_line_tools": "absent",
+  "scenario": "fresh_core_allow",
+  "tcc_precondition": "not_determined",
+  "tcc_result": "granted_after_prompt",
+  "checks": [
+    {
+      "id": "install",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "release_verification",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "permission_allow",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "core_bounded_read",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "core_synthetic_crud",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "core_canonical_alarm",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "exact_cleanup",
+      "outcome": "passed",
+      "error_category": "none"
+    }
+  ],
+  "synthetic_data_only": true,
+  "exact_cleanup": "passed"
+}

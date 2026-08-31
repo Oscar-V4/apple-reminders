@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Oscar-V4/apple-reminders/main/docs/launch/external-tester-receipt.schema.json",
+  "title": "Apple Reminders external beta tester redacted receipt",
+  "description": "A closed, content-free receipt for one synthetic external beta scenario.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plugin_ref",
+    "codex_version",
+    "hardware",
+    "macos_version",
+    "python",
+    "xcode",
+    "command_line_tools",
+    "scenario",
+    "tcc_precondition",
+    "tcc_result",
+    "checks",
+    "synthetic_data_only",
+    "exact_cleanup"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "plugin_ref": {
+      "type": "string",
+      "pattern": "^(v[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?|[0-9a-f]{40})$",
+      "maxLength": 64
+    },
+    "codex_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$",
+      "maxLength": 64
+    },
+    "hardware": {
+      "type": "string",
+      "enum": [
+        "apple_silicon",
+        "intel"
+      ]
+    },
+    "macos_version": {
+      "type": "string",
+      "pattern": "^(14|1[5-9]|[2-9][0-9])(?:\\.[0-9]+){0,2}$",
+      "maxLength": 16
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "source"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^3\\.(1[1-9]|[2-9][0-9])(?:\\.[0-9]+){0,2}$",
+          "maxLength": 16
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "homebrew",
+            "python_org",
+            "system",
+            "pyenv",
+            "other"
+          ]
+        }
+      }
+    },
+    "xcode": {
+      "type": "string",
+      "enum": [
+        "absent",
+        "installed",
+        "not_checked"
+      ]
+    },
+    "command_line_tools": {
+      "type": "string",
+      "enum": [
+        "absent",
+        "installed",
+        "not_checked"
+      ]
+    },
+    "scenario": {
+      "type": "string",
+      "enum": [
+        "fresh_core_allow",
+        "fresh_core_deny",
+        "intel_core",
+        "minimum_macos_core",
+        "upgrade_identity",
+        "clt_only_experimental"
+      ]
+    },
+    "tcc_precondition": {
+      "type": "string",
+      "enum": [
+        "not_determined",
+        "granted",
+        "denied",
+        "changed_in_settings",
+        "not_checked"
+      ]
+    },
+    "tcc_result": {
+      "type": "string",
+      "enum": [
+        "granted_after_prompt",
+        "granted_without_prompt",
+        "denied",
+        "unchanged",
+        "not_checked"
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 11,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "outcome",
+          "error_category"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "install",
+              "release_verification",
+              "permission_allow",
+              "permission_deny_no_retry",
+              "core_bounded_read",
+              "core_synthetic_crud",
+              "core_canonical_alarm",
+              "upgrade_identity",
+              "experimental_capability",
+              "experimental_synthetic_mutation",
+              "exact_cleanup"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "blocked",
+              "not_run"
+            ]
+          },
+          "error_category": {
+            "type": "string",
+            "enum": [
+              "none",
+              "not_run",
+              "permission_required",
+              "permission_denied",
+              "unsupported_environment",
+              "helper_unavailable",
+              "capability_unavailable",
+              "runtime_unverified",
+              "unsupported_build",
+              "compiler_required",
+              "schema_unverified",
+              "schema_fingerprint_mismatch",
+              "unsupported_capability",
+              "schema_mismatch",
+              "invalid_request",
+              "stale_reference",
+              "verification_pending",
+              "partial_success",
+              "cleanup_failed",
+              "unexpected_failure"
+            ]
+          }
+        }
+      }
+    },
+    "synthetic_data_only": {
+      "type": "boolean",
+      "const": true
+    },
+    "exact_cleanup": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "not_run"
+      ]
+    }
+  }
+}
