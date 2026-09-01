@@ -818,10 +818,6 @@ jobs:
               raise SystemExit("release subjects do not share one exact attestation")
           PY
 
-          [[ "$(
-            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "/repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'
-          )" == "true" ]]
           [[ "$(gh release create --help)" == *"Immutable Releases"* ]]
           [[ "$(gh release view --help)" == *"isImmutable"* ]]
           gh release verify --help >/dev/null
@@ -842,6 +838,20 @@ jobs:
             --target "$EXPECTED_TAG_COMMIT" \
             --title "Apple Reminders $RELEASE_TAG" \
             --generate-notes
+
+          published_immutable="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isImmutable \
+              --jq '.isImmutable'
+          )"
+          if [[ "$published_immutable" != "true" ]]; then
+            gh release delete "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+            printf 'published release was mutable and has been deleted\n' >&2
+            exit 1
+          fi
 
   verify_published_release:
     name: Redownload and independently verify published release

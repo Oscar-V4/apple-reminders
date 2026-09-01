@@ -185,6 +185,17 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
             '[[ "$(gh release view --help)" == *"isImmutable"* ]]',
         ):
             self.assertIn(evidence, boundary)
+        self.assertNotIn("/immutable-releases", self.publish)
+
+        post_create = self.publish[publish:]
+        for evidence in (
+            'published_immutable="$(\n            gh release view "$RELEASE_TAG"',
+            "--json isImmutable",
+            'if [[ "$published_immutable" != "true" ]]; then',
+            'gh release delete "$RELEASE_TAG"',
+            "published release was mutable and has been deleted",
+        ):
+            self.assertIn(evidence, post_create)
 
     def test_published_release_is_redownloaded_and_independently_verified(self) -> None:
         self.assertIn("needs: publish_release", self.post_publish)
