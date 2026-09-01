@@ -26,7 +26,9 @@ The command does not access Apple Reminders or local Reminder data. It:
    other inventory, and checks both GitHub asset digests and the exact checksum
    statement;
 3. runs `gh release verify` and requires a GitHub immutable-release attestation
-   for the exact tag, commit, two asset names, and two SHA-256 digests;
+   for the exact tag object, two asset names, and two SHA-256 digests; the
+   separately resolved peeled commit remains bound by the release metadata and
+   source-history checks;
 4. runs `gh attestation verify` separately for the ZIP and `SHA256SUMS`, while
    enforcing the `release.yml` signer workflow, its exact tag commit and ref,
    GitHub-hosted runner identity, SLSA provenance predicate, and one shared
@@ -52,8 +54,12 @@ The tag workflow keeps four permission domains separate:
   one SLSA statement for the ZIP and checksum file;
 - only the publication job has `contents: write`; it downloads the immutable
   run artifact again, verifies both SLSA lookups and their shared statement,
-  requires immutable releases to be enabled, and rechecks tag object, peeled
-  commit, inventory, and digests immediately before `gh release create`; and
+  and rechecks tag object, peeled commit, inventory, and digests immediately
+  before `gh release create`. Repository administrators enable immutable
+  releases before the tag is pushed because the job token cannot read the
+  administration-only setting endpoint. Immediately after publication, the
+  job requires `isImmutable:true`; if GitHub reports a mutable release, it
+  deletes that exact release and fails closed; and
 - a final read-only macOS job downloads the published assets and runs the
   canonical command above. GitHub CLI internally stages attached assets on a
   draft before publishing when release immutability is enabled.
@@ -74,10 +80,11 @@ hardening intentionally adds no long-lived signing secret to Actions. Therefore
 
 The repository's active `v*` ruleset already rejects tag update and deletion.
 For future publications, immutable releases additionally lock the tag and
-assets after publication and GitHub signs a release attestation over the tag,
-commit, and exact asset digests. The repository-generated SLSA attestations add
-the exact `release.yml` workflow identity. Together those are the no-new-secret
-authenticity path.
+assets after publication and GitHub signs a release attestation over the exact
+tag object and asset digests. The separately verified release metadata and
+repository history bind the peeled commit. The repository-generated SLSA
+attestations add the exact `release.yml` workflow identity. Together those are
+the no-new-secret authenticity path.
 
 ## Node 24 migration for the provenance-bound helper workflow
 

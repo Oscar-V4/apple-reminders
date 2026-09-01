@@ -21,6 +21,7 @@ import verify_release_assets  # noqa: E402
 TAG = "v1.2.3"
 VERSION = "1.2.3"
 COMMIT = "a" * 40
+TAG_OBJECT = "d" * 40
 PACKAGE = f"apple-reminders-{VERSION}.zip"
 PACKAGE_DIGEST = "b" * 64
 CHECKSUMS_DIGEST = "c" * 64
@@ -177,7 +178,6 @@ class GitIdentityTests(unittest.TestCase):
     def test_identity_network_lookups_ignore_origin_and_use_canonical_git_url(
         self,
     ) -> None:
-        tag_object = "d" * 40
         tag_ref = f"refs/tags/{TAG}"
         git_calls: list[tuple[str, ...]] = []
 
@@ -191,8 +191,8 @@ class GitIdentityTests(unittest.TestCase):
                     "--refs",
                     verify_release_assets.CANONICAL_GIT_URL,
                     tag_ref,
-                ): f"{tag_object}\t{tag_ref}",
-                ("rev-parse", "--verify", tag_ref): tag_object,
+                ): f"{TAG_OBJECT}\t{tag_ref}",
+                ("rev-parse", "--verify", tag_ref): TAG_OBJECT,
                 ("rev-list", "-n", "1", tag_ref): COMMIT,
                 ("rev-parse", "HEAD"): COMMIT,
             }
@@ -218,7 +218,7 @@ class GitIdentityTests(unittest.TestCase):
             ):
                 identity = verify_release_assets.resolve_git_identity(TAG)
 
-        self.assertEqual(identity.tag_object, tag_object)
+        self.assertEqual(identity.tag_object, TAG_OBJECT)
         self.assertIn(
             (
                 "ls-remote",
@@ -304,7 +304,7 @@ class AttestationPolicyTests(unittest.TestCase):
                 },
             )
 
-    def test_release_attestation_binds_tag_commit_and_exact_assets(self) -> None:
+    def test_release_attestation_binds_tag_object_and_exact_assets(self) -> None:
         payload = {
             "verificationResult": {
                 "signature": {
@@ -318,7 +318,7 @@ class AttestationPolicyTests(unittest.TestCase):
                     "subject": [
                         {
                             "uri": f"pkg:github/{REPOSITORY}@{TAG}",
-                            "digest": {"sha1": COMMIT},
+                            "digest": {"sha1": TAG_OBJECT},
                         },
                         {"name": PACKAGE, "digest": {"sha256": PACKAGE_DIGEST}},
                         {
@@ -335,7 +335,7 @@ class AttestationPolicyTests(unittest.TestCase):
             payload,
             repository=REPOSITORY,
             tag=TAG,
-            tag_commit=COMMIT,
+            tag_object=TAG_OBJECT,
             asset_digests={
                 PACKAGE: PACKAGE_DIGEST,
                 "SHA256SUMS": CHECKSUMS_DIGEST,
@@ -344,7 +344,7 @@ class AttestationPolicyTests(unittest.TestCase):
 
         payload["verificationResult"]["statement"]["subject"][0]["digest"][
             "sha1"
-        ] = "e" * 40
+        ] = COMMIT
         with self.assertRaisesRegex(
             verify_release_assets.VerificationError,
             "tag subject drift",
@@ -353,7 +353,7 @@ class AttestationPolicyTests(unittest.TestCase):
                 payload,
                 repository=REPOSITORY,
                 tag=TAG,
-                tag_commit=COMMIT,
+                tag_object=TAG_OBJECT,
                 asset_digests={
                     PACKAGE: PACKAGE_DIGEST,
                     "SHA256SUMS": CHECKSUMS_DIGEST,

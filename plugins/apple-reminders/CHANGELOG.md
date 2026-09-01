@@ -4,6 +4,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+### Fixed
+
+- Bound GitHub immutable-release attestation verification to the exact tag
+  object rather than the peeled commit, matching annotated-tag subjects.
+- Replaced the publication job's inaccessible administration API preflight
+  with an immediate `isImmutable` read-back that deletes an accidentally
+  mutable release and fails closed.
+
 ## 0.5.2 — 2026-09-02
 
 ### Added

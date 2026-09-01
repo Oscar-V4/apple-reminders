@@ -327,10 +327,10 @@ def verify_release_attestation(
     *,
     repository: str,
     tag: str,
-    tag_commit: str,
+    tag_object: str,
     asset_digests: Mapping[str, str],
 ) -> None:
-    """Apply exact tag and asset policy after ``gh release verify`` succeeds."""
+    """Apply exact tag-object and asset policy after verification succeeds."""
 
     if isinstance(payload, list) and len(payload) == 1:
         payload = payload[0]
@@ -364,7 +364,7 @@ def verify_release_attestation(
     expected_uri = f"pkg:github/{repository}@{tag}"
     tag_subjects = [subject for subject in subjects if subject.get("uri") == expected_uri]
     if len(tag_subjects) != 1 or tag_subjects[0].get("digest") != {
-        "sha1": tag_commit
+        "sha1": tag_object
     }:
         raise VerificationError("release attestation tag subject drift")
     asset_subjects = [subject for subject in subjects if "name" in subject]
@@ -726,7 +726,7 @@ def verify_published_release(
             release_attestation,
             repository=repository,
             tag=tag,
-            tag_commit=identity.tag_commit,
+            tag_object=identity.tag_object,
             asset_digests=asset_digests,
         )
         verify_source_and_rebuild(release_root, identity)
