@@ -4,6 +4,8 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+## 0.5.2 — 2026-09-02
+
 ### Added
 
 - Added SLSA provenance for both final GitHub Release subjects: the
@@ -37,20 +39,6 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   authenticity proof, and the protected two-PR bootstrap required to migrate
   the seven provenance-bound helper artifact pins to Node 24 without making the
   current signed-helper manifest stale.
-
-### Fixed
-
-- Added an immutable exact macOS/Reminders build and command-schema allowlist
-  before every private mutation and exact recovery path. Missing metadata,
-  unknown builds, schema drift, and missing required Command Line Tools now fail
-  before private dispatch without disabling Stable Core.
-- Preserved partial native failure and recovery mismatch as explicit
-  pending/no-write outcomes instead of falling back or reporting success.
-
-## 0.5.2 — 2026-09-01
-
-### Changed
-
 - Consolidated existing-Reminder verification behind one canonical semantic
   projection in the native EventKit helper and public Core. Requested changes
   are combined with every stable user-authored field, while provider-owned or
@@ -62,6 +50,12 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
+- Added an immutable exact macOS/Reminders build and command-schema allowlist
+  before every private mutation and exact recovery path. Missing metadata,
+  unknown builds, schema drift, and missing required Command Line Tools now fail
+  before private dispatch without disabling Stable Core.
+- Preserved partial native failure and recovery mismatch as explicit
+  pending/no-write outcomes instead of falling back or reporting success.
 - Prevented title changes, completion/reopen actions, and Reminder List moves
   from reporting `verified` or issuing a new `rev1` when EventKit drops or
   transforms absolute, location, writable relative, or read-only alarms.
