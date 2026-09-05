@@ -1,0 +1,695 @@
+name: Prepare signed Python runtime from reviewed source
+run-name: Prepare Python runtime for ${{ inputs.source_commit }} from ${{ inputs.source_ref }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact full source branch ref
+        required: true
+        type: string
+      source_commit:
+        description: Exact lowercase full source branch-head commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: apple-reminders-release-signing
+  cancel-in-progress: false
+jobs:
+  test-and-build-unsigned-source:
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      source_commit: ${{ steps.build.outputs.source_commit }}
+      workflow_commit: ${{ steps.build.outputs.workflow_commit }}
+      unsigned_checksums_sha256: ${{ steps.build.outputs.unsigned_checksums_sha256 }}
+    env:
+      SOURCE_REF: ${{ inputs.source_ref }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      WORKFLOW_COMMIT: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Prove reviewed source, test and build unsigned candidates
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" && "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF" == "refs/heads/${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$SOURCE_REF" == refs/heads/* ]]
+          git check-ref-format "$SOURCE_REF"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.event.repository.default_branch }}:refs/remotes/origin/runtime-workflow-main" \
+            "+$SOURCE_REF:refs/remotes/origin/runtime-source"
+          [[ "$(git rev-parse refs/remotes/origin/runtime-workflow-main)" == "$WORKFLOW_COMMIT" ]]
+          [[ "$(git rev-parse refs/remotes/origin/runtime-source)" == "$SOURCE_COMMIT" ]]
+          git merge-base --is-ancestor "$WORKFLOW_COMMIT" "$SOURCE_COMMIT"
+          git diff --exit-code "$WORKFLOW_COMMIT" "$SOURCE_COMMIT" -- \
+            .github/workflows/prepare-signed-runtime-source.yml
+          python3 -m unittest discover -s tests -p 'test_*runtime*.py' -v
+          artifacts="$RUNNER_TEMP/runtime-unsigned"
+          [[ ! -e "$artifacts" ]]
+          mkdir -m 0755 "$artifacts"
+          for architecture in arm64 x86_64; do
+            python3 scripts/build_python_runtime.py --architecture "$architecture" \
+              --output-app "$RUNNER_TEMP/runtime-build-$architecture/AppleRemindersPythonRuntime.app" \
+              --write-manifest "$artifacts/python-runtime-build-$architecture.json" \
+              --write-archive "$artifacts/python-runtime-macos-$architecture.zip" \
+              --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT"
+            verify_args=(
+              --archive "$artifacts/python-runtime-macos-$architecture.zip"
+              --manifest "$artifacts/python-runtime-build-$architecture.json"
+              --architecture "$architecture"
+            )
+            if [[ "$(uname -m)" == "$architecture" ]]; then
+              verify_args+=(--run-probes --plugin-root plugins/apple-reminders)
+            fi
+            python3 scripts/verify_python_runtime.py "${verify_args[@]}"
+          done
+          (
+            cd "$artifacts"
+            shasum -a 256 python-runtime-build-arm64.json python-runtime-build-x86_64.json \
+              python-runtime-macos-arm64.zip python-runtime-macos-x86_64.zip > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+          {
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'workflow_commit=%s\n' "$WORKFLOW_COMMIT"
+            printf 'unsigned_checksums_sha256=%s\n' "$(shasum -a 256 "$artifacts/SHA256SUMS" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload immutable unsigned candidates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: runtime-unsigned-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-unsigned/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  sign-notarize-and-staple:
+    needs: test-and-build-unsigned-source
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment:
+      name: release-signing
+    permissions:
+      contents: read
+    outputs:
+      signed_checksums_sha256: ${{ steps.sign.outputs.signed_checksums_sha256 }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: runtime-unsigned-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-unsigned
+      - name: Validate candidates, sign, notarize, staple and destroy credentials
+        id: sign
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.workflow_commit }}
+          EXPECTED_UNSIGNED_CHECKSUMS_SHA256: ${{ needs.test-and-build-unsigned-source.outputs.unsigned_checksums_sha256 }}
+          APPLE_DEVELOPER_ID_P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_P12_B64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_B64: ${{ secrets.APPLE_NOTARY_KEY_P8_B64 }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" && "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF" == "refs/heads/${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$EXPECTED_UNSIGNED_CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$APPLE_TEAM_ID" == "V8347N9346" ]]
+          [[ "$APPLE_NOTARY_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]
+          [[ "$APPLE_NOTARY_ISSUER_ID" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
+          for name in APPLE_DEVELOPER_ID_P12_B64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_KEY_P8_B64; do
+            [[ -n "${!name:-}" ]]
+          done
+          unsigned="$RUNNER_TEMP/runtime-unsigned"
+          work="$RUNNER_TEMP/runtime-signing-work"
+          credentials="$RUNNER_TEMP/runtime-signing-credentials"
+          signed="$RUNNER_TEMP/runtime-signed"
+          [[ ! -e "$work" && ! -e "$credentials" && ! -e "$signed" ]]
+          mkdir -m 0700 "$work" "$credentials" "$signed"
+          keychain="$credentials/signing.keychain-db"
+          cleanup() {
+            set +e
+            if [[ -f "$credentials/original-keychains" ]]; then
+              restored=()
+              while IFS= read -r value; do
+                [[ -n "$value" ]] && restored+=("$value")
+              done < "$credentials/original-keychains"
+              if ((${#restored[@]})); then
+                security list-keychains -d user -s "${restored[@]}" >/dev/null 2>&1
+              fi
+            fi
+            security delete-keychain "$keychain" >/dev/null 2>&1
+            rm -rf "$credentials" "$work"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          # Trusted inline admission. Never execute source or candidate code here.
+          python3 - "$unsigned" "$work" <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+          from urllib.parse import quote
+
+          root, work = map(Path, sys.argv[1:])
+          app_name = "AppleRemindersPythonRuntime.app"
+          architectures = ("arm64", "x86_64")
+          names = sorted([f"python-runtime-build-{a}.json" for a in architectures]
+                         + [f"python-runtime-macos-{a}.zip" for a in architectures])
+          def fail(message):
+              raise SystemExit(message)
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def safe_relative(value):
+              if not isinstance(value, str) or not value or len(value) > 1024:
+                  fail("invalid runtime path")
+              if any(not re.fullmatch(r"[A-Za-z0-9_@.+-]+", part) or part in {".", ".."} for part in value.split("/")):
+                  fail("unsafe runtime path")
+              return PurePosixPath(value)
+          if root.is_symlink() or not root.is_dir() or {p.name for p in root.iterdir()} != set(names) | {"SHA256SUMS"}:
+              fail("unsigned artifact inventory drift")
+          for path in root.iterdir():
+              if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+                  fail("unsigned artifact is not a regular file")
+              limit = 100 * 1024 * 1024 if path.suffix == ".zip" else 16 * 1024 * 1024
+              if not 0 < path.stat().st_size <= limit:
+                  fail("unsigned artifact exceeds size limit")
+          if digest(root / "SHA256SUMS") != os.environ["EXPECTED_UNSIGNED_CHECKSUMS_SHA256"]:
+              fail("unsigned checksum digest drift")
+          if (root / "SHA256SUMS").read_text().splitlines() != [f"{digest(root / name)}  {name}" for name in names]:
+              fail("unsigned checksum inventory drift")
+          source_keys = {"scripts/build_python_runtime.py", "scripts/python_runtime_launcher.c",
+                         "scripts/python_runtime_info.plist", "scripts/python-runtime-lock.json",
+                         ".github/workflows/prepare-signed-runtime-source.yml"}
+          top_keys = {"schema_version", "architecture", "target_triple", "runtime_version", "runtime_build",
+                      "app_name", "bundle_identifier", "executable_relative_path", "source_commit", "workflow_commit",
+                      "source_input_sha256", "upstream", "normalization", "files", "directories", "macho_paths",
+                      "unsigned_archive_sha256", "unsigned_archive_bytes"}
+          macho_magic = {b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+                         b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
+          expected_macho = {
+              "Contents/MacOS/apple-reminders-python",
+              "Contents/Resources/python/bin/python3.13",
+              "Contents/Resources/python/lib/libpython3.13.dylib",
+              "Contents/Resources/python/lib/itcl4.3.8/libitcl4.3.8.dylib",
+              "Contents/Resources/python/lib/itcl4.3.8/libtcl9itcl4.3.8.dylib",
+              "Contents/Resources/python/lib/libtcl9.0.dylib",
+              "Contents/Resources/python/lib/libtcl9tk9.0.dylib",
+              "Contents/Resources/python/lib/python3.13/lib-dynload/_dbm.cpython-313-darwin.so",
+              "Contents/Resources/python/lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so",
+              "Contents/Resources/python/lib/thread3.0.6/libtcl9thread3.0.6.dylib",
+              "Contents/Resources/python/lib/thread3.0.6/libthread3.0.6.dylib",
+          }
+          for architecture in architectures:
+              manifest = json.loads((root / f"python-runtime-build-{architecture}.json").read_text())
+              archive = root / f"python-runtime-macos-{architecture}.zip"
+              expected = {"schema_version": 1, "architecture": architecture,
+                          "target_triple": ("aarch64" if architecture == "arm64" else "x86_64") + "-apple-darwin",
+                          "runtime_version": "3.13.15", "runtime_build": "20260901", "app_name": app_name,
+                          "bundle_identifier": "io.github.oscar-v4.apple-reminders.python-runtime",
+                          "executable_relative_path": "Contents/MacOS/apple-reminders-python",
+                          "source_commit": os.environ["SOURCE_COMMIT"], "workflow_commit": os.environ["WORKFLOW_COMMIT"],
+                          "unsigned_archive_sha256": digest(archive), "unsigned_archive_bytes": archive.stat().st_size}
+              if not isinstance(manifest, dict) or set(manifest) != top_keys:
+                  fail("unsigned manifest field inventory drift")
+              if any(manifest.get(key) != value for key, value in expected.items()):
+                  fail("unsigned manifest identity drift")
+              hashes = manifest["source_input_sha256"]
+              if not isinstance(hashes, dict) or set(hashes) != source_keys or any(
+                  not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values()
+              ):
+                  fail("unsigned source input inventory drift")
+              upstream = manifest["upstream"]
+              if not isinstance(upstream, dict) or set(upstream) != {"install_only_stripped", "full"}:
+                  fail("upstream inventory drift")
+              for pin in upstream.values():
+                  if not isinstance(pin, dict) or set(pin) != {"name", "url", "sha256", "bytes"}:
+                      fail("upstream pin inventory drift")
+                  safe_relative(pin["name"])
+                  if "/" in pin["name"] or pin["url"] != "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/" + quote(pin["name"], safe=""):
+                      fail("upstream source drift")
+                  if not re.fullmatch(r"[0-9a-f]{64}", str(pin["sha256"])) or type(pin["bytes"]) is not int or not 0 < pin["bytes"] <= 1024 * 1024 * 1024:
+                      fail("upstream pin is invalid")
+              normalization = manifest["normalization"]
+              if not isinstance(normalization, dict) or set(normalization) != {"omitted_symlinks", "dereferenced_symlinks"}:
+                  fail("runtime normalization inventory drift")
+              if normalization["omitted_symlinks"] != ["python/bin/python", "python/bin/python3"]:
+                  fail("runtime omission policy drift")
+              if not isinstance(normalization["dereferenced_symlinks"], list) or len(normalization["dereferenced_symlinks"]) > 1000:
+                  fail("runtime link normalization is invalid")
+              for name in normalization["dereferenced_symlinks"]:
+                  safe_relative(name)
+              files, directories = manifest["files"], manifest["directories"]
+              if not isinstance(files, list) or not 1 <= len(files) <= 10000 or not isinstance(directories, list) or len(directories) > 3000:
+                  fail("runtime inventory exceeds entry limit")
+              members = {app_name + "/": (0o40755, 0, None)}
+              file_entries = {}
+              for entry in directories:
+                  if not isinstance(entry, dict) or set(entry) != {"path", "mode"} or entry["mode"] != 0o755:
+                      fail("runtime directory metadata drift")
+                  path = safe_relative(entry["path"])
+                  if str(path) not in {"Contents", "Contents/MacOS", "Contents/Resources", "Contents/Resources/python", "Contents/Resources/upstream"} and not str(path).startswith(("Contents/Resources/python/", "Contents/Resources/upstream/")):
+                      fail("runtime directory outside allowed app tree")
+                  name = f"{app_name}/{path}/"
+                  if name in members:
+                      fail("duplicate runtime directory")
+                  members[name] = (0o40755, 0, None)
+              for name in members:
+                  if name != app_name + "/" and str(PurePosixPath(name).parent) + "/" not in members:
+                      fail("runtime directory lacks declared parent")
+              for entry in files:
+                  if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "bytes", "mode", "mach_o"}:
+                      fail("runtime file metadata drift")
+                  path = str(safe_relative(entry["path"]))
+                  if path not in {"Contents/Info.plist", "Contents/MacOS/apple-reminders-python"} and not path.startswith(("Contents/Resources/python/", "Contents/Resources/upstream/")):
+                      fail("runtime file outside allowed app tree")
+                  if entry["mode"] not in {0o644, 0o755} or type(entry["bytes"]) is not int or not 0 <= entry["bytes"] <= 50 * 1024 * 1024:
+                      fail("runtime file mode or size drift")
+                  if type(entry["mach_o"]) is not bool or not re.fullmatch(r"[0-9a-f]{64}", str(entry["sha256"])):
+                      fail("runtime file hash or type drift")
+                  name = f"{app_name}/{path}"
+                  if name in members or name + "/" in members:
+                      fail("duplicate runtime member")
+                  members[name] = (stat.S_IFREG | entry["mode"], entry["bytes"], entry["sha256"])
+                  file_entries[path] = entry
+              if sum(entry["bytes"] for entry in files) > 300 * 1024 * 1024:
+                  fail("runtime exceeds expanded byte limit")
+              destination = work / architecture
+              destination.mkdir(mode=0o700)
+              actual_macho = []
+              with zipfile.ZipFile(archive) as handle:
+                  infos = handle.infolist()
+                  if len(infos) != len(members) or {info.filename for info in infos} != set(members):
+                      fail("unsigned ZIP member inventory drift")
+                  for info in infos:
+                      mode, size, expected_hash = members[info.filename]
+                      if info.external_attr >> 16 != mode or info.file_size != size or info.flag_bits & 1:
+                          fail("unsigned ZIP mode, size or encryption drift")
+                      target = destination / info.filename
+                      if stat.S_ISDIR(mode):
+                          target.mkdir(parents=True, exist_ok=True, mode=0o755)
+                          target.chmod(0o755)
+                          continue
+                      if f"{PurePosixPath(info.filename).parent}/" not in members:
+                          fail("runtime file lacks declared parent directory")
+                      data = handle.read(info)
+                      if hashlib.sha256(data).hexdigest() != expected_hash:
+                          fail("unsigned ZIP member hash drift")
+                      relative = str(PurePosixPath(info.filename).relative_to(app_name))
+                      is_macho = data[:4] in macho_magic
+                      if is_macho != file_entries[relative]["mach_o"]:
+                          fail("runtime native-code inventory drift")
+                      if is_macho:
+                          if file_entries[relative]["mode"] != 0o755:
+                              fail("runtime native-code mode drift")
+                          actual_macho.append(relative)
+                      target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                      target.write_bytes(data)
+                      target.chmod(stat.S_IMODE(mode))
+              if sorted(actual_macho) != manifest["macho_paths"] or set(actual_macho) != expected_macho:
+                  fail("runtime Mach-O path inventory drift")
+              (work / f"macho-{architecture}.txt").write_text("\n".join(sorted(actual_macho, key=lambda name: (-name.count("/"), name))) + "\n")
+          PY
+          for architecture in arm64 x86_64; do
+            app="$work/$architecture/AppleRemindersPythonRuntime.app"
+            info="$app/Contents/Info.plist"
+            [[ "$(plutil -extract CFBundleIdentifier raw -o - "$info")" == "io.github.oscar-v4.apple-reminders.python-runtime" ]]
+            [[ "$(plutil -extract CFBundleExecutable raw -o - "$info")" == "apple-reminders-python" ]]
+            [[ "$(plutil -extract CFBundlePackageType raw -o - "$info")" == "APPL" ]]
+            [[ "$(plutil -extract CFBundleShortVersionString raw -o - "$info")" == "3.13.15" ]]
+            [[ "$(plutil -extract CFBundleVersion raw -o - "$info")" == "20260901" ]]
+            [[ "$(plutil -extract LSMinimumSystemVersion raw -o - "$info")" == "14.0" ]]
+            while IFS= read -r relative; do
+              [[ "$(xcrun lipo -archs "$app/$relative")" == "$architecture" ]]
+            done < "$work/macho-$architecture.txt"
+          done
+          python3 - "$credentials" <<'PY'
+          import base64
+          import os
+          import sys
+          from pathlib import Path
+          for name, variable in (("developer.p12", "APPLE_DEVELOPER_ID_P12_B64"), ("notary.p8", "APPLE_NOTARY_KEY_P8_B64")):
+              path = Path(sys.argv[1]) / name
+              path.write_bytes(base64.b64decode("".join(os.environ[variable].split()), validate=True))
+              path.chmod(0o600)
+          PY
+          security list-keychains -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' > "$credentials/original-keychains"
+          password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')"
+          printf '::add-mask::%s\n' "$password"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$credentials/developer.p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/ {print $2}')"
+          [[ "$identity" =~ ^[A-Fa-f0-9]{40}$ ]]
+          unset APPLE_DEVELOPER_ID_P12_B64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_KEY_P8_B64 password
+          rm "$credentials/developer.p12"
+          for architecture in arm64 x86_64; do
+            app="$work/$architecture/AppleRemindersPythonRuntime.app"
+            while IFS= read -r relative; do
+              codesign --force --options runtime --timestamp --sign "$identity" "$app/$relative"
+            done < "$work/macho-$architecture.txt"
+            (umask 022; codesign --force --options runtime --timestamp --sign "$identity" "$app")
+            codesign --verify --deep --strict --verbose=2 "$app"
+            details="$(codesign -dvvv "$app" 2>&1)"
+            [[ "$details" == *"TeamIdentifier=$APPLE_TEAM_ID"* && "$details" == *"flags=0x10000(runtime)"* && "$details" == *"Timestamp="* ]]
+            ditto -c -k --keepParent "$app" "$work/submission-$architecture.zip"
+            xcrun notarytool submit "$work/submission-$architecture.zip" \
+              --key "$credentials/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" --wait --timeout 25m \
+              --output-format json > "$credentials/notary-result.json"
+            [[ "$(plutil -extract status raw -o - "$credentials/notary-result.json")" == "Accepted" ]]
+            (umask 022; xcrun stapler staple "$app")
+            xcrun stapler validate "$app"
+          done
+          rm "$credentials/notary.p8" "$credentials/notary-result.json"
+          python3 - "$unsigned" "$work" "$signed" <<'PY'
+          import hashlib
+          import json
+          import re
+          import stat
+          import subprocess
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          unsigned, work, signed = map(Path, sys.argv[1:])
+          app_name = "AppleRemindersPythonRuntime.app"
+          for architecture in ("arm64", "x86_64"):
+              app = work / architecture / app_name
+              manifest = json.loads((unsigned / f"python-runtime-build-{architecture}.json").read_text())
+              original = {entry["path"]: entry for entry in manifest["files"]}
+              files, directories = [], []
+              expected_files = set(original) | {"Contents/_CodeSignature/CodeResources", "Contents/CodeResources"}
+              expected_directories = {entry["path"] for entry in manifest["directories"]} | {"Contents/_CodeSignature"}
+              for path in sorted(app.rglob("*")):
+                  relative = path.relative_to(app).as_posix()
+                  mode = path.lstat().st_mode
+                  if path.is_symlink() or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit("signed runtime contains an unsafe file")
+                  if stat.S_ISDIR(mode):
+                      if stat.S_IMODE(mode) != 0o755:
+                          raise SystemExit("signed runtime directory mode drift")
+                      directories.append({"path": relative, "mode": 0o755})
+                      continue
+                  data = path.read_bytes()
+                  entry = original.get(relative)
+                  expected_mode = entry["mode"] if entry else 0o644
+                  if stat.S_IMODE(mode) != expected_mode:
+                      raise SystemExit("signed runtime file mode drift")
+                  digest = hashlib.sha256(data).hexdigest()
+                  if entry and not entry["mach_o"] and digest != entry["sha256"]:
+                      raise SystemExit("signing changed a non-code runtime resource")
+                  files.append({"path": relative, "mode": expected_mode, "bytes": len(data),
+                                "sha256": digest, "mach_o": bool(entry and entry["mach_o"])})
+              if {entry["path"] for entry in files} != expected_files or {entry["path"] for entry in directories} != expected_directories:
+                  raise SystemExit("signed runtime inventory drift")
+              archive = signed / f"python-runtime-macos-{architecture}.zip"
+              with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as handle:
+                  entries = [{"path": "", "mode": 0o755}, *directories, *files]
+                  for entry in sorted(entries, key=lambda value: value["path"]):
+                      directory = "sha256" not in entry
+                      name = app_name + ("/" + entry["path"] if entry["path"] else "") + ("/" if directory else "")
+                      info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                      info.create_system = 3
+                      info.compress_type = zipfile.ZIP_DEFLATED
+                      info.external_attr = ((stat.S_IFDIR if directory else stat.S_IFREG) | entry["mode"]) << 16
+                      handle.writestr(info, b"" if directory else (app / entry["path"]).read_bytes(), compresslevel=9)
+              details = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=4", str(app)],
+                                       check=True, capture_output=True, text=True).stderr
+              cdhash = re.findall(r"^CDHash=([0-9a-f]{40})$", details, re.MULTILINE)
+              if len(cdhash) != 1:
+                  raise SystemExit("signed runtime CodeDirectory hash is missing")
+              manifest.pop("unsigned_archive_sha256")
+              manifest.pop("unsigned_archive_bytes")
+              manifest.update(files=files, directories=directories, signature="developer-id", team_id="V8347N9346",
+                              notarized=True, notarization_checked=True, code_directory_hash=cdhash[0],
+                              archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), archive_bytes=archive.stat().st_size)
+              destination = signed / f"python-runtime-build-{architecture}.json"
+              destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+              destination.chmod(0o644)
+              archive.chmod(0o644)
+          PY
+          (
+            cd "$signed"
+            shasum -a 256 python-runtime-build-arm64.json python-runtime-build-x86_64.json \
+              python-runtime-macos-arm64.zip python-runtime-macos-x86_64.zip > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+          chmod 0644 "$signed/SHA256SUMS"
+          checksum="$(shasum -a 256 "$signed/SHA256SUMS" | awk '{print $1}')"
+          cleanup
+          set -e
+          trap - EXIT
+          [[ ! -e "$credentials" && ! -e "$work" ]]
+          printf 'signed_checksums_sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+      - name: Confirm credentials were destroyed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$RUNNER_TEMP/runtime-signing-credentials" ]]
+          [[ ! -e "$RUNNER_TEMP/runtime-signing-work" ]]
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: runtime-signed-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-signed/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  verify-candidates:
+    needs:
+      - test-and-build-unsigned-source
+      - sign-notarize-and-staple
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      verified_checksums_sha256: ${{ steps.verify.outputs.verified_checksums_sha256 }}
+    env:
+      SOURCE_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.source_commit }}
+      WORKFLOW_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.workflow_commit }}
+      EXPECTED_SIGNED_CHECKSUMS_SHA256: ${{ needs.sign-notarize-and-staple.outputs.signed_checksums_sha256 }}
+      ARCHITECTURE: ${{ matrix.architecture }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.test-and-build-unsigned-source.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: runtime-signed-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-signed
+      - name: Verify signed runtime and execute on its native architecture
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" && "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF" == "refs/heads/${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          [[ "$(uname -m)" == "$ARCHITECTURE" ]]
+          [[ "$EXPECTED_SIGNED_CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          root="$RUNNER_TEMP/runtime-signed"
+          [[ "$(shasum -a 256 "$root/SHA256SUMS" | awk '{print $1}')" == "$EXPECTED_SIGNED_CHECKSUMS_SHA256" ]]
+          (cd "$root"; shasum -a 256 -c SHA256SUMS)
+          python3 scripts/verify_python_runtime.py \
+            --archive "$root/python-runtime-macos-$ARCHITECTURE.zip" \
+            --manifest "$root/python-runtime-build-$ARCHITECTURE.json" \
+            --architecture "$ARCHITECTURE" --expected-team-id V8347N9346 \
+            --require-developer-id --require-notarized --run-probes \
+            --plugin-root plugins/apple-reminders \
+            --extract-to "$RUNNER_TEMP/native runtime verification"
+          python3 -m unittest discover -s tests -p 'test_*runtime*.py' -v
+          # Target code has finished. Revalidate every protected subject before upload.
+          python3 - "$root" <<'PY'
+          import hashlib
+          import os
+          import stat
+          import sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          names = sorted(f"python-runtime-build-{a}.json" for a in ("arm64", "x86_64"))
+          names += sorted(f"python-runtime-macos-{a}.zip" for a in ("arm64", "x86_64"))
+          if root.is_symlink() or not root.is_dir() or {p.name for p in root.iterdir()} != set(names) | {"SHA256SUMS"}:
+              raise SystemExit("verified candidate inventory drift")
+          for path in root.iterdir():
+              if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+                  raise SystemExit("verified candidate is not a regular file")
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          checksums = root / "SHA256SUMS"
+          if digest(checksums) != os.environ["EXPECTED_SIGNED_CHECKSUMS_SHA256"]:
+              raise SystemExit("verified checksum digest drift")
+          if checksums.read_text().splitlines() != [f"{digest(root / name)}  {name}" for name in names]:
+              raise SystemExit("verified subject digest drift")
+          PY
+          printf 'verified_checksums_sha256=%s\n' "$EXPECTED_SIGNED_CHECKSUMS_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'Executed signed Python runtime and MCP probes natively on %s.\n' "$ARCHITECTURE" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: runtime-verified-${{ matrix.architecture }}-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-signed/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  attest-and-publish-candidate:
+    needs:
+      - test-and-build-unsigned-source
+      - sign-notarize-and-staple
+      - verify-candidates
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      SOURCE_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.source_commit }}
+      WORKFLOW_COMMIT: ${{ needs.test-and-build-unsigned-source.outputs.workflow_commit }}
+      EXPECTED_SIGNED_CHECKSUMS_SHA256: ${{ needs.sign-notarize-and-staple.outputs.signed_checksums_sha256 }}
+      EXPECTED_VERIFIED_CHECKSUMS_SHA256: ${{ needs.verify-candidates.outputs.verified_checksums_sha256 }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: runtime-verified-arm64-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-candidates
+      - name: Validate exact subjects at the final privileged boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" && "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF" == "refs/heads/${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$EXPECTED_SIGNED_CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_SIGNED_CHECKSUMS_SHA256" == "$EXPECTED_VERIFIED_CHECKSUMS_SHA256" ]]
+          python3 - "$RUNNER_TEMP/runtime-candidates" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          names = sorted(f"python-runtime-build-{a}.json" for a in ("arm64", "x86_64"))
+          names += sorted(f"python-runtime-macos-{a}.zip" for a in ("arm64", "x86_64"))
+          if root.is_symlink() or not root.is_dir() or {p.name for p in root.iterdir()} != set(names) | {"SHA256SUMS"}:
+              raise SystemExit("attestation subject inventory drift")
+          for path in root.iterdir():
+              mode = path.lstat().st_mode
+              if path.is_symlink() or not stat.S_ISREG(mode) or stat.S_IMODE(mode) not in {0o600, 0o644}:
+                  raise SystemExit("attestation subject file type or mode drift")
+              limit = 100 * 1024 * 1024 if path.suffix == ".zip" else 16 * 1024 * 1024
+              if not 0 < path.stat().st_size <= limit:
+                  raise SystemExit("attestation subject size exceeds limit")
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          checksums = root / "SHA256SUMS"
+          if digest(checksums) != os.environ["EXPECTED_SIGNED_CHECKSUMS_SHA256"]:
+              raise SystemExit("attestation checksum digest drift")
+          if checksums.read_text().splitlines() != [f"{digest(root / name)}  {name}" for name in names]:
+              raise SystemExit("attestation subject digest drift")
+          for architecture in ("arm64", "x86_64"):
+              manifest = json.loads((root / f"python-runtime-build-{architecture}.json").read_text())
+              expected = {"source_commit": os.environ["SOURCE_COMMIT"], "workflow_commit": os.environ["WORKFLOW_COMMIT"],
+                          "architecture": architecture, "signature": "developer-id", "team_id": "V8347N9346",
+                          "notarized": True, "notarization_checked": True,
+                          "archive_sha256": digest(root / f"python-runtime-macos-{architecture}.zip")}
+              if not isinstance(manifest, dict) or any(manifest.get(key) != value for key, value in expected.items()):
+                  raise SystemExit("attestation manifest identity drift")
+          PY
+      - name: Attest the exact verified runtime candidates
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/runtime-candidates/python-runtime-build-arm64.json
+            ${{ runner.temp }}/runtime-candidates/python-runtime-build-x86_64.json
+            ${{ runner.temp }}/runtime-candidates/python-runtime-macos-arm64.zip
+            ${{ runner.temp }}/runtime-candidates/python-runtime-macos-x86_64.zip
+            ${{ runner.temp }}/runtime-candidates/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: apple-reminders-python-runtime-${{ needs.test-and-build-unsigned-source.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-candidates/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

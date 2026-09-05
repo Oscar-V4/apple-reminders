@@ -70,6 +70,10 @@ reminders-container-backup-*
 *.dmg
 *.pkg
 
+# The only archive exceptions are reviewed, signed interpreter capsules.
+!plugins/apple-reminders/runtime/python-runtime-macos-arm64.zip
+!plugins/apple-reminders/runtime/python-runtime-macos-x86_64.zip
+
 # Local reverse-engineering/UI evidence is not a distributable brand asset
 db-first-*-ui.png
 Screenshot*.png

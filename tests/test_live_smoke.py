@@ -5,6 +5,7 @@ import io
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from contextlib import contextmanager
@@ -372,6 +373,8 @@ class LiveSmokeCliGateTests(unittest.TestCase):
             [],
             ["--source-id", "SOURCE-SECRET"],
             ["--confirm-live-reminders"],
+            ["--bundled-runtime"],
+            ["--bundled-runtime", "--source-id", "SOURCE-SECRET"],
         ):
             with self.subTest(arguments=arguments):
                 output = __import__("io").StringIO()
@@ -419,7 +422,28 @@ class LiveSmokeCliGateTests(unittest.TestCase):
         self.assertEqual(captured["server_path"], live_smoke.SERVER_PATH)
         self.assertEqual(captured["plugin_root"], live_smoke.PLUGIN_ROOT)
         self.assertIs(captured["experimental"], False)
+        self.assertIs(captured["bundled_runtime"], False)
         self.assertNotIn("SOURCE-ID-SECRET", output.getvalue())
+
+    def test_bundled_runtime_cli_selection_preserves_injected_client_workflow(self) -> None:
+        client = SequenceClient(successful_responses())
+        captured = {}
+
+        @contextmanager
+        def client_factory(**arguments):
+            captured.update(arguments)
+            yield client
+
+        result = live_smoke.main(
+            ["--confirm-live-reminders", "--source-id", "SOURCE-ID-SECRET", "--bundled-runtime"],
+            client_factory=client_factory,
+            cleanup=mock.Mock(return_value=True),
+            stdout=io.StringIO(),
+        )
+        self.assertEqual(result, 0)
+        self.assertIs(captured["bundled_runtime"], True)
+        self.assertIs(captured["experimental"], False)
+        self.assertEqual(client.responses, [])
 
     def test_experimental_cli_opt_in_reaches_server_and_workflow(self) -> None:
         client = SequenceClient(successful_responses(experimental=True))
@@ -446,8 +470,8 @@ class LiveSmokeCliGateTests(unittest.TestCase):
         self.assertIn("create_reminder_section", [name for name, _ in client.calls])
 
     def test_stdio_server_enables_experimental_only_with_explicit_option(self) -> None:
-        for experimental in (False, True):
-            with self.subTest(experimental=experimental):
+        for experimental, bundled_runtime in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(experimental=experimental, bundled_runtime=bundled_runtime):
                 process = mock.Mock()
                 with (
                     mock.patch.object(
@@ -459,12 +483,20 @@ class LiveSmokeCliGateTests(unittest.TestCase):
                     ),
                     mock.patch.object(live_smoke.McpStdioClient, "_notify"),
                 ):
-                    with live_smoke.McpStdioClient(experimental=experimental):
+                    with live_smoke.McpStdioClient(experimental=experimental, bundled_runtime=bundled_runtime):
                         pass
-                expected = [sys.executable, str(live_smoke.SERVER_PATH.resolve())]
+                expected = ["/bin/sh", str(live_smoke.PLUGIN_ROOT.resolve() / "scripts/launch_bundled_mcp.sh")] if bundled_runtime else [sys.executable, str(live_smoke.SERVER_PATH.resolve())]
                 if experimental:
                     expected.append("--experimental")
                 self.assertEqual(launch.call_args.args[0], expected)
+
+    def test_missing_bundled_launcher_fails_before_starting_a_system_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="live-smoke-bundled-") as directory:
+            with mock.patch.object(live_smoke.subprocess, "Popen") as launch:
+                with self.assertRaisesRegex(live_smoke.SmokeFailure, "bundled-runtime launcher"):
+                    with live_smoke.McpStdioClient(plugin_root=Path(directory), bundled_runtime=True):
+                        self.fail("missing bundled launcher must not start")
+            launch.assert_not_called()
 
 
 class CoreLiveSmokeWorkflowTests(unittest.TestCase):

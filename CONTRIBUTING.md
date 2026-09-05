@@ -222,6 +222,35 @@ path and reject it. Redact diagnostics before sharing them.
 
 ## Deterministic Release Artifact
 
+### Bundled Python runtime
+
+The runtime build is separate from the EventKit helper. Its pinned upstream
+inputs and licenses are described by `scripts/python-runtime-lock.json` and
+ADR 0022. Build only through `scripts/build_python_runtime.py`; the two
+architecture-specific runtime apps are never compiled on an end user's Mac.
+
+The trusted `prepare-signed-runtime-source.yml` workflow must land on main
+before dispatch. It builds an exact reviewed source commit, signs without
+checking out or executing that source in the credentials job, verifies both
+architectures on native hosted runners, and attests the exact five candidate
+subjects. Only its reviewed ZIPs, manifests, and `SHA256SUMS` may enter
+`plugins/apple-reminders/runtime/`. Keep runtime artifacts outside `native/`,
+which the existing EventKit-helper preparation workflow replaces as a unit.
+
+The outer source package stores these already-compressed capsules unchanged.
+`verify_python_runtime.py` checks their identities, inventories, licenses,
+signatures, and executable behavior. `verify_runtime_provenance.py` additionally
+proves ancestry, historical build inputs, and the exact workflow attestation.
+Runtime C/plist/lock changes require a fresh runtime; an unrelated plugin
+version or CI-tooling edit does not change the identity of an existing runtime.
+
+Keep the ordinary launcher on the previous path while preparing infrastructure.
+Switch `.mcp.json` to `scripts/launch_bundled_mcp.sh` only when both signed
+capsules and the matching plugin-version EventKit helper are assembled and
+verified. The bundled launcher has no external Python or download fallback.
+
+### Plugin package
+
 Build only through the allowlisted packager:
 
 ```bash

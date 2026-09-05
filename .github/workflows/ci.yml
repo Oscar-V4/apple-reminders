@@ -121,3 +121,56 @@ jobs:
         run: >-
           python3 scripts/audit_source_package.py "$PLUGIN_ROOT"
           --strict-worktree --verify-root-document-mirrors
+
+  bundled-runtime-tests:
+    name: Bundled runtime (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PLUGIN_ROOT: plugins/apple-reminders
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Detect assembled runtime capsules
+        id: runtime
+        shell: bash
+        run: |
+          if [[ -f "$PLUGIN_ROOT/runtime/SHA256SUMS" ]]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo 'Runtime infrastructure only; no distribution capsules assembled.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        if: steps.runtime.outputs.present == 'true'
+        with:
+          python-version: "3.12"
+      - name: Verify signed capsule on its native CPU
+        if: steps.runtime.outputs.present == 'true'
+        run: |
+          python3 scripts/verify_python_runtime.py \
+            --archive "$PLUGIN_ROOT/runtime/python-runtime-macos-${{ matrix.architecture }}.zip" \
+            --manifest "$PLUGIN_ROOT/runtime/python-runtime-build-${{ matrix.architecture }}.json" \
+            --architecture '${{ matrix.architecture }}' --expected-team-id V8347N9346 \
+            --require-developer-id --require-notarized --run-probes \
+            --plugin-root "$PLUGIN_ROOT" --extract-to "$RUNNER_TEMP/bundled runtime"
+      - name: Run the complete suite with the bundled interpreter
+        if: steps.runtime.outputs.present == 'true'
+        shell: bash
+        run: |
+          export APPLE_REMINDERS_TEST_RUNTIME_APP="$RUNNER_TEMP/bundled runtime/AppleRemindersPythonRuntime.app"
+          "$APPLE_REMINDERS_TEST_RUNTIME_APP/Contents/MacOS/apple-reminders-python" \
+            -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Confirm the assembled package remains clean
+        if: steps.runtime.outputs.present == 'true'
+        run: >-
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT"
+          --strict-worktree --verify-root-document-mirrors

@@ -79,11 +79,13 @@ class McpStdioClient:
         plugin_root: Path = PLUGIN_ROOT,
         timeout_seconds: float = MCP_TIMEOUT_SECONDS,
         experimental: bool = False,
+        bundled_runtime: bool = False,
     ) -> None:
         self._server_path = server_path.resolve()
         self._plugin_root = plugin_root.resolve()
         self._timeout_seconds = timeout_seconds
         self._experimental = experimental
+        self._bundled_runtime = bundled_runtime
         self._process: subprocess.Popen[str] | None = None
         self._next_id = 1
 
@@ -94,7 +96,13 @@ class McpStdioClient:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         for name in SERVER_ENV_DENYLIST:
             environment.pop(name, None)
-        command = [sys.executable, str(self._server_path)]
+        if self._bundled_runtime:
+            launcher = self._plugin_root / "scripts" / "launch_bundled_mcp.sh"
+            if launcher.is_symlink() or not launcher.is_file():
+                raise SmokeFailure("the packaged bundled-runtime launcher is missing or unsafe")
+            command = ["/bin/sh", str(launcher)]
+        else:
+            command = [sys.executable, str(self._server_path)]
         if self._experimental:
             command.append("--experimental")
         self._process = subprocess.Popen(
@@ -820,10 +828,12 @@ def cleanup_synthetic_list(
 
 
 def _default_client_factory(
-    *, server_path: Path, plugin_root: Path, experimental: bool = False
+    *, server_path: Path, plugin_root: Path, experimental: bool = False,
+    bundled_runtime: bool = False,
 ) -> McpStdioClient:
     return McpStdioClient(
-        server_path=server_path, plugin_root=plugin_root, experimental=experimental
+        server_path=server_path, plugin_root=plugin_root, experimental=experimental,
+        bundled_runtime=bundled_runtime,
     )
 
 
@@ -837,6 +847,11 @@ def main(
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--confirm-live-reminders", action="store_true")
     parser.add_argument("--source-id")
+    parser.add_argument(
+        "--bundled-runtime",
+        action="store_true",
+        help="Start the packaged signed-runtime launcher instead of the current Python interpreter.",
+    )
     parser.add_argument(
         "--experimental",
         action="store_true",
@@ -858,6 +873,7 @@ def main(
             server_path=SERVER_PATH,
             plugin_root=PLUGIN_ROOT,
             experimental=args.experimental,
+            bundled_runtime=args.bundled_runtime,
         ) as client:
             entered = True
             _report(

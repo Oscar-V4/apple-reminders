@@ -3,3 +3,6 @@ plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/Info.pl
 plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/_CodeSignature/CodeResources -text
 plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/Contents/CodeResources -text
 plugins/apple-reminders/native/eventkit-helper-build.json -text
+plugins/apple-reminders/runtime/*.zip -text
+plugins/apple-reminders/runtime/*.json -text
+plugins/apple-reminders/runtime/SHA256SUMS -text

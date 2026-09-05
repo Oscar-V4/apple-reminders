@@ -22,6 +22,10 @@ from audit_source_package import (
 )
 from build_source_package import build_package
 from validate_plugin import validate_root
+from verify_runtime_provenance import (
+    VerificationError as RuntimeProvenanceError,
+    verify_runtime_provenance,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -731,11 +735,19 @@ def verify_published_release(
         )
         verify_source_and_rebuild(release_root, identity)
         verify_helper_manifest_ancestry_and_attestation(identity)
+        try:
+            runtime = verify_runtime_provenance(
+                PLUGIN_ROOT / "runtime", identity.tag_commit,
+                main_ref=CANONICAL_MAIN_REF,
+            )
+        except RuntimeProvenanceError as exc:
+            raise VerificationError(f"bundled runtime provenance failed: {exc}") from exc
     return {
         "assets": asset_digests,
         "release_attestation": "verified",
         "repository": repository,
         "signed_helper_manifest": "verified",
+        "bundled_python_runtime": "verified" if runtime["present"] else "not_in_release",
         "source_audit": "verified",
         "tag": tag,
         "tag_commit": identity.tag_commit,

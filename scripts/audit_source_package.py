@@ -64,6 +64,7 @@ PACKAGE_ROOT_FILES = {
     Path("scripts/bounded_process.py"),
     Path("scripts/eventkit_bridge_schema.json"),
     Path("scripts/launch_mcp.sh"),
+    Path("scripts/launch_bundled_mcp.sh"),
     Path("scripts/durable_idempotency.py"),
     Path("scripts/receipt_contract.py"),
     Path("scripts/reminders_adapter.py"),
@@ -104,6 +105,15 @@ NATIVE_HELPER_BUILD_INPUT_FILES = {
     "scripts/eventkit_helper_app_info.plist",
     "scripts/prepare_signed_eventkit_helper.sh",
     "scripts/verify_eventkit_helper.py",
+}
+PYTHON_RUNTIME_ARCHIVES = {
+    Path("runtime/python-runtime-macos-arm64.zip"),
+    Path("runtime/python-runtime-macos-x86_64.zip"),
+}
+PYTHON_RUNTIME_FILES = PYTHON_RUNTIME_ARCHIVES | {
+    Path("runtime/python-runtime-build-arm64.json"),
+    Path("runtime/python-runtime-build-x86_64.json"),
+    Path("runtime/SHA256SUMS"),
 }
 ALLOWED_SKILL_FILES = {
     Path("SKILL.md"),
@@ -205,6 +215,10 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def forbidden_path_reason(relative: Path) -> str | None:
+    # Only these two separately signed, pinned interpreter capsules may be
+    # archives. Every other archive remains outside the runtime allowlist.
+    if relative in PYTHON_RUNTIME_ARCHIVES:
+        return None
     parts = relative.parts
     if any(part in FORBIDDEN_DIRECTORY_NAMES for part in parts):
         return "generated, backup, cache, or private-data directory"
@@ -247,6 +261,9 @@ def package_files(root: Path) -> tuple[set[Path], list[str]]:
     native_root = root / "native"
     if native_root.exists() or native_root.is_symlink():
         files.update(NATIVE_HELPER_FILES)
+    runtime_root = root / "runtime"
+    if runtime_root.exists() or runtime_root.is_symlink():
+        files.update(PYTHON_RUNTIME_FILES)
     skills_root = root / "skills"
     if not skills_root.is_dir():
         return files, ["missing skills directory"]
@@ -303,6 +320,12 @@ def _validate_file(root: Path, relative: Path, errors: list[str]) -> None:
         return
     if path.stat().st_size == 0:
         errors.append(f"empty package stub: {relative}")
+        return
+    if relative in PYTHON_RUNTIME_ARCHIVES:
+        if path.stat().st_size > 64 * 1024 * 1024:
+            errors.append("bundled Python runtime capsule exceeds size bound")
+        return
+    if relative == Path("runtime/SHA256SUMS"):
         return
     if relative in ALLOWED_IMAGE_FILES:
         return
@@ -551,6 +574,49 @@ def validate_document_mirrors(
     return errors
 
 
+def _validate_python_runtime(root: Path) -> list[str]:
+    runtime = root / "runtime"
+    try:
+        config = json.loads((root / ".mcp.json").read_text())
+        uses_bundled = any(
+            "./scripts/launch_bundled_mcp.sh" in server.get("args", [])
+            for server in config.get("mcpServers", {}).values()
+        )
+        if not runtime.exists():
+            return ["bundled MCP launcher requires both reviewed Python capsules"] if uses_bundled else []
+        if runtime.is_symlink():
+            return ["bundled Python runtime directory must not be a symlink"]
+        from verify_python_runtime import load_manifest, regular, sha256, validate_archive
+
+        checksums = runtime / "SHA256SUMS"
+        regular(checksums)
+        if checksums.stat().st_size > 4096:
+            return ["bundled Python checksum inventory exceeds bound"]
+        expected_names = {path.name for path in PYTHON_RUNTIME_FILES if path.name != "SHA256SUMS"}
+        inventory = {}
+        for line in checksums.read_text().splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
+            if not match or match[2] in inventory or match[2] not in expected_names:
+                return ["bundled Python checksum inventory is invalid"]
+            inventory[match[2]] = match[1]
+        if set(inventory) != expected_names:
+            return ["bundled Python checksum inventory is incomplete"]
+        for name, digest in inventory.items():
+            path = runtime / name
+            regular(path)
+            if sha256(path) != digest:
+                return ["bundled Python checksum mismatch"]
+        for architecture in ("arm64", "x86_64"):
+            manifest = load_manifest(
+                runtime / f"python-runtime-build-{architecture}.json", architecture,
+                require_signed=True, expected_team_id="V8347N9346", repo_root=REPO_ROOT,
+            )
+            validate_archive(runtime / f"python-runtime-macos-{architecture}.zip", manifest)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, zipfile.BadZipFile) as exc:
+        return [f"bundled Python runtime validation failed: {exc}"]
+    return []
+
+
 def audit_source(root: Path, *, strict_worktree: bool = False) -> AuditResult:
     root = root.expanduser().resolve()
     files, policy_errors = package_files(root)
@@ -563,6 +629,7 @@ def audit_source(root: Path, *, strict_worktree: bool = False) -> AuditResult:
     for relative in sorted(files, key=lambda path: path.as_posix()):
         _validate_file(root, relative, errors)
     errors.extend(_validate_native_helper_manifest(root))
+    errors.extend(_validate_python_runtime(root))
     findings = scan_worktree_for_forbidden(root)
     if strict_worktree:
         errors.extend(f"forbidden worktree artifact: {item}" for item in findings)
