@@ -51,6 +51,30 @@ class ExternalTesterReceiptTests(unittest.TestCase):
     def example_payload(self) -> dict[str, object]:
         return json.loads(EXAMPLE.read_text(encoding="utf-8"))
 
+    def test_bundled_runtime_records_external_python_presence_separately(self) -> None:
+        for presence in ("absent", "installed", "not_checked"):
+            with self.subTest(presence=presence):
+                payload = self.example_payload()
+                payload["python"] = {"version": "3.13.15", "source": "bundled"}
+                payload["external_python"] = presence
+                completed = self.run_payload(payload)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_older_receipt_without_external_python_field_remains_valid(self) -> None:
+        payload = self.example_payload()
+        payload["plugin_ref"] = "v0.5.2"
+        payload["python"] = {"version": "3.12.10", "source": "homebrew"}
+        payload.pop("external_python", None)
+        completed = self.run_payload(payload)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_external_python_presence_rejects_freeform_machine_details(self) -> None:
+        payload = self.example_payload()
+        payload["external_python"] = "synthetic machine-specific installation detail"
+        completed = self.run_payload(payload)
+        self.assertEqual(completed.returncode, 1)
+        self.assertNotIn("machine-specific", completed.stdout + completed.stderr)
+
     def checks(
         self, *values: tuple[str, str, str]
     ) -> list[dict[str, str]]:
@@ -307,6 +331,7 @@ class ExternalTesterReceiptTests(unittest.TestCase):
                 "hardware",
                 "macos_version",
                 "python",
+                "external_python",
                 "xcode",
                 "command_line_tools",
                 "scenario",

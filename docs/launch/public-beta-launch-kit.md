@@ -1,19 +1,21 @@
-# Apple Reminders 0.5.2 public beta launch kit
+# Apple Reminders 0.6.0 public beta launch kit
 
-This is the maintained launch packet for the `v0.5.2` release candidate. The
-source tree is release-ready, but this documentation change does not create a
-tag or GitHub Release, change repository settings, record a demo, or post to a
+This is the maintained launch packet for the `v0.6.0` release candidate. This
+documentation change does not create a tag or GitHub Release, change repository settings, record a demo, or post to a
 social channel. Candidate commands and announcement copy become usable only
 after every publication gate below passes for the exact tag.
 
 ## Candidate source of truth
 
-- Version: plugin manifest and signed helper both declare `0.5.2`; the intended
-  immutable ref is `v0.5.2`.
+- Version: the plugin manifest declares `0.6.0`; publication requires a matching
+  signed EventKit helper and the intended immutable ref `v0.6.0`.
 - Distribution: independent, open-source community plugin from this GitHub
   repo marketplace.
-- Stable Core: documented EventKit operations on macOS 14+ with Python 3.11+,
-  explicit Reminders permission, and no Xcode or Xcode Command Line Tools.
+- Stable Core: documented EventKit operations targeting macOS 14+, with a
+  bundled Python runtime, no separate Python installation, explicit Reminders
+  permission, and no Xcode or Xcode Command Line Tools. Startup lists 9 Core and
+  diagnostic tools; 6 additional experimental tools require `--experimental`.
+  Default URL writes store EventKit URL metadata only.
 - Experimental Internals: private, version-sensitive Reminders interfaces with
   two dependency tiers. Compiler-free private paths cover tag mutation,
   URL-only attachment mutation, and bounded read-only native inspection.
@@ -37,17 +39,17 @@ presence is a dependency check, never private-interface compatibility evidence.
 
 ## Signed Core and verification evidence
 
-The bundled universal EventKit helper is Developer ID signed, notarized,
-stapled, and bound to reviewed source and workflow history. The candidate
-manifest records:
+Publication requires Developer ID signatures, notarization, stapled tickets
+and verified source provenance for the EventKit helper and both Python
+capsules. Read the exact candidate manifests rather than copying source hashes
+into this document:
 
-```text
-plugin version: 0.5.2
-helper source: 470b2251cae3086d774f23afce30a1e9986ed578
-trusted workflow: 1a1181ee919c31a1912b3ea01b5ce0c6054e8e53
-architectures: arm64, x86_64
-minimum macOS: 14.0
-```
+- [EventKit helper manifest](../../plugins/apple-reminders/native/eventkit-helper-build.json)
+- [Apple silicon Python manifest](../../plugins/apple-reminders/runtime/python-runtime-build-arm64.json)
+- [Intel Python manifest](../../plugins/apple-reminders/runtime/python-runtime-build-x86_64.json)
+
+The canonical verifier checks these manifests against the exact release's
+source and workflow history. A link is not a substitute for that verification.
 
 Core existing-item changes use one canonical alarm projection: the requested
 delta is combined with stable user-authored state, alarm arrays compare as
@@ -62,14 +64,14 @@ evidence, not proof of sync to every device or shared-list participant.
 The command that will install the candidate pins one exact ref:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
 Do not distribute these commands as a working release until all of the
 following are true:
 
-1. `v0.5.2` resolves to the intended merge commit and the manifest, changelog,
+1. `v0.6.0` resolves to the intended merge commit and the manifest, changelog,
    signed-helper manifest, ZIP name, and checksum inventory agree.
 2. The tag workflow emits one two-subject SLSA statement for the deterministic
    ZIP and `SHA256SUMS`, verifies it before the only contents-write step, and
@@ -77,12 +79,12 @@ following are true:
 3. From an exact clean tag checkout, the canonical verifier succeeds:
 
    ```bash
-   python3 scripts/verify_release_assets.py v0.5.2
+   python3 scripts/verify_release_assets.py v0.6.0
    ```
 
    It must re-download both assets, verify the immutable release and SLSA
    attestations, bind the tag and canonical GitHub main history, audit source,
-   rebuild the ZIP twice byte-for-byte, and verify signed-helper provenance.
+   rebuild the ZIP twice byte-for-byte, and verify the EventKit helper and both Python runtime provenance records.
 4. The final read-only macOS verification job is green and the release URL
    resolves without authentication.
 
@@ -99,8 +101,8 @@ Repository tests and signing evidence do not replace these environment checks:
 
 | Check | Current evidence boundary | Tracking |
 | --- | --- | --- |
-| Fresh Stable Core install and TCC allow/deny with no Xcode or Command Line Tools | Needs a new macOS user, disposable VM, or separate Mac | [#28](https://github.com/Oscar-V4/apple-reminders/issues/28) |
-| Real Intel execution | Universal slices are build evidence, not execution evidence | [#30](https://github.com/Oscar-V4/apple-reminders/issues/30) |
+| Fresh Stable Core install and TCC allow/deny with no external Python, Xcode or Command Line Tools | Needs a new macOS user, disposable VM, or separate Mac | [#28](https://github.com/Oscar-V4/apple-reminders/issues/28) |
+| Real Intel Reminders operations | Native runtime probes are required in CI; they do not establish full Reminders CRUD behavior | [#30](https://github.com/Oscar-V4/apple-reminders/issues/30) |
 | Exact minimum macOS 14 execution | Deployment-target metadata is not runtime evidence | [#30](https://github.com/Oscar-V4/apple-reminders/issues/30) |
 | Upgrade permission identity on an external subject | Signing provenance exists; external TCC continuity remains unproven | [#28](https://github.com/Oscar-V4/apple-reminders/issues/28) |
 | CLT-only Experimental admission or fail-closed behavior | Fixed compiler selection and synthetic tests are not external execution evidence | [#41](https://github.com/Oscar-V4/apple-reminders/issues/41) |
@@ -176,24 +178,25 @@ preview setting was changed; that separate manual action remains in issue #29.
 
 Use only after the publication gate passes.
 
-> Apple Reminders for Codex `v0.5.2` 공개 베타를 배포했습니다. 독립
+> Apple Reminders for Codex `v0.6.0` 공개 베타를 배포했습니다. 독립
 > 오픈소스 커뮤니티 프로젝트입니다.
 >
-> Stable Core는 macOS 14+, Python 3.11+, Reminders 권한이 필요하며 Xcode나
-> Xcode Command Line Tools 없이 서명된 EventKit helper로 동작합니다.
+> macOS 14 이상을 대상으로 하며 Python 실행환경을 함께 제공합니다.
+> Reminders 권한을 허용하면 기본 작업에 Python이나 Xcode를 따로 설치할
+> 필요가 없습니다. 기본 도구 9개를 제공하고 실험 기능은 직접 선택해 켭니다.
 > Experimental Internals는 exact build/schema allowlist를 통과해야 하며,
 > 일부 경로만 선택된 Command Line Tools compiler를 사용합니다.
 >
 > 플러그인 소유 원격 백엔드는 없지만 tool results return to Codex라는
 > 경계가 있습니다. 개인정보 안내:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.5.2/PRIVACY.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/PRIVACY.md
 >
 > 설치:
-> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2`
+> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0`
 > `codex plugin add apple-reminders@oscar-v4-reminders`
 >
 > 릴리스 검증 방법:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.5.2/docs/release-verification.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/docs/release-verification.md
 > synthetic data만 사용하는 외부 테스트:
 > https://github.com/Oscar-V4/apple-reminders/issues/30
 >
@@ -203,24 +206,25 @@ Use only after the publication gate passes.
 
 Use only after the publication gate passes.
 
-> Apple Reminders for Codex `v0.5.2` is available as a public beta from an
+> Apple Reminders for Codex `v0.6.0` is available as a public beta from an
 > independent, open-source community project.
 >
-> Stable Core requires macOS 14+, Python 3.11+, and Reminders permission. It
-> uses a signed EventKit helper without Xcode or Xcode Command Line Tools.
+> Stable Core targets macOS 14+ and uses bundled Python with a signed EventKit
+> helper. It needs Reminders permission, with no separate Python installation or
+> Xcode. Nine tools are available by default; experimental features are opt-in.
 > Experimental Internals require an exact build/schema allowlist match, and
 > only some paths use the selected Command Line Tools compiler.
 >
 > There is no plugin-owned remote backend, but tool results return to Codex.
 > Privacy boundary:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.5.2/PRIVACY.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/PRIVACY.md
 >
 > Install:
-> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2`
+> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0`
 > `codex plugin add apple-reminders@oscar-v4-reminders`
 >
 > Verify the release:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.5.2/docs/release-verification.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/docs/release-verification.md
 > Privacy-safe synthetic Mac testers are welcome:
 > https://github.com/Oscar-V4/apple-reminders/issues/30
 >

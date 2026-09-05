@@ -35,8 +35,11 @@ class EventKitHelperDistributionTests(unittest.TestCase):
             ).read_bytes()
         )
 
-        self.assertEqual(payload["CFBundleShortVersionString"], "0.5.2")
-        self.assertEqual(payload["CFBundleVersion"], "0.5.2")
+        version = json.loads(
+            (build_eventkit_helper_app.DEFAULT_PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text()
+        )["version"]
+        self.assertEqual(payload["CFBundleShortVersionString"], version)
+        self.assertEqual(payload["CFBundleVersion"], version)
         self.assertEqual(
             payload["CFBundleIdentifier"],
             build_eventkit_helper_app.BUNDLE_IDENTIFIER,

@@ -3,7 +3,9 @@
 GitHub Release assets are not trusted by filename or by `SHA256SUMS` alone.
 The canonical path is the repository verifier, which downloads the two assets
 again and independently binds them to the exact tag, immutable release, source,
-workflow, and signed helper history.
+workflow, signed helper history, and bundled Python runtime history. This is a
+maintainer verification procedure; ordinary installation does not need Python
+or GitHub CLI.
 
 ## Canonical command
 
@@ -37,11 +39,51 @@ The command does not access Apple Reminders or local Reminder data. It:
    and byte-compares both rebuilds with the downloaded ZIP; and
 6. proves the signed helper manifest's source and trusted workflow commits are
    ancestors of both the tag and current main, then independently verifies the
-   helper manifest attestation and its closed three-subject inventory.
+   helper manifest attestation and its closed three-subject inventory; and
+7. when a bundled runtime is present, verifies its exact five-file inventory,
+   four checksums, both capsule manifests, historical source inputs and source
+   ancestry, and one shared five-subject SLSA statement from
+   `prepare-signed-runtime-source.yml`. A bundled-launcher release without its
+   runtime fails the source audit.
 
 `SHA256SUMS` remains useful for ordinary corruption detection, but it is not a
 detached signature. Its authenticity comes from being a separately verified
 SLSA subject and an immutable-release asset.
+
+## Bundled Python runtime
+
+The current component identities are recorded in
+[`eventkit-helper-build.json`](../plugins/apple-reminders/native/eventkit-helper-build.json)
+and the two `python-runtime-build-*.json` files under
+[`runtime/`](../plugins/apple-reminders/runtime/). Read those manifests for the
+exact source and workflow commits instead of copying commit IDs into release
+instructions.
+
+Each Python capsule is signed with Developer ID, notarized and stapled before
+it enters the source tree. Native macOS CI executes the arm64 and x86_64
+interpreters separately, including native standard-library imports, worker
+subprocesses, and MCP discovery. The release package stores the reviewed
+capsules byte-for-byte. It never rebuilds signed bytes during release tagging.
+
+Maintainers can verify a capsule's signatures and execute data-free probes on
+a Mac of the matching architecture:
+
+```bash
+python3 scripts/verify_python_runtime.py \
+  --archive plugins/apple-reminders/runtime/python-runtime-macos-arm64.zip \
+  --manifest plugins/apple-reminders/runtime/python-runtime-build-arm64.json \
+  --architecture arm64 --expected-team-id V8347N9346 \
+  --require-developer-id --require-notarized --run-probes \
+  --plugin-root plugins/apple-reminders
+```
+
+For Intel, replace all three `arm64` values with `x86_64`. These probes do not
+access Reminders. They do not establish first-use Reminders permission behavior,
+minimum-macOS execution, or compatibility with every Mac.
+
+The final source-and-helper PR must retain the helper's recorded source commit
+in main history. Use a merge commit for that PR; squashing it would discard the
+ancestry that the release verifier requires.
 
 ## Publication boundary
 
@@ -118,11 +160,11 @@ The catch-22 is resolvable only as two reviewed pull requests:
    the notarized ZIP, manifest, and helper checksum inventory. Only after this
    PR passes the complete release verifier may it merge.
 
-The current release-provenance change intentionally performs neither half. It
-leaves `prepare-signed-helper-source.yml`, native source and bytes, and
-`eventkit-helper-build.json` unchanged, preserving the current helper source
-commit `470b2251cae3086d774f23afce30a1e9986ed578` and trusted workflow commit
-`1a1181ee919c31a1912b3ea01b5ce0c6054e8e53` for plugin version `0.5.2`.
+The bundled-Python work does not perform that migration. It leaves the
+provenance-bound helper workflow definition unchanged. Bumping the plugin
+version still requires a new signed helper through that workflow because the
+helper records the entire plugin manifest as a source input. The current
+helper's source and workflow identities come from the manifest linked above.
 
 ## Repository policy audit
 

@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "plugin_ref": "v0.5.2",
+  "plugin_ref": "v0.6.0",
   "codex_version": "0.1.0",
   "hardware": "apple_silicon",
   "macos_version": "14.7",
   "python": {
-    "version": "3.12.10",
-    "source": "homebrew"
+    "version": "3.13.15",
+    "source": "bundled"
   },
   "xcode": "absent",
   "command_line_tools": "absent",
@@ -51,5 +51,6 @@
     }
   ],
   "synthetic_data_only": true,
-  "exact_cleanup": "passed"
+  "exact_cleanup": "passed",
+  "external_python": "absent"
 }

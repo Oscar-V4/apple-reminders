@@ -139,37 +139,19 @@ def _require_claim(
         errors.append(f"{relative.as_posix()}: missing {label}")
 
 
-def _require_release_comparison(
+def _require_current_contract(
     text: str, tag: str, relative: Path, errors: list[str]
 ) -> None:
-    """Keep released behavior in its own table column, not just mentioned somewhere."""
-    rows = [
-        [_claim_text(cell) for cell in line.strip().strip("|").split("|")]
-        for line in text.splitlines()
-        if line.strip().startswith("|") and line.strip().endswith("|")
-    ]
-    if not any(
-        len(row) == 3
-        and row[1] == f"Published {tag}"
-        and row[2] == "Unreleased development branch"
-        for row in rows
-    ):
-        errors.append(f"{relative.as_posix()}: published/development version boundary missing")
-    for label, published, development in (
-        ("tool inventory", r"\b15(?:-tool| tools?)\b", r"\b9(?:-tool| Core| tools?)\b"),
-        (
-            "URL behavior",
-            r"\bEventKit\b.*\bnative URL attachment\b",
-            r"\bEventKit(?: URL)? metadata (?:only|by default)\b",
-        ),
-    ):
-        if not any(
-            len(row) == 3
-            and re.search(published, row[1], re.IGNORECASE)
-            and re.search(development, row[2], re.IGNORECASE)
-            for row in rows
-        ):
-            errors.append(f"{relative.as_posix()}: published/development {label} drift")
+    """Bind reader-facing setup claims to this candidate's actual startup contract."""
+    claims = (
+        (rf"(?:guide describes|Area \|)\s+{re.escape(tag)}\b", "version identity boundary"),
+        (r"\b9\s+Core and diagnostic tools\b", "default tool inventory"),
+        (r"\b6\s+additional experimental tools\b.{0,160}?--experimental", "experimental opt-in inventory"),
+        (r"\bEventKit(?: URL)? metadata only\b", "default URL behavior"),
+        (r"\bno separate Python installation\b", "bundled Python setup boundary"),
+    )
+    for pattern, label in claims:
+        _require_claim(text, pattern, relative, errors, label=label)
 
 
 def check_claims(root: Path = REPO_ROOT) -> list[str]:
@@ -230,6 +212,11 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             errors.append(
                 f"{relative.as_posix()}: unsupported universal Mac compatibility claim"
             )
+        if relative in (Path("README.md"), PLUGIN_ROOT / "README.md", INSTALLATION_GUIDE, LAUNCH_KIT):
+            if re.search(r"\b(?:latest|current) published release is\s+" + re.escape(tag) + r"\b", _claim_text(texts[relative]), re.IGNORECASE):
+                errors.append(f"{relative.as_posix()}: candidate described as published without release evidence")
+            if re.search(r"(?:still needs|still requires|install) Python 3\.11", _claim_text(texts[relative]), re.IGNORECASE):
+                errors.append(f"{relative.as_posix()}: obsolete external Python setup instruction")
 
     for relative in (LAUNCH_KIT, TESTER_WORKFLOW):
         text = texts[relative]
@@ -244,7 +231,8 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             text,
             (
                 "macOS 14+",
-                "Python 3.11+",
+                "bundled Python runtime",
+                "no separate Python installation",
                 "Stable Core",
                 "Experimental Internals",
                 "compiler-free private",
@@ -273,8 +261,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "does not create a tag or GitHub Release",
             "canonical alarm projection",
             "exact read-back",
-            str(helper_source),
-            str(helper_workflow),
+            "native/eventkit-helper-build.json",
             "60–90 second",
             "Korean SNS draft",
             "English SNS draft",
@@ -295,7 +282,6 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         (
             install_command,
             add_command,
-            "https://www.python.org/downloads/macos/",
             "macOS permission prompt",
             "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md",
             "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md",
@@ -306,31 +292,31 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
     for pattern, label in (
         (r"macOS\s+14(?:\+| or newer| and later)", "minimum macOS requirement"),
         (
-            r"(?:plugin|runtime)\s+(?:still\s+)?(?:needs?|requires?)\s+Python\s+3\.11(?:\+| or newer| and later)",
-            "explicit Python runtime requirement",
+            r"(?:plugin|runtime).{0,80}?includes.{0,50}?Python runtime",
+            "explicit bundled Python runtime",
         ),
         (
             r"(?:Core|Ordinary reminder work).{0,200}?do(?:es)? not\s+(?:need|require)\s+Xcode",
             "ordinary Core without user Xcode",
         ),
         (
-            rf"(?:latest|current) published release is\s+{re.escape(tag)}\b",
-            "published release identity",
+            rf"https://github\.com/Oscar-V4/apple-reminders/releases/tag/{re.escape(tag)}",
+            "versioned release evidence link",
         ),
         (r"Start a\s+new\s+(?:Codex\s+)?task", "new-task installation step"),
     ):
         _require_claim(readme, pattern, readme_path, errors, label=label)
-    _require_release_comparison(readme, tag, readme_path, errors)
+    _require_current_contract(readme, tag, readme_path, errors)
 
     installation = texts[INSTALLATION_GUIDE]
-    _require_release_comparison(installation, tag, INSTALLATION_GUIDE, errors)
+    _require_current_contract(installation, tag, INSTALLATION_GUIDE, errors)
     _require_all(
         installation,
         (
             "exact reviewed macOS version/build, Reminders version/build, and relevant schema evidence",
             "does not bypass admission",
             "Disabled tools are rejected unless the runtime started with `--experimental`",
-            "/bin/sh plugins/apple-reminders/scripts/launch_mcp.sh --experimental",
+            "/bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh --experimental",
             "`execution_mode=metadata_only`",
             "`execution_mode=experimental_toolchain`",
             "Core does not require this step",
@@ -342,12 +328,11 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
     )
 
     for needle in (
-        "Core runs locally on macOS 14+ without Xcode",
+        "Core runs locally on macOS 14+ without Xcode or a separate Python installation",
+        "bundled signed runtime",
         "exact read-backs",
-        "Tag assignments and native URL attachments avoid compilation",
-        "version-sensitive private-store features",
-        "Section writes, image-attachment changes",
-        "require Xcode Command Line Tools",
+        "Experimental features are off by default",
+        "additional compatibility and developer-tool requirements",
         "no plugin-owned remote backend",
     ):
         if needle not in card:
@@ -432,8 +417,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "one shared two-subject statement",
             "immutable releases",
             "deterministic ZIP twice",
-            str(helper_source),
-            str(helper_workflow),
+            "native/eventkit-helper-build.json",
         ),
         RELEASE_VERIFICATION,
         errors,
@@ -555,6 +539,14 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             }
             if not required_categories.issubset(categories):
                 errors.append(f"{RECEIPT_SCHEMA.as_posix()}: error category drift")
+            try:
+                python_sources = schema["properties"]["python"]["properties"]["source"]["enum"]
+                external_python = schema["properties"]["external_python"]["enum"]
+            except (KeyError, TypeError):
+                errors.append(f"{RECEIPT_SCHEMA.as_posix()}: bundled runtime evidence fields missing")
+            else:
+                if "bundled" not in python_sources or set(external_python) != {"absent", "installed", "not_checked"}:
+                    errors.append(f"{RECEIPT_SCHEMA.as_posix()}: bundled runtime evidence field drift")
 
     return sorted(set(errors))
 

@@ -15,7 +15,7 @@
       "cwd": ".",
       "command": "/bin/sh",
       "args": [
-        "./scripts/launch_mcp.sh"
+        "./scripts/launch_bundled_mcp.sh"
       ]
     }
   }

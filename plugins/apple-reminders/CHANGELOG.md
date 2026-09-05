@@ -2,7 +2,21 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## Unreleased
+## 0.6.0 — bundled runtime
+
+The changes below describe v0.6.0. Its versioned GitHub Release records the
+publication and verification results. Fresh-user TCC flows and minimum-macOS 14
+end-to-end behavior still need external acceptance evidence.
+
+### Added
+
+- Bundled signed Python 3.13.15 runtimes for Apple silicon and Intel Macs.
+  Ordinary startup needs no separate Python installation or developer tools.
+  Runtime capsules include upstream licensing, complete file inventories,
+  signature and notarization checks, and separate SLSA provenance.
+- Private, verified runtime extraction for first use and cache reuse. Damaged or
+  missing capsules stop with a reinstall instruction; startup does not download
+  an interpreter or choose one from the user's machine.
 
 ### Changed
 
@@ -13,17 +27,16 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   invoking a private adapter. Experimental mode retains visible-card composition.
   Existing cards are preserved. URL-create idempotency keys bind the mode;
   incompatible or legacy key replay is rejected before mutation.
-- Simplified first-use documentation into three installation steps and moved
-  advanced tooling to a separate guide. Python 3.11+ is still required. The
-  signed helper and release version remain unchanged until a release is cut.
+- Simplified first use to installing the plugin, starting a new task and
+  granting Reminders access, then asking naturally. Advanced setup remains in a
+  separate guide.
 - The opt-in live harness now exercises only Core by default; `--experimental`
   adds the historical native workflow.
 
 ### Fixed
 
-- Skip Apple's developer-tool Python shim and its filesystem aliases during
-  launcher discovery, avoiding an incidental Command Line Tools installer.
-  Reject unsupported interpreters instead of executing a failed fallback.
+- Ordinary startup uses only the packaged runtime and never probes Apple's
+  developer-tool Python shim, avoiding an incidental Command Line Tools installer.
 
 
 - Bound GitHub immutable-release attestation verification to the exact tag

@@ -72,9 +72,9 @@ body:
   - type: input
     id: python-version
     attributes:
-      label: Python version and installation source
-      description: Report the version selected by the plugin or its content-free packaging diagnosis, plus Homebrew, python.org, or another source. A terminal PATH can differ from a Finder-launched Codex PATH.
-      placeholder: "Python 3.12.10 from Homebrew"
+      label: Bundled runtime status
+      description: For v0.6.0, report whether the bundled runtime starts or the stable reinstall error. Do not install another Python to collect this field. For older releases, include the interpreter version and source when known.
+      placeholder: "v0.6.0 bundled Python 3.13.15 starts; or bundled runtime missing/invalid"
     validations:
       required: true
 

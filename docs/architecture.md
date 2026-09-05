@@ -7,12 +7,27 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The development runtime has a fixed nine-tool Core/Diagnostics default.
+The v0.6.0 candidate runtime has a fixed nine-tool Core/Diagnostics default.
 An explicit `--experimental` launch exposes the full 15-tool catalog below.
 Disabled Native/Recovery calls and Experimental diagnosis are rejected before
 dispatch, even if a caller remembers the hidden tool names. Each session owns
-its mode and schema copy. The published v0.5.2 release predates this change.
+its mode and schema copy. Earlier 0.5.x releases have a different startup contract.
 See [ADR 0021](decisions/0021-core-default-experience.md).
+
+### Bundled execution environment
+
+The installable configuration starts `scripts/launch_bundled_mcp.sh`. It selects
+only the packaged capsule for the current CPU, validates its bytes and signed
+app identity, and prepares a private cache before starting the MCP server.
+There is no external Python discovery, runtime download, or automatic compiler
+fallback. The app launcher preserves `sys.executable` as the bundled CPython
+binary so backend subprocesses use the same runtime.
+
+Python capsule manifests under `runtime/` bind their upstream downloads,
+complete file inventory, source inputs, signed code identity and trusted
+workflow history. The separately signed EventKit helper remains under `native/`
+and owns Reminders permission. This division keeps runtime updates separate
+from user-data access. See [ADR 0022](decisions/0022-bundled-python-runtime.md).
 
 ### Core
 

@@ -368,7 +368,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.2")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], manifest["version"])
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], DEFAULT_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -647,8 +647,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
             info_payload = plistlib.loads(
                 (REPO_ROOT / "scripts" / "eventkit_helper_app_info.plist").read_bytes()
             )
-            info_payload["CFBundleShortVersionString"] = "0.5.2"
-            info_payload["CFBundleVersion"] = "0.5.2"
+            fixture_version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
+            info_payload["CFBundleShortVersionString"] = fixture_version
+            info_payload["CFBundleVersion"] = fixture_version
             info.write_bytes(plistlib.dumps(info_payload, sort_keys=True))
             executable.write_bytes(b"\xca\xfe\xba\xbe" + b"universal-helper")
             executable.chmod(0o755)
@@ -707,7 +708,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
                 "notarization_checked": True,
                 "notarized": True,
-                "plugin_version": "0.5.2",
+                "plugin_version": fixture_version,
                 "signature": "developer-id",
                 "team_id": "V8347N9346",
             }
