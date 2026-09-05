@@ -33,9 +33,11 @@ import build_source_package  # noqa: E402
 # deterministic 61-file, 1,852,666-byte archive without native-artifact changes.
 # Release-attestation documentation adds 1,506 compressed bytes to that
 # baseline, producing a deterministic 61-file, 1,854,172-byte archive.
-# The smallest three-decimal MiB ceiling, 1.769 MiB, leaves 758 bytes headroom.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.769 * 1024 * 1024)
-PUBLIC_MCP_TOOL_NAMES = [
+# Core profiles, URL mode isolation, and compiler-free launcher discovery add
+# 3,728 compressed bytes: 1,857,900 bytes with the same 61-file runtime allowlist.
+# The 1.773 MiB ceiling leaves 1,225 bytes of reviewed headroom.
+RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.773 * 1024 * 1024)
+DEFAULT_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
     "fetch_reminders",
@@ -43,13 +45,7 @@ PUBLIC_MCP_TOOL_NAMES = [
     "create_reminder",
     "change_reminder",
     "delete_reminder",
-    "inspect_recently_deleted",
-    "recover_deleted_reminder",
-    "inspect_reminder_native",
     "ensure_reminder_list",
-    "create_reminder_section",
-    "organize_reminder",
-    "change_reminder_attachment",
     "diagnose_reminders",
 ]
 
@@ -203,7 +199,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "launcher did not select the later supported Python",
             )
             responses = [json.loads(line) for line in completed.stdout.splitlines()]
-            self.assertEqual(len(responses[1]["result"]["tools"]), 15)
+            self.assertEqual(len(responses[1]["result"]["tools"]), 9)
 
     def test_worktree_source_snapshot_allowlist_passes(self) -> None:
         result = audit_source_package.audit_source(self.plugin_root)
@@ -382,7 +378,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(len(responses), 2, completed.stdout)
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.2")
         tools = responses[1]["result"]["tools"]
-        self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
+        self.assertEqual([tool["name"] for tool in tools], DEFAULT_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
 
     def test_extracted_package_constructs_core_without_giant_runtime_imports(
@@ -500,7 +496,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         tools = responses[1]["result"]["tools"]
-        self.assertEqual([tool["name"] for tool in tools], PUBLIC_MCP_TOOL_NAMES)
+        self.assertEqual([tool["name"] for tool in tools], DEFAULT_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
 
     def test_forbidden_artifacts_are_classified_by_path(self) -> None:

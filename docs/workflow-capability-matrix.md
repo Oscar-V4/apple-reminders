@@ -2,6 +2,17 @@
 
 This matrix audits the current checked-out public interface as composed user journeys. The live source of truth for tool names and closed actions is `plugins/apple-reminders/schemas/mcp-tools.json`; this document records the safe workflow around that interface.
 
+The development default exposes nine Core/Diagnostics tools. Six Native and
+Recovery tools require an explicit `--experimental` launch before any listed
+Experimental workflow; all existing admission gates still apply. Published
+v0.5.2 still exposes the original 15-tool surface. See
+[ADR 0021](decisions/0021-core-default-experience.md).
+
+In default Core mode, `url` writes only public EventKit metadata and preserves
+existing native cards. Use a contextual note link when visible text is the goal.
+Only Experimental mode retains the hybrid URL workflows described below; a
+metadata-only receipt is not proof of a visible native card.
+
 ## Evidence boundary
 
 - Repository validation proves schemas, contracts, skills, synthetic receipts, and packaging behavior. It does not by itself prove a macOS permission prompt, current Reminders UI order, iCloud convergence, shared-list delivery, or iPhone rendering.

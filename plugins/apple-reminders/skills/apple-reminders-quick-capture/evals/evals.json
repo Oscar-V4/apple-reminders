@@ -25,10 +25,11 @@
       "id": 3,
       "category": "direct",
       "prompt": "UPCOMING EVENTS에 결과 발표를 9월 11일 종일로 추가하고 https://example.com/results 링크도 넣어줘.",
-      "expected_output": "Calls create_reminder once with the exact list_id, typed all-day due value, URL, and a fresh idempotency key. Treats verified as proof that metadata, visible URL attachment, and final exact read matched, and reports the combined receipt without a redundant read or attach call.",
+      "expected_output": "In the default session, calls create_reminder once with exact list_id, all-day due, the URL as EventKit metadata, and a fresh idempotency key. Reports verified metadata and final exact read without claiming a visible native attachment or requesting Experimental diagnosis.",
       "assertions": [
         "Does not invent an alarm from the due date.",
-        "Reports partial_success and the URL attachment recovery path if the visible attachment step fails."
+        "Does not call private tools or change configuration for a URL.",
+        "Uses notes instead when a visible note link is requested."
       ]
     },
     {

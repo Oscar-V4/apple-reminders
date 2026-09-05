@@ -8,6 +8,8 @@ bounded/redacted outputs, JSON-RPC framing, and subprocess isolation.
 
 from __future__ import annotations
 
+import argparse
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -974,8 +976,10 @@ class _LocalToolDispatch:
         backend_paths: BackendPaths,
         *,
         facade_overrides: Mapping[str, Any] | None = None,
+        enable_experimental: bool = False,
     ) -> None:
         self._backend_paths = backend_paths
+        self._enable_experimental = enable_experimental
         overrides = dict(facade_overrides or {})
         self._core = overrides.get("core")
         self._native = overrides.get("native")
@@ -1015,8 +1019,11 @@ class _LocalToolDispatch:
                 build_adapter_argv=build_adapter_argv,
                 idempotency_call=execute_idempotent,
                 receipt_validator=validate_adapter_receipt,
+                enable_experimental=self._enable_experimental,
             )
-            self._core = V2CoreFacade(backend)
+            self._core = V2CoreFacade(
+                backend, enable_experimental=self._enable_experimental
+            )
         return self._core
 
     def native_facade(self) -> Any:
@@ -1355,7 +1362,9 @@ def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
     return name
 
 
-def _v2_public_backend(name: str, arguments: Mapping[str, Any]) -> str:
+def _v2_public_backend(
+    name: str, arguments: Mapping[str, Any], *, enable_experimental: bool = False
+) -> str:
     if name in {"create_reminder", "change_reminder"}:
         action = arguments.get("action")
         has_url = isinstance(arguments.get("url"), str) or (
@@ -1363,7 +1372,11 @@ def _v2_public_backend(name: str, arguments: Mapping[str, Any]) -> str:
             and isinstance(action.get("patch"), Mapping)
             and isinstance(action["patch"].get("url"), str)
         )
-        return "eventkit_plus_native_url" if has_url else "eventkit_public_sdk"
+        return (
+            "eventkit_plus_native_url"
+            if has_url and enable_experimental
+            else "eventkit_public_sdk"
+        )
     if name in {"delete_reminder", "ensure_reminder_list"}:
         return "eventkit_public_sdk"
     return "native_extension"
@@ -1389,6 +1402,7 @@ def _v2_pre_dispatch_failure(
     reason_code: str,
     message: str,
     retryable: bool,
+    enable_experimental: bool = False,
 ) -> tuple[dict[str, Any], str]:
     error = {
         "code": code,
@@ -1414,7 +1428,7 @@ def _v2_pre_dispatch_failure(
             "status": "failed_no_mutation",
             "operation": _v2_public_operation(name, arguments),
             "operation_id": str(uuid.uuid4()),
-            "backend": _v2_public_backend(name, arguments),
+            "backend": _v2_public_backend(name, arguments, enable_experimental=enable_experimental),
             "target": _v2_public_target(name, arguments),
             "before": None,
             "after": None,
@@ -1439,6 +1453,7 @@ def _v2_contract_failure(
     *,
     mutation_state: str | None,
     message: str,
+    enable_experimental: bool = False,
 ) -> tuple[dict[str, Any], str | None]:
     if name in V2_MUTATION_TOOLS and mutation_state in {"committed", "unknown"}:
         from reminders_service import unverified_mutation_projection  # noqa: PLC0415
@@ -1468,7 +1483,7 @@ def _v2_contract_failure(
                 **unverified_mutation_projection(mutation_state),
                 "operation": _v2_public_operation(name, arguments),
                 "operation_id": str(uuid.uuid4()),
-                "backend": _v2_public_backend(name, arguments),
+                "backend": _v2_public_backend(name, arguments, enable_experimental=enable_experimental),
                 "target": _v2_public_target(name, arguments),
                 "before": None,
                 "after": None,
@@ -1494,6 +1509,7 @@ def _v2_contract_failure(
         reason_code="public_result_contract_failed",
         message=message,
         retryable=False,
+        enable_experimental=enable_experimental,
     )
 
 
@@ -1507,10 +1523,29 @@ class McpRuntime:
         dispatch: Callable[[str, Mapping[str, Any]], ToolOutcome] | None = None,
         clock: Callable[[], float] = time.monotonic,
         max_calls_per_minute: int = MAX_CALLS_PER_MINUTE,
+        enable_experimental: bool = False,
     ) -> None:
         if max_calls_per_minute <= 0:
             raise ValueError("max_calls_per_minute must be positive")
-        self._dispatch = dispatch or _LocalToolDispatch(backend_paths)
+        self._enable_experimental = enable_experimental
+        self._tools = [
+            copy.deepcopy(tool) for tool in TOOLS
+            if enable_experimental or tool["name"] in _V2_CORE_TOOLS | _V2_DIAGNOSTIC_TOOLS
+        ]
+        for tool in self._tools:
+            if tool["name"] == "diagnose_reminders" and not enable_experimental:
+                properties = tool["inputSchema"]["properties"]
+                properties["scope"]["enum"] = ["core", "access", "packaging"]
+                properties["scope"]["description"] = "Diagnose the affected Core, permission, or installation area."
+                properties["execution_mode"]["enum"] = ["metadata_only"]
+            elif tool["name"] in {"create_reminder", "change_reminder"} and enable_experimental:
+                tool["description"] += (
+                    " This session explicitly enables Experimental mode: a string URL "
+                    "also composes a private visible attachment and can partially succeed."
+                )
+        self._dispatch = dispatch or _LocalToolDispatch(
+            backend_paths, enable_experimental=enable_experimental
+        )
         self._clock = clock
         self._max_calls_per_minute = max_calls_per_minute
         self._recent_calls: deque[float] = deque()
@@ -1531,6 +1566,7 @@ class McpRuntime:
             raw_arguments,
             dispatch=self._dispatch,
             rate_limit_allows_call=self._rate_limit_allows_call,
+            enable_experimental=self._enable_experimental,
         )
 
     def handle(self, message: Any) -> dict[str, Any] | None:
@@ -1552,6 +1588,7 @@ def _call_tool(
     *,
     dispatch: Callable[[str, Mapping[str, Any]], ToolOutcome],
     rate_limit_allows_call: Callable[[], bool],
+    enable_experimental: bool = False,
 ) -> dict[str, Any]:
     tool = TOOLS_BY_NAME[name]
     supplied_for_error = raw_arguments if isinstance(raw_arguments, dict) else {}
@@ -1565,10 +1602,31 @@ def _call_tool(
             reason_code="invalid_arguments",
             message=str(exc),
             retryable=False,
+            enable_experimental=enable_experimental,
         )
     else:
         arguments = effective_arguments(tool, supplied)
-        if sys.version_info < MIN_PYTHON_VERSION:
+        experimental_request = name in _V2_NATIVE_TOOLS | _V2_RECOVERY_TOOLS or (
+            name == "diagnose_reminders" and (
+                arguments.get("scope") not in {"core", "access", "packaging"}
+                or arguments.get("execution_mode") == "experimental_toolchain"
+            )
+        )
+        if experimental_request and not enable_experimental:
+            payload, mutation_state = _v2_pre_dispatch_failure(
+                name,
+                arguments,
+                code="unsupported_capability",
+                reason_code="experimental_disabled",
+                message=(
+                    "Experimental features are disabled in this session. Core remains "
+                    "available. Only an explicit launch with --experimental enables "
+                    "these tools; it does not override compatibility or permission checks."
+                ),
+                retryable=False,
+                enable_experimental=enable_experimental,
+            )
+        elif sys.version_info < MIN_PYTHON_VERSION:
             detected_version = ".".join(
                 str(part) for part in sys.version_info[:3]
             )
@@ -1584,6 +1642,7 @@ def _call_tool(
                     "interpreter, restart Codex, and retry."
                 ),
                 retryable=False,
+                enable_experimental=enable_experimental,
             )
         elif not rate_limit_allows_call():
             payload, mutation_state = _v2_pre_dispatch_failure(
@@ -1593,6 +1652,7 @@ def _call_tool(
                 reason_code="local_rate_limit",
                 message="Too many local Reminders calls were requested; wait briefly.",
                 retryable=True,
+                enable_experimental=enable_experimental,
             )
         else:
             try:
@@ -1609,6 +1669,7 @@ def _call_tool(
                         "unknown" if name in V2_MUTATION_TOOLS else None
                     ),
                     message=f"The public facade failed ({type(exc).__name__}).",
+                    enable_experimental=enable_experimental,
                 )
 
     arguments_for_contract = (
@@ -1625,6 +1686,7 @@ def _call_tool(
             arguments_for_contract,
             mutation_state=mutation_state,
             message=str(exc),
+            enable_experimental=enable_experimental,
         )
         payload = validate_public_result(name, payload, mutation_state)
     return tool_result(payload, is_error=_mcp_tool_call_is_error(name, payload))
@@ -1706,9 +1768,13 @@ def _handle_message(runtime: McpRuntime, message: Any) -> dict[str, Any] | None:
                     "description": "Typed local tools for Apple Reminders.",
                 },
                 "instructions": (
-                    "Use bounded reads and exact IDs. Read one Reminder before changing it, then "
-                    "pass back its opaque reference. Request Reminders access only after a "
-                    "permission result; diagnose only after a relevant failure."
+                    "Bound reads; use exact IDs and fresh opaque references. Request access "
+                    "after permission errors; diagnose after failures."
+                    + (
+                        " Experimental tools are enabled; URL writes also use native attachments. Gates apply."
+                        if runtime._enable_experimental else
+                        " Core mode: 9 tools; URL metadata only. Experimental tools are disabled."
+                    )
                 ),
             },
         )
@@ -1728,7 +1794,7 @@ def _handle_message(runtime: McpRuntime, message: Any) -> dict[str, Any] | None:
             return jsonrpc_error(request_id, JSONRPC_INVALID_PARAMS, "tools/list params must be an object")
         if params.get("cursor") not in {None, ""}:
             return jsonrpc_error(request_id, JSONRPC_INVALID_PARAMS, "Unknown tools/list cursor")
-        return jsonrpc_result(request_id, {"tools": TOOLS})
+        return jsonrpc_result(request_id, {"tools": copy.deepcopy(runtime._tools)})
     if method == "tools/call":
         if not isinstance(params, dict):
             return jsonrpc_error(request_id, JSONRPC_INVALID_PARAMS, "tools/call params must be an object")
@@ -1781,8 +1847,19 @@ def serve_stdio(
     return 0
 
 
-def main(*, backend_paths: BackendPaths | None = None) -> int:
-    runtime = McpRuntime(backend_paths or DEFAULT_BACKEND_PATHS)
+def main(
+    argv: list[str] | None = None, *, backend_paths: BackendPaths | None = None
+) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--experimental", action="store_true",
+        help="Enable private Native Extension/Recovery tools and hybrid URL writes; compatibility gates still apply.",
+    )
+    args = parser.parse_args(argv)
+    runtime = McpRuntime(
+        backend_paths or DEFAULT_BACKEND_PATHS,
+        enable_experimental=args.experimental,
+    )
     return serve_stdio(runtime)
 
 

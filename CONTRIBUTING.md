@@ -73,8 +73,7 @@ The default is metadata-only and starts no developer tool. Add
 CLT-required Experimental capability; it never installs developer tools.
 
 This command writes to the maintainer's real Reminders store and must never run
-in CI. It creates a uniquely named synthetic list, exercises public Core and
-Native flows through the installable stdio server, and deletes that exact list
+in CI. It creates a uniquely named synthetic list, exercises public Core flows by default; `--experimental` explicitly adds the historical Native flows through the installable stdio server, and deletes that exact list
 at the end. Output is limited to step, status, and latency. If cleanup cannot be
 proved, do not retry blindly: inspect only the printed reserved list name.
 Deleted synthetic content may remain in **Recently Deleted**; the harness must
@@ -93,15 +92,15 @@ its bundled adapter, EventKit bridge, and Doctor.
 - Declare `mcpServers` only when `plugins/apple-reminders/.mcp.json` is substantive and all referenced
   server/schema files are packaged. If the MCP is removed, remove the manifest
   declaration, config, runtime files, documentation, and tests together.
-- Keep the public schema at exactly 15 tools unless a separately reviewed
-  product decision changes the Interface: eight Core, four Native Extension,
-  two Recovery, and one Diagnostics tool.
+- Keep the complete schema catalog at 15 tools: eight Core, four Native
+  Extension, two Recovery, and one Diagnostics tool. ADR 0021 sets the default
+  runtime to nine Core/Diagnostics tools; Experimental startup advertises 15.
 - Keep MCP inputs closed-schema, bounded, semantically scoped, and exact-ID
   based. Result envelopes and Receipts must pass the centralized validator even
   though optional MCP `outputSchema` descriptors are omitted from discovery.
 - Keep the MCP server a thin transport and contract boundary over the Core,
   Native Extension, and Diagnostics Modules. Backend selection, reference
-  revalidation, composed URL behavior, and read-back belong behind those Module
+  revalidation, mode-bound URL behavior, and read-back belong behind those Module
   Interfaces rather than in skills.
 - Existing-item public mutations consume an opaque `rev1` Reference from an
   exact read. Do not expose raw `last_modified`/`reminder_version` selection to
@@ -110,7 +109,13 @@ its bundled adapter, EventKit bridge, and Doctor.
   release changes it. The validator rejects drift.
 - Do not add unsupported manifest fields or unresolved placeholders.
 
-The public Interface is:
+The complete catalog is listed below. Default discovery contains only the
+eight Core tools and Diagnostics. `--experimental` exposes the six Native and
+Recovery tools and hybrid URL behavior, while retaining all private admission
+gates. See ADR 0021; tests must cover both mode isolation and direct-call
+rejection before dispatch.
+
+The catalog is:
 
 - Core: `request_reminders_access`, `list_reminder_lists`, `fetch_reminders`,
   `read_reminder`, `create_reminder`, `change_reminder`, `delete_reminder`, and

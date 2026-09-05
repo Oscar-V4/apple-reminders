@@ -105,6 +105,7 @@ def make_backend(
     build_adapter_argv: Any | None = None,
     receipt_validator: Any | None = None,
     idempotency_call: Any | None = None,
+    enable_experimental: bool = False,
 ) -> CoreBackend:
     return CoreBackend(
         bridge_call=bridge_call,
@@ -112,6 +113,7 @@ def make_backend(
         build_adapter_argv=build_adapter_argv or mock.Mock(),
         idempotency_call=idempotency_call or idempotency_passthrough,
         receipt_validator=receipt_validator or mock.Mock(return_value=None),
+        enable_experimental=enable_experimental,
     )
 
 
@@ -1087,6 +1089,147 @@ class DurableEnsureListTests(unittest.TestCase):
 
 
 class CoreBackendInterfaceTests(unittest.TestCase):
+    def test_default_url_writes_use_only_eventkit(self) -> None:
+        cases = (
+            (
+                "create_reminder",
+                {
+                    "calendar_id": "LIST-1",
+                    "title": "Open the project",
+                    "url": "https://example.com/project",
+                    "idempotency_key": "core-url-create-default",
+                },
+            ),
+            (
+                "update_reminder",
+                {
+                    "reminder_id": REMINDER_ID,
+                    "expected_last_modified": "2026-08-25T00:00:00Z",
+                    "patch": {"url": "https://example.com/project"},
+                },
+            ),
+            (
+                "update_reminder",
+                {
+                    "reminder_id": REMINDER_ID,
+                    "expected_last_modified": "2026-08-25T00:00:00Z",
+                    "patch": {"url": None},
+                },
+            ),
+        )
+        for operation, arguments in cases:
+            with self.subTest(operation=operation, arguments=arguments):
+                payload = valid_eventkit_receipt(operation)
+                bridge_call = mock.Mock(return_value=transport(payload))
+                adapter_call = mock.Mock(
+                    side_effect=AssertionError("Core must not use private attachments")
+                )
+                build_argv = mock.Mock()
+                # Omit the mode argument to exercise the production default.
+                backend = CoreBackend(
+                    bridge_call=bridge_call,
+                    adapter_call=adapter_call,
+                    build_adapter_argv=build_argv,
+                    idempotency_call=idempotency_passthrough,
+                    receipt_validator=mock.Mock(),
+                )
+
+                reply = backend.invoke(operation, arguments, mutation=True)
+
+                self.assertFalse(reply.is_error)
+                self.assertEqual(reply.mutation_state, "committed")
+                self.assertEqual(reply.payload["status"], "verified")
+                self.assertEqual(reply.payload["backend"], "eventkit_public_sdk")
+                expected_arguments = {
+                    key: value
+                    for key, value in arguments.items()
+                    if key != "idempotency_key"
+                }
+                bridge_call.assert_called_once_with(operation, expected_arguments)
+                adapter_call.assert_not_called()
+                build_argv.assert_not_called()
+
+    def test_url_create_idempotency_cannot_replay_across_runtime_modes(self) -> None:
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Open the project",
+            "url": "https://example.com/project",
+            "idempotency_key": "core-url-mode-boundary",
+        }
+        bridge_call = mock.Mock(
+            return_value=transport(valid_eventkit_receipt("create_reminder"))
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            idempotency_call = bound_idempotency(Path(temp_dir) / "support")
+            core = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=idempotency_call,
+            )
+            experimental_bridge = mock.Mock()
+            experimental_adapter = mock.Mock()
+            experimental = make_backend(
+                bridge_call=experimental_bridge,
+                adapter_call=experimental_adapter,
+                idempotency_call=idempotency_call,
+                enable_experimental=True,
+            )
+
+            first = core.invoke("create_reminder", arguments, mutation=True)
+            second = experimental.invoke("create_reminder", arguments, mutation=True)
+
+        self.assertFalse(first.is_error)
+        self.assertTrue(second.is_error)
+        self.assertEqual(second.payload["error"]["code"], "concurrent_modification")
+        self.assertEqual(second.payload["error"]["reason_code"], "idempotency_key_conflict")
+        bridge_call.assert_called_once()
+        experimental_bridge.assert_not_called()
+        experimental_adapter.assert_not_called()
+
+    def test_legacy_url_create_key_is_not_reinterpreted_after_upgrade(self) -> None:
+        arguments = {
+            "calendar_id": "LIST-1",
+            "title": "Already created by an older release",
+            "url": "https://example.com/project",
+            "idempotency_key": "legacy-url-create-key",
+        }
+        legacy_request = {
+            "schema_version": 1,
+            "operation": "create_reminder",
+            **{
+                key: value
+                for key, value in arguments.items()
+                if key != "idempotency_key"
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            idempotency_call = bound_idempotency(Path(temp_dir) / "support")
+            idempotency_call(
+                operation="eventkit_create_reminder",
+                key=arguments["idempotency_key"],
+                input_payload=legacy_request,
+                callback=lambda: valid_eventkit_receipt("create_reminder"),
+            )
+            for experimental in (False, True):
+                with self.subTest(experimental=experimental):
+                    bridge_call = mock.Mock()
+                    adapter_call = mock.Mock()
+                    backend = make_backend(
+                        bridge_call=bridge_call,
+                        adapter_call=adapter_call,
+                        idempotency_call=idempotency_call,
+                        enable_experimental=experimental,
+                    )
+
+                    reply = backend.invoke("create_reminder", arguments, mutation=True)
+
+                    self.assertTrue(reply.is_error)
+                    self.assertEqual(reply.mutation_state, "not_mutated")
+                    self.assertEqual(
+                        reply.payload["error"]["reason_code"], "idempotency_key_conflict"
+                    )
+                    bridge_call.assert_not_called()
+                    adapter_call.assert_not_called()
+
     def test_server_composes_core_without_in_process_backend_loaders(self) -> None:
         self.assertFalse(hasattr(mcp_server, "_ADAPTER_MODULE"))
         self.assertFalse(hasattr(mcp_server, "bundled_adapter_module"))
@@ -1462,6 +1605,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             support = Path(temp_dir) / "support"
             backend = make_backend(
+                enable_experimental=True,
                 bridge_call=bridge_call,
                 idempotency_call=bound_idempotency(support),
             )
@@ -1836,6 +1980,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             return [tool_name]
 
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=build_argv,
@@ -1977,6 +2122,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             return [tool_name]
 
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=build_argv,
@@ -2065,6 +2211,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             return [tool_name]
 
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=build_argv,
@@ -2150,6 +2297,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             return [tool_name]
 
         reply = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=build_argv,
@@ -2226,6 +2374,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             ]
         )
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, _arguments: [name],
@@ -2300,6 +2449,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             ]
         )
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, _arguments: [name],
@@ -2383,6 +2533,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         argv_calls: list[tuple[str, dict[str, Any]]] = []
 
         reply = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, arguments: (
@@ -2553,6 +2704,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, arguments: (
@@ -2560,7 +2712,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             ),
         )
         tokens = iter(["A" * 32, "B" * 32])
-        facade = V2CoreFacade(backend, token_source=lambda: next(tokens))
+        facade = V2CoreFacade(backend, token_source=lambda: next(tokens), enable_experimental=True)
 
         first_reference = facade.read_reminder({"reminder_id": REMINDER_ID})[
             "data"
@@ -2734,6 +2886,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         )
         argv_calls: list[tuple[str, dict[str, Any]]] = []
         backend = make_backend(
+            enable_experimental=True,
             bridge_call=bridge_call,
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, arguments: (
@@ -2741,7 +2894,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
             ),
         )
         tokens = iter(["C" * 32, "D" * 32])
-        facade = V2CoreFacade(backend, token_source=lambda: next(tokens))
+        facade = V2CoreFacade(backend, token_source=lambda: next(tokens), enable_experimental=True)
 
         first_reference = facade.read_reminder({"reminder_id": REMINDER_ID})[
             "data"
@@ -2835,6 +2988,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
         argv_calls: list[tuple[str, dict[str, Any]]] = []
 
         result = make_backend(
+            enable_experimental=True,
             bridge_call=mock.Mock(return_value=transport(final_read)),
             adapter_call=adapter_call,
             build_adapter_argv=lambda name, arguments: (
@@ -2904,6 +3058,7 @@ class CoreBackendInterfaceTests(unittest.TestCase):
                 adapter_call = mock.Mock(return_value=transport(inventory))
                 argv_calls: list[tuple[str, dict[str, Any]]] = []
                 result = make_backend(
+                    enable_experimental=True,
                     bridge_call=mock.Mock(),
                     adapter_call=adapter_call,
                     build_adapter_argv=lambda name, arguments: (

@@ -773,9 +773,11 @@ class EventKitCoreAdapter:
         eventkit: EventKitPort,
         *,
         operation_id_source: Callable[[], str] = lambda: str(uuid.uuid4()),
+        enable_experimental: bool = False,
     ) -> None:
         self._eventkit = eventkit
         self._operation_id_source = operation_id_source
+        self._enable_experimental = enable_experimental
 
     def read_exact(self, reminder_id: str) -> Snapshot:
         reply = self._eventkit.invoke(
@@ -869,7 +871,8 @@ class EventKitCoreAdapter:
             public_target["list_id"] = target_list_id
 
         hybrid_url = (
-            isinstance(action, PatchAction)
+            self._enable_experimental
+            and isinstance(action, PatchAction)
             and isinstance(action.patch.get("url"), str)
         )
         receipt: dict[str, Any] = {
@@ -921,12 +924,15 @@ class V2CoreFacade:
         operation_id_source: Callable[[], str] = lambda: str(uuid.uuid4()),
         reference_ttl_seconds: float = 300.0,
         max_active_references: int = 1024,
+        enable_experimental: bool = False,
     ) -> None:
         self._eventkit = eventkit
         self._operation_id_source = operation_id_source
+        self._enable_experimental = enable_experimental
         self._adapter = EventKitCoreAdapter(
             eventkit,
             operation_id_source=operation_id_source,
+            enable_experimental=enable_experimental,
         )
         if reference_port is None:
             core_arguments: dict[str, Any] = {
@@ -1602,7 +1608,7 @@ class V2CoreFacade:
             after=None,
             backend=(
                 "eventkit_plus_native_url"
-                if isinstance(arguments.get("url"), str)
+                if self._enable_experimental and isinstance(arguments.get("url"), str)
                 else "eventkit_public_sdk"
             ),
         )

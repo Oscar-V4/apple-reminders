@@ -203,7 +203,8 @@ class WorkflowHardeningTests(unittest.TestCase):
         self.assertIn("Core-first alternatives", matrix)
         self.assertIn("App Intents and Shortcuts review", runtime_gate_adr)
         self.assertIn("Shortcuts tag support", runtime_gate_adr)
-        self.assertIn("ignores `PATH` clang entries", readme)
+        self.assertIn("--experimental", readme)
+        self.assertIn("does not bypass admission", read(ROOT / "docs/installation.md"))
         self.assertIn("`/usr/bin/xcode-select -p`", runtime_gate_adr)
         self.assertNotIn("Organize my Inbox reminders into sensible sections", readme)
 

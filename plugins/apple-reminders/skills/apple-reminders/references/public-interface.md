@@ -7,6 +7,21 @@ attachments, and Recently Deleted are Experimental Internals. Before an
 Experimental mutation, targeted diagnosis must report the exact capability as
 available; blocked build/schema/compiler results are terminal no-write outcomes.
 
+Default discovery contains eight Core tools plus `diagnose_reminders`. Native
+Extension and Recovery tools below require an explicitly configured
+`--experimental` launch; direct calls remain blocked when hidden. This opt-in
+never bypasses runtime build, schema, compiler, or permission checks.
+
+Default Core `url` writes only EventKit metadata. Use notes for a visible text
+link while preserving existing text. Experimental mode additionally composes a
+native URL card on string URL writes. In both modes, `url:null` clears metadata
+and preserves existing attachment objects. A verified Core metadata write does
+not verify any existing card, iCloud convergence, or iPhone visibility.
+
+URL-create idempotency keys bind the mode. A key from another mode or an older
+hybrid receipt is rejected before dispatch. Read the original item to resolve
+its state; a conflict is not permission to create it again with a fresh key.
+
 ## Core
 
 - `request_reminders_access {}`: explicitly request macOS Reminders access once.
@@ -113,7 +128,7 @@ Core revalidates the opaque Reference with a fresh exact read before action pref
 
 Only `unchanged` and `verified` may include a writable `rev1` reference. Never decode a reference or infer a Reminder ID from a rejected token.
 
-For Core URL A-to-B workflows, a later same-B retry that sees native B plus another URL returns `failed_no_mutation/ambiguous_visible_url_attachment` rather than hiding unresolved A+B state. It issues no fresh writable Reference: call `read_reminder`, inspect native attachments with the new Reference, and clean up only one exact user-intended attachment ID.
+For Experimental hybrid URL A-to-B workflows, a later same-B retry that sees native B plus another URL returns `failed_no_mutation/ambiguous_visible_url_attachment` rather than hiding unresolved A+B state. It issues no fresh writable Reference: call `read_reminder`, inspect native attachments with the new Reference, and clean up only one exact user-intended attachment ID.
 
 Broad cleanup uses 25–40 candidates per authorized chunk, with the final remainder allowed to be smaller. References are just-in-time: read one exact item, perform its approved action, verify it, discard its reference, and stop the whole run on the first uncertainty before moving to another item or chunk.
 

@@ -61,8 +61,8 @@ class SequenceClient:
         return response
 
 
-def successful_responses():
-    return [
+def successful_responses(*, experimental=False):
+    responses = [
         (
             "ensure_reminder_list",
             {
@@ -342,6 +342,26 @@ def successful_responses():
         ),
     ]
 
+    if experimental:
+        return responses
+    experimental_tools = {
+        "create_reminder_section",
+        "organize_reminder",
+        "change_reminder_attachment",
+        "inspect_reminder_native",
+    }
+    core = [
+        (name, payload) for name, payload in responses if name not in experimental_tools
+    ]
+    for name, payload in core:
+        if name == "read_reminder" and payload.get("ok") is True:
+            reminder = payload["data"]["reminder"]
+            reminder["notes"] = (
+                "Synthetic public MCP live smoke data.\n"
+                "https://example.com/apple-reminders-live-smoke"
+            )
+    return core
+
 
 class LiveSmokeCliGateTests(unittest.TestCase):
     def test_confirmation_and_source_identity_are_both_required_before_launch(self) -> None:
@@ -398,18 +418,170 @@ class LiveSmokeCliGateTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(captured["server_path"], live_smoke.SERVER_PATH)
         self.assertEqual(captured["plugin_root"], live_smoke.PLUGIN_ROOT)
+        self.assertIs(captured["experimental"], False)
         self.assertNotIn("SOURCE-ID-SECRET", output.getvalue())
+
+    def test_experimental_cli_opt_in_reaches_server_and_workflow(self) -> None:
+        client = SequenceClient(successful_responses(experimental=True))
+        captured = {}
+
+        @contextmanager
+        def client_factory(**arguments):
+            captured.update(arguments)
+            yield client
+
+        result = live_smoke.main(
+            [
+                "--confirm-live-reminders", "--source-id", "SOURCE-ID-SECRET",
+                "--experimental",
+            ],
+            client_factory=client_factory,
+            cleanup=mock.Mock(return_value=True),
+            stdout=io.StringIO(),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIs(captured["experimental"], True)
+        self.assertEqual(client.responses, [])
+        self.assertIn("create_reminder_section", [name for name, _ in client.calls])
+
+    def test_stdio_server_enables_experimental_only_with_explicit_option(self) -> None:
+        for experimental in (False, True):
+            with self.subTest(experimental=experimental):
+                process = mock.Mock()
+                with (
+                    mock.patch.object(
+                        live_smoke.subprocess, "Popen", return_value=process
+                    ) as launch,
+                    mock.patch.object(
+                        live_smoke.McpStdioClient, "_request",
+                        return_value={"serverInfo": {}},
+                    ),
+                    mock.patch.object(live_smoke.McpStdioClient, "_notify"),
+                ):
+                    with live_smoke.McpStdioClient(experimental=experimental):
+                        pass
+                expected = [sys.executable, str(live_smoke.SERVER_PATH.resolve())]
+                if experimental:
+                    expected.append("--experimental")
+                self.assertEqual(launch.call_args.args[0], expected)
+
+
+class CoreLiveSmokeWorkflowTests(unittest.TestCase):
+    def test_default_workflow_exercises_core_and_keeps_link_in_notes(self) -> None:
+        client = SequenceClient(successful_responses())
+        cleanup = mock.Mock(return_value=True)
+        output = io.StringIO()
+        list_name = "Codex-Apple-Reminders-Live-Smoke-core"
+
+        with mock.patch.object(
+            live_smoke, "_write_tiny_png",
+            side_effect=AssertionError("Core must not create attachment files"),
+        ):
+            live_smoke.run_public_mcp_smoke(
+                client,
+                source_id="SOURCE-ID-SECRET",
+                cleanup=cleanup,
+                stdout=output,
+                list_name_factory=lambda: list_name,
+            )
+
+        self.assertEqual(client.responses, [])
+        self.assertEqual(
+            [name for name, _ in client.calls],
+            [
+                "ensure_reminder_list", "ensure_reminder_list",
+                "create_reminder", "create_reminder", "fetch_reminders",
+                "read_reminder", "read_reminder", "change_reminder",
+                "change_reminder", "change_reminder", "change_reminder",
+                "delete_reminder", "read_reminder",
+            ],
+        )
+        self.assertEqual(client.calls[2][1], client.calls[3][1])
+        self.assertEqual(
+            client.calls[2][1]["url"],
+            "https://example.com/apple-reminders-live-smoke",
+        )
+        self.assertIn(
+            "https://example.com/apple-reminders-live-smoke", client.calls[2][1]["notes"]
+        )
+        self.assertEqual(client.calls[11][1]["reference"], REF_5)
+        cleanup.assert_called_once_with(list_name, LIST_ID)
+        for secret in (list_name, LIST_ID, REMINDER_ID, "SOURCE-ID-SECRET", REF_5):
+            self.assertNotIn(secret, output.getvalue())
+
+    def test_core_stops_after_uncertain_create_and_attempts_exact_cleanup(self) -> None:
+        responses = successful_responses()[:3]
+        responses[2][1]["status"] = "committed_verification_pending"
+        client = SequenceClient(responses)
+        cleanup = mock.Mock(return_value=True)
+        output = io.StringIO()
+        list_name = "Codex-Apple-Reminders-Live-Smoke-core-pending"
+
+        with self.assertRaises(live_smoke.SmokeFailure):
+            live_smoke.run_public_mcp_smoke(
+                client,
+                source_id="SOURCE-ID-SECRET",
+                cleanup=cleanup,
+                stdout=output,
+                list_name_factory=lambda: list_name,
+            )
+
+        self.assertEqual(len(client.calls), 3)
+        cleanup.assert_called_once_with(list_name, LIST_ID)
+        self.assertIn("step=create_reminder status=failed", output.getvalue())
+
+    def test_core_exact_read_requires_the_note_link_to_survive(self) -> None:
+        responses = successful_responses()
+        responses[5][1]["data"]["reminder"]["notes"] = (
+            "Synthetic public MCP live smoke data."
+        )
+        client = SequenceClient(responses)
+        cleanup = mock.Mock(return_value=True)
+        with self.assertRaises(live_smoke.SmokeFailure):
+            live_smoke.run_public_mcp_smoke(
+                client,
+                source_id="SOURCE-ID-SECRET",
+                cleanup=cleanup,
+                stdout=io.StringIO(),
+                list_name_factory=lambda: "Codex-Apple-Reminders-Live-Smoke-core-note",
+            )
+        self.assertEqual(len(client.calls), 6)
+        cleanup.assert_called_once()
+
+    def test_core_exact_read_requires_eventkit_url_metadata_to_survive(self) -> None:
+        responses = successful_responses()
+        responses[5][1]["data"]["reminder"]["url"] = None
+        client = SequenceClient(responses)
+        cleanup = mock.Mock(return_value=True)
+        output = io.StringIO()
+
+        with self.assertRaises(live_smoke.SmokeFailure):
+            live_smoke.run_public_mcp_smoke(
+                client,
+                source_id="SOURCE-ID-SECRET",
+                cleanup=cleanup,
+                stdout=output,
+                list_name_factory=lambda: "Codex-Apple-Reminders-Live-Smoke-core-url",
+            )
+
+        self.assertEqual(len(client.calls), 6)
+        self.assertIn("step=exact_read_primary status=failed", output.getvalue())
+        cleanup.assert_called_once_with(
+            "Codex-Apple-Reminders-Live-Smoke-core-url", LIST_ID
+        )
 
 
 class LiveSmokeWorkflowTests(unittest.TestCase):
-    def test_public_workflow_rotates_references_and_emits_only_redacted_status(self) -> None:
-        client = SequenceClient(successful_responses())
+    def test_experimental_workflow_rotates_references_and_emits_only_redacted_status(self) -> None:
+        client = SequenceClient(successful_responses(experimental=True))
         cleanup = mock.Mock(return_value=True)
         output = io.StringIO()
 
         live_smoke.run_public_mcp_smoke(
             client,
             source_id="SOURCE-ID-SECRET",
+            experimental=True,
             cleanup=cleanup,
             stdout=output,
             list_name_factory=lambda: "Codex-Apple-Reminders-Live-Smoke-testtoken",
@@ -518,7 +690,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             )
 
     def test_harness_fails_if_a_stale_parallel_reference_is_still_accepted(self) -> None:
-        responses = successful_responses()
+        responses = successful_responses(experimental=True)
         responses[9] = (
             "change_reminder",
             {"ok": True, "status": "verified", "after": {"reference": REF_3}},
@@ -531,6 +703,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             live_smoke.run_public_mcp_smoke(
                 client,
                 source_id="SOURCE-ID-SECRET",
+                experimental=True,
                 cleanup=cleanup,
                 stdout=output,
                 list_name_factory=lambda: (
@@ -582,7 +755,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label):
-                responses = deepcopy(successful_responses())
+                responses = deepcopy(successful_responses(experimental=True))
                 mutate(responses)
                 cleanup = mock.Mock(return_value=True)
                 output = io.StringIO()
@@ -591,6 +764,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
                     live_smoke.run_public_mcp_smoke(
                         SequenceClient(responses),
                         source_id="SOURCE-ID-SECRET",
+                        experimental=True,
                         cleanup=cleanup,
                         stdout=output,
                         list_name_factory=lambda: (
@@ -607,7 +781,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
                 )
 
     def test_harness_rejects_replacement_that_keeps_the_old_image(self) -> None:
-        responses = deepcopy(successful_responses())
+        responses = deepcopy(successful_responses(experimental=True))
         responses[15][1]["after"]["attachments"].append(
             {"id": OLD_IMAGE_ID, "type": "image"}
         )
@@ -617,6 +791,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             live_smoke.run_public_mcp_smoke(
                 SequenceClient(responses),
                 source_id="SOURCE-ID-SECRET",
+                experimental=True,
                 cleanup=mock.Mock(return_value=True),
                 stdout=output,
                 list_name_factory=lambda: (
@@ -630,7 +805,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         )
 
     def test_harness_rejects_delete_that_keeps_an_image(self) -> None:
-        responses = deepcopy(successful_responses())
+        responses = deepcopy(successful_responses(experimental=True))
         responses[17][1]["after"]["attachments"].append(
             {"id": NEW_IMAGE_ID, "type": "image"}
         )
@@ -640,6 +815,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             live_smoke.run_public_mcp_smoke(
                 SequenceClient(responses),
                 source_id="SOURCE-ID-SECRET",
+                experimental=True,
                 cleanup=mock.Mock(return_value=True),
                 stdout=output,
                 list_name_factory=lambda: (
@@ -686,7 +862,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         }
         for label, (mutate, failed_step) in cases.items():
             with self.subTest(label=label):
-                responses = deepcopy(successful_responses())
+                responses = deepcopy(successful_responses(experimental=True))
                 mutate(responses)
                 output = io.StringIO()
 
@@ -694,6 +870,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
                     live_smoke.run_public_mcp_smoke(
                         SequenceClient(responses),
                         source_id="SOURCE-ID-SECRET",
+                        experimental=True,
                         cleanup=mock.Mock(return_value=True),
                         stdout=output,
                         list_name_factory=lambda: (
@@ -710,8 +887,8 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
         list_name = "Codex-Apple-Reminders-Live-Smoke-needsmanualcleanup"
         client = SequenceClient(
             [
-                successful_responses()[0],
-                successful_responses()[1],
+                successful_responses(experimental=True)[0],
+                successful_responses(experimental=True)[1],
                 (
                     "create_reminder_section",
                     {
@@ -729,6 +906,7 @@ class LiveSmokeWorkflowTests(unittest.TestCase):
             live_smoke.run_public_mcp_smoke(
                 client,
                 source_id="SOURCE-ID-SECRET",
+                experimental=True,
                 cleanup=cleanup,
                 stdout=output,
                 list_name_factory=lambda: list_name,

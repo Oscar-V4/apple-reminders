@@ -5,7 +5,10 @@ description: Inspect, attach, copy, replace, or delete Apple Reminders image and
 
 # Apple Reminders Attachments
 
-Native attachments are Experimental Internals. Prefer a Core-safe note link or
+Native attachments are Experimental Internals and require an already enabled
+`--experimental` session. If the tools are absent or `experimental_disabled` is
+returned, explain the limit before a write. Do not change configuration or
+install developer tools to satisfy an attachment request. Prefer a Core-safe note link or
 plain-text image description unless the user explicitly requests a native
 attachment. Never fall back to direct SQLite or an unexposed adapter write.
 
@@ -46,10 +49,12 @@ Cross-Reminder copy can place several source images as separate attachments on o
 
 ## URL behavior
 
-- A URL supplied to Core `create_reminder` or `change_reminder` is a hybrid
-  EventKit plus private visible-attachment operation. For Core-only capture,
-  preserve the link in `notes`. Do not add a hybrid URL again after `verified`.
-- If a later same-URL Core patch finds the matching URL plus another URL attachment, it intentionally performs no write and returns an ambiguity. Call `read_reminder`, inspect the exact native attachment IDs, and delete only a user-intended stale object; never infer that every non-matching link is the old URL.
+- In the default session, Core `url` saves EventKit metadata only. Use Core
+  for a URL field or preserve a link in `notes` for ordinary visible text; this
+  does not claim a native URL card. An explicitly enabled Experimental session
+  retains the hybrid metadata-plus-attachment behavior for string URLs. Do not
+  add a verified hybrid URL again.
+- In Experimental mode, if a later same-URL Core patch finds the matching URL plus another URL attachment, it intentionally performs no write and returns an ambiguity. Call `read_reminder`, inspect the exact native attachment IDs, and delete only a user-intended stale object; never infer that every non-matching link is the old URL.
 - Use `attach_url` here for an additional URL attachment or explicit recovery after resolving a partial Core write.
 - Clearing Core `patch.url` does not delete attachment objects. Use an exact attachment ID for deletion.
 

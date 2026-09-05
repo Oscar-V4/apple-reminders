@@ -368,7 +368,7 @@
     {
       "name": "create_reminder",
       "title": "Create reminder",
-      "description": "Create one Reminder in an exact writable Reminder List. Typed due dates, alarms, recurrence, URL visibility, and create idempotency retain their existing behavior.",
+      "description": "Create one Reminder in an exact writable list with typed due dates, alarms, recurrence, and idempotency. By default URL saves public EventKit metadata, without a native attachment card or private-store access.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -761,7 +761,7 @@
     {
       "name": "change_reminder",
       "title": "Change reminder",
-      "description": "Change public Reminder fields, completion state, or Reminder List membership through one closed action and one opaque fresh Reference.",
+      "description": "Change public Reminder fields, completion, or list membership through one closed action and a fresh opaque Reference. Omitted fields stay unchanged. By default URL updates public EventKit metadata only; existing native attachments are preserved.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1266,7 +1266,7 @@
     {
       "name": "inspect_recently_deleted",
       "title": "Inspect recently deleted reminders",
-      "description": "List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1373,7 +1373,7 @@
     {
       "name": "recover_deleted_reminder",
       "title": "Recover deleted reminder",
-      "description": "Recover one exact Recently Deleted Reminder into an exact writable Reminder List using a fresh opaque del1 Reference. Recovery preserves the Reminder identity and verifies its attachment set before reporting success.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Recover one exact Recently Deleted Reminder into an exact writable Reminder List using a fresh opaque del1 Reference. Recovery preserves the Reminder identity and verifies its attachment set before reporting success.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1417,7 +1417,7 @@
     {
       "name": "inspect_reminder_native",
       "title": "Inspect reminder details",
-      "description": "Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1631,7 +1631,7 @@
     {
       "name": "create_reminder_section",
       "title": "Create reminder section",
-      "description": "Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1662,7 +1662,7 @@
     {
       "name": "organize_reminder",
       "title": "Organize reminder",
-      "description": "Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1752,7 +1752,7 @@
     {
       "name": "change_reminder_attachment",
       "title": "Change reminder attachment",
-      "description": "Attach, copy, replace, or delete one exact image or URL attachment through a closed action. copy_image uses fresh exact source and destination References and never exposes the source file path. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
+      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Attach, copy, replace, or delete one exact image or URL attachment through a closed action. copy_image uses fresh exact source and destination References and never exposes the source file path. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
       "inputSchema": {
         "type": "object",
         "properties": {

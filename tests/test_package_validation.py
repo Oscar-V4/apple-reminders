@@ -43,75 +43,25 @@ class PluginValidationTests(unittest.TestCase):
         )
         self.assertEqual(entry["category"], "Productivity")
 
-    def test_readme_has_a_doctor_free_install_upgrade_and_uninstall_path(self) -> None:
+    def test_readme_separates_released_setup_from_development_behavior(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        quick_start = readme.split("## Quick Start", 1)[1].split("## First permission", 1)[0]
-
-        self.assertIn("# Apple Reminders for Codex", readme)
-        self.assertIn("Turn these meeting notes into one reminder per action item", readme)
-        self.assertIn("Create one reminder per screenshot", readme)
-        featured_examples = readme.split("Try prompts like:", 1)[1].split(
-            "This repository hosts", 1
-        )[0]
-        self.assertIn("These prompts use Core", featured_examples)
-        self.assertNotIn("sensible sections", featured_examples)
-        self.assertNotIn("links", featured_examples.casefold())
-        self.assertNotRegex(readme, r"[\uac00-\ud7a3]")
-        self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2",
-            quick_start,
-        )
-        self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", quick_start)
-        self.assertIn("Show me everything overdue", quick_start)
-        self.assertNotIn("doctor", quick_start.casefold())
+        setup = readme.split("## Get started in three steps", 1)[1].split("## Everyday use", 1)[0]
+        self.assertIn("https://www.python.org/downloads/macos/", setup)
+        self.assertIn("Python 3.11 or newer", setup)
+        self.assertIn("codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2", setup)
+        self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", setup)
+        self.assertIn("new task", setup)
+        self.assertNotIn("python3 -c", setup)
+        self.assertNotIn("xcode-select", setup)
+        self.assertNotIn("diagnose_reminders", setup)
+        self.assertIn("Published v0.5.2", readme)
+        self.assertIn("Unreleased development branch", readme)
+        self.assertIn("9 Core and diagnostic tools", readme)
         self.assertIn("## Upgrade", readme)
-        upgrade = readme.split("## Upgrade", 1)[1].split("## Uninstall", 1)[0]
-        self.assertIn(
-            "codex plugin remove apple-reminders@oscar-v4-reminders",
-            upgrade,
-        )
-        self.assertIn(
-            "codex plugin marketplace remove oscar-v4-reminders",
-            upgrade,
-        )
-        self.assertIn(
-            "codex plugin marketplace add Oscar-V4/apple-reminders --ref vX.Y.Z",
-            upgrade,
-        )
-        self.assertIn(
-            "codex plugin add apple-reminders@oscar-v4-reminders",
-            upgrade,
-        )
-        self.assertNotIn("marketplace upgrade", upgrade)
         self.assertIn("## Uninstall", readme)
-        self.assertIn("codex plugin remove apple-reminders@oscar-v4-reminders", readme)
-        self.assertIn("macOS 14 or newer", readme)
-        self.assertIn("Python 3.11 or newer", readme)
-        self.assertIn(
-            "Ordinary Core use does **not** require Xcode or Xcode Command Line Tools",
-            readme,
-        )
-        self.assertIn(
-            "Tag assignments and native URL attachment operations",
-            " ".join(readme.split()),
-        )
-        self.assertIn("do not invoke `clang`", readme)
-        self.assertIn("compile three private Objective-C helpers", readme)
-        self.assertIn("therefore require Xcode Command Line Tools", readme)
-        self.assertIn("Stable Core", readme)
-        self.assertIn("Experimental, compiler-free private", readme)
-        self.assertIn("Experimental, CLT-required private", readme)
-        self.assertIn("`execution_mode=metadata_only`", readme)
-        self.assertIn("`execution_mode=experimental_toolchain`", readme)
-        self.assertIn("does not run `xcode-select` or `clang`", readme)
-        self.assertIn("already denied or later revoked", readme)
-        self.assertIn("does not show the first-time prompt again", readme)
-        self.assertIn(
-            "End users do not need an Apple Developer Program membership",
-            readme,
-        )
-        self.assertNotIn("revoke Reminders and Automation access", readme)
-        self.assertNotIn("two source-runtime prerequisites", readme)
+        self.assertIn("vX.Y.Z", readme)
+        self.assertIn("PRIVACY.md#user-control", readme)
+        self.assertEqual(readme, (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_public_release_version_is_coherent(self) -> None:
         manifest = json.loads(

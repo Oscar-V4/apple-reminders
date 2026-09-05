@@ -7,7 +7,12 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The 0.5 Interface has one static 15-tool surface:
+The development runtime has a fixed nine-tool Core/Diagnostics default.
+An explicit `--experimental` launch exposes the full 15-tool catalog below.
+Disabled Native/Recovery calls and Experimental diagnosis are rejected before
+dispatch, even if a caller remembers the hidden tool names. Each session owns
+its mode and schema copy. The published v0.5.2 release predates this change.
+See [ADR 0021](decisions/0021-core-default-experience.md).
 
 ### Core
 
@@ -78,8 +83,11 @@ user-facing promise.
      or automatically compiles a fallback.
    - Preserves omitted fields and keeps due dates, alarms, and recurrence typed
      separately.
-   - Composes visible URL writes across EventKit and the native URL attachment
-     path, then performs one final exact EventKit read.
+   - Default URL writes use EventKit metadata only and perform final exact
+     reads without any private adapter dependency. Experimental mode retains
+     the legacy visible URL composition. URL-create idempotency fingerprints
+     bind the selected mode and reject incompatible or legacy key replay
+     before dispatch; they never use a fresh key to duplicate an uncertain item.
 4. **Native Extension Module**
    - Uses private ReminderKit/store-backed adapters only for Reminders-specific
      section, tag, image, and native URL attachment behavior.
@@ -245,7 +253,8 @@ share initialization, rate-limit history, or lazy Facade instances.
 
 - EventKit reads and primary-field mutations with exact identity and bounds.
 - Create idempotency and guarded update/complete/reopen/move/delete.
-- Visible URL composition and its final exact read.
+- EventKit-only URL metadata by default; visible URL composition and final
+  exact read only in Experimental mode. Clearing URL metadata preserves cards.
 - ReminderKit image and section writes with native sync evidence.
 - Exact-list section scope and fresh-revision tag assignment.
 - Stale-write rejection, one-use References, and unknown-outcome safety.

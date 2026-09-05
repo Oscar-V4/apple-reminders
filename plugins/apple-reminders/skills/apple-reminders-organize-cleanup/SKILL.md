@@ -9,7 +9,10 @@ Start with a bounded proposal that names exact candidates. Do not infer deletion
 
 Default to Stable Core organization: exact Reminder Lists, title/note grouping,
 completion, and archive-list moves. Sections, native tags, and exact recovery are
-Experimental and require explicit intent plus an admitted capability.
+Experimental and require an already enabled `--experimental` session, explicit
+intent, and an admitted capability. If those tools are absent, keep to an agreed
+Core action or explain the manual Reminders option; leave configuration and
+developer-tool installation unchanged.
 
 ## Workflow
 

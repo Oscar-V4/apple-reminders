@@ -4,7 +4,27 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+### Changed
+
+- Ordinary startup now advertises nine Core/Diagnostics tools. Six private
+  Native Extension/Recovery tools and Experimental diagnosis require an
+  explicit `--experimental` launch; their existing compatibility gates remain.
+- Core URL create/change now stores public EventKit metadata by default without
+  invoking a private adapter. Experimental mode retains visible-card composition.
+  Existing cards are preserved. URL-create idempotency keys bind the mode;
+  incompatible or legacy key replay is rejected before mutation.
+- Simplified first-use documentation into three installation steps and moved
+  advanced tooling to a separate guide. Python 3.11+ is still required. The
+  signed helper and release version remain unchanged until a release is cut.
+- The opt-in live harness now exercises only Core by default; `--experimental`
+  adds the historical native workflow.
+
 ### Fixed
+
+- Skip Apple's developer-tool Python shim and its filesystem aliases during
+  launcher discovery, avoiding an incidental Command Line Tools installer.
+  Reject unsupported interpreters instead of executing a failed fallback.
+
 
 - Bound GitHub immutable-release attestation verification to the exact tag
   object rather than the peeled commit, matching annotated-tag subjects.
