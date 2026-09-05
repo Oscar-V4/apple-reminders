@@ -394,7 +394,7 @@ jobs:
           for architecture in arm64 x86_64; do
             app="$work/$architecture/AppleRemindersPythonRuntime.app"
             while IFS= read -r relative; do
-              codesign --force --options runtime --timestamp --sign "$identity" "$app/$relative"
+              (umask 022; codesign --force --options runtime --timestamp --sign "$identity" "$app/$relative")
             done < "$work/macho-$architecture.txt"
             (umask 022; codesign --force --options runtime --timestamp --sign "$identity" "$app")
             codesign --verify --deep --strict --verbose=2 "$app"
@@ -435,15 +435,19 @@ jobs:
                   if path.is_symlink() or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
                       raise SystemExit("signed runtime contains an unsafe file")
                   if stat.S_ISDIR(mode):
+                      if relative not in expected_directories:
+                          raise SystemExit("signed runtime directory inventory drift")
                       if stat.S_IMODE(mode) != 0o755:
-                          raise SystemExit("signed runtime directory mode drift")
+                          raise SystemExit(f"signed runtime directory mode drift: {relative}: got {stat.S_IMODE(mode):04o}, expected 0755")
                       directories.append({"path": relative, "mode": 0o755})
                       continue
-                  data = path.read_bytes()
+                  if relative not in expected_files:
+                      raise SystemExit("signed runtime file inventory drift")
                   entry = original.get(relative)
                   expected_mode = entry["mode"] if entry else 0o644
                   if stat.S_IMODE(mode) != expected_mode:
-                      raise SystemExit("signed runtime file mode drift")
+                      raise SystemExit(f"signed runtime file mode drift: {relative}: got {stat.S_IMODE(mode):04o}, expected {expected_mode:04o}")
+                  data = path.read_bytes()
                   digest = hashlib.sha256(data).hexdigest()
                   if entry and not entry["mach_o"] and digest != entry["sha256"]:
                       raise SystemExit("signing changed a non-code runtime resource")

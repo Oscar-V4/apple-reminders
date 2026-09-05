@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -142,6 +144,50 @@ class RuntimeWorkflowPolicyTests(unittest.TestCase):
         self.assertIn('code_directory_hash=cdhash[0]', sign)
         self.assertIn('manifest.pop("unsigned_archive_sha256")', sign)
         self.assertIn('manifest.pop("unsigned_archive_bytes")', sign)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS code-signing tools")
+    def test_nested_signing_creates_public_resource_modes_without_changing_private_umask(self) -> None:
+        selected = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, timeout=10)
+        if selected.returncode:
+            self.skipTest("requires an already selected developer toolchain")
+        with tempfile.TemporaryDirectory(prefix="runtime-signing-mode-") as temporary:
+            app = Path(temporary).resolve() / "mode fixture.app"
+            binary = app / "Contents/MacOS/apple-reminders-python"
+            binary.parent.mkdir(parents=True, mode=0o755)
+            for directory in (app, app / "Contents", binary.parent):
+                directory.chmod(0o755)
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleIdentifier": "io.github.oscar-v4.apple-reminders.mode-fixture",
+                "CFBundleExecutable": binary.name, "CFBundlePackageType": "APPL",
+                "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+            }))
+            (app / "Contents/Info.plist").chmod(0o644)
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "clang", "-x", "c", "-", "-o", str(binary)],
+                input="int main(void) { return 0; }\n", capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            binary.chmod(0o755)
+            sign = self.jobs[1]
+            nested = next(line.strip() for line in sign.splitlines() if 'codesign --force' in line and '"$app/$relative"' in line)
+            outer = next(line.strip() for line in sign.splitlines() if 'codesign --force' in line and '"$app"' in line)
+            # Exercise the real workflow shell commands with an ad-hoc identity
+            # and no timestamp service. The fixture executable is never run.
+            script = (
+                "set -euo pipefail\numask 077\nidentity=-\n"
+                f"app={shlex.quote(str(app))}\nrelative=Contents/MacOS/apple-reminders-python\n"
+                + nested.replace("--timestamp ", "--timestamp=none ") + "\n"
+                + outer.replace("--timestamp ", "--timestamp=none ") + "\n"
+                + '/usr/bin/codesign --verify --deep --strict "$app"\n'
+                + "printf 'caller_umask=%s\\n' \"$(umask)\"\n"
+            )
+            result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("caller_umask=0077", result.stdout)
+            resource = app / "Contents/_CodeSignature/CodeResources"
+            self.assertEqual(stat.S_IMODE(resource.stat().st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(resource.parent.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o755)
 
     def test_shell_and_embedded_python_compile(self) -> None:
         blocks = python_blocks(self.text)
@@ -336,6 +382,53 @@ class RuntimeSigningAdmissionTests(unittest.TestCase):
         self.manifests["arm64"]["source_input_sha256"]["unexpected.py"] = "b" * 64
         self.write_manifests()
         self.run_guard("unsigned source input inventory drift")
+
+
+class RuntimeSignedInventoryDiagnosticsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="runtime-mode-diagnostic-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.unsigned, self.work, self.signed = [self.root / name for name in ("unsigned", "work", "signed")]
+        for directory in (self.unsigned, self.work, self.signed):
+            directory.mkdir()
+        self.app = self.work / "arm64" / APP
+        (self.app / "Contents/_CodeSignature").mkdir(parents=True)
+        for directory in (self.app, self.app / "Contents", self.app / "Contents/_CodeSignature"):
+            directory.chmod(0o755)
+        (self.unsigned / "python-runtime-build-arm64.json").write_text(json.dumps({
+            "files": [], "directories": [{"path": "Contents", "mode": 0o755}],
+        }))
+        self.writer = python_blocks(WORKFLOW.read_text())[2]
+
+    def run_writer(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", self.writer, str(self.unsigned), str(self.work), str(self.signed)],
+            capture_output=True, text=True,
+        )
+
+    def test_known_signature_resource_mode_reports_relative_path_and_modes(self) -> None:
+        path = self.app / "Contents/_CodeSignature/CodeResources"
+        path.write_bytes(b"synthetic signature resource")
+        path.chmod(0o600)
+        result = self.run_writer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Contents/_CodeSignature/CodeResources: got 0600, expected 0644", result.stderr)
+        self.assertNotIn(str(self.root), result.stderr)
+
+    def test_known_directory_mode_reports_relative_path_and_modes(self) -> None:
+        (self.app / "Contents/_CodeSignature").chmod(0o700)
+        result = self.run_writer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Contents/_CodeSignature: got 0700, expected 0755", result.stderr)
+        self.assertNotIn(str(self.root), result.stderr)
+
+    def test_unrecognized_path_is_rejected_without_echoing_its_name(self) -> None:
+        (self.app / "Contents/unrecognized-synthetic-name").write_bytes(b"synthetic extra file")
+        result = self.run_writer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("signed runtime file inventory drift", result.stderr)
+        self.assertNotIn("unrecognized-synthetic-name", result.stderr)
 
 
 class RuntimeFinalAttestationBoundaryTests(unittest.TestCase):
