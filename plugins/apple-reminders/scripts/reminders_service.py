@@ -351,8 +351,8 @@ def reminder_matches_action(
         return True
 
     # The native Reminders store can materialize an absent start on the first
-    # due date: floating midnight for all-day, or the same zoned date/time for
-    # zoned timed due. These observed normalizations never excuse replacing an
+    # due date: floating midnight for all-day, or the same typed date/time for
+    # timed due. These observed normalizations never excuse replacing an
     # existing start or losing a requested time zone. Other stores may retain
     # null, and every other requested/omitted stable field still must match.
     due = expected.get("due")
@@ -374,6 +374,17 @@ def reminder_matches_action(
             "local_date_time": f"{due['date']}T00:00:00",
             "time_zone": None,
             "floating": True,
+        }
+    elif (
+        due.get("kind") == "timed"
+        and set(due) == {"kind", "floating", "local_date_time"}
+        and due["floating"] is True
+        and isinstance(due["local_date_time"], str)
+    ):
+        start_matches = observed_start == {
+            **due,
+            "date_time": None,
+            "time_zone": None,
         }
     elif (
         due.get("kind") == "timed"

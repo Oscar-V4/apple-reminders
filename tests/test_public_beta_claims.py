@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -165,9 +166,17 @@ class PublicBetaClaimTests(unittest.TestCase):
             root = Path(temp_dir)
             self.copy_claim_tree(root)
             for relative in (Path("README.md"), Path("plugins/apple-reminders/README.md")):
-                self.replace(root, relative, "You do not\nneed Xcode", "You do not\nrequire Xcode")
-                self.replace(root, relative, "versioned package and verification results", "versioned package and the verification results")
-                text = (root / relative).read_text(encoding="utf-8")
+                path = root / relative
+                text = path.read_text(encoding="utf-8")
+                # Exercise harmless wording changes without binding the test
+                # to the surrounding release paragraph or Markdown wrapping.
+                for old, new in (
+                    (r"You do not\s+need Xcode", "You do not require Xcode"),
+                    (r"verification\s+results", "verification evidence"),
+                ):
+                    text, replacements = re.subn(old, new, text, count=1)
+                    self.assertEqual(replacements, 1)
+                path.write_text(text, encoding="utf-8")
                 self.assertNotIn("xcode-select", text)
                 self.assertNotIn("/usr/bin/clang", text)
                 self.assertNotIn("schema fingerprint", text)

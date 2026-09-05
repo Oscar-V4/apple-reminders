@@ -1239,7 +1239,7 @@ static BOOL MutationProjectionMatches(NSDictionary *before,
     }
     // The native Reminders store can materialize an absent start on the
     // first due date: floating midnight for all-day, or the exact canonical
-    // zoned date/time for zoned timed due. Never replace an existing start or
+    // typed date/time for timed due. Never replace an existing start or
     // excuse time-zone loss. Other stores may retain null, and every other
     // stable user field still must match.
     id due = requested[@"due"];
@@ -1259,6 +1259,13 @@ static BOOL MutationProjectionMatches(NSDictionary *before,
             @"time_zone" : [NSNull null],
             @"floating" : @YES,
         };
+    } else if ([due[@"kind"] isEqual:@"timed"] &&
+               [(NSDictionary *)due count] == 5 &&
+               [due[@"floating"] isEqual:@YES] &&
+               [due[@"local_date_time"] isKindOfClass:[NSString class]] &&
+               due[@"date_time"] == [NSNull null] &&
+               due[@"time_zone"] == [NSNull null]) {
+        derivedStart = due;
     } else if ([due[@"kind"] isEqual:@"timed"] &&
                [(NSDictionary *)due count] == 3 &&
                [due[@"date_time"] isKindOfClass:[NSString class]] &&

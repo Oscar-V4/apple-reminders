@@ -26,9 +26,10 @@ separates actual Reminders observations from automated tests and remaining work.
   arbitrary destination, including when replaying an older operation receipt.
 - Ambiguous zoned due times during a daylight-saving clock rollback are rejected
   before writing because EventKit cannot preserve which repeated time was meant.
-- Setting the first all-day due date now accepts Reminders' observed automatic
-  start value only when it is midnight on that same day. Existing starts and
-  every other preserved field still require exact verification.
+- Setting the first due date now accepts Reminders' observed automatic start
+  only when it is midnight on the requested all-day date or the exact requested
+  zoned/floating time. Existing starts and every other preserved field still
+  require exact verification.
 
 ## 0.6.0 — bundled runtime
 

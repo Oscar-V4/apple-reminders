@@ -158,6 +158,41 @@ class DueStartVerificationTests(unittest.TestCase):
         yield "timed normalization cannot hide alarm drift", before, timed_action, {
             **timed_after, "alarms": [{"kind": "relative", "offset_seconds": 0}]
         }, False
+        floating_action = PatchAction({"due": {
+            "kind": "timed", "floating": True,
+            "local_date_time": "2026-09-10T12:00:00",
+        }})
+        floating_canonical = {
+            **floating_action.patch["due"], "date_time": None, "time_zone": None,
+        }
+        floating_after = {**before, "due": floating_canonical, "start": floating_canonical}
+        yield "first floating due synthesizes exact local start", before, floating_action, floating_after, True
+        yield "first floating due may retain absent start", before, floating_action, {
+            **floating_after, "start": None
+        }, True
+        for name, start_patch in (
+            ("other wall time", {"local_date_time": "2026-09-10T12:01:00"}),
+            ("named time zone", {"time_zone": "Asia/Seoul"}),
+            ("absolute timestamp", {"date_time": "2026-09-10T12:00:00+09:00"}),
+            ("non-floating marker", {"floating": False}),
+            ("unknown component", {"unrecognized": "value"}),
+        ):
+            yield f"first floating start rejects {name}", before, floating_action, {
+                **floating_after, "start": {**floating_canonical, **start_patch}
+            }, False
+        yield "first floating due cannot replace existing start", started_before, floating_action, floating_after, False
+        yield "first floating due preserves existing start", started_before, floating_action, {
+            **floating_after, "start": existing_start
+        }, True
+        yield "floating normalization cannot hide omitted notes drift", before, floating_action, {
+            **floating_after, "notes": "unexpected change"
+        }, False
+        yield "floating normalization cannot hide alarm drift", before, floating_action, {
+            **floating_after, "alarms": [{"kind": "relative", "offset_seconds": 0}]
+        }, False
+        yield "floating normalization cannot hide due zone change", before, floating_action, {
+            **floating_after, "due": {**floating_canonical, "time_zone": "Asia/Seoul"}
+        }, False
 
     def test_python_timed_start_uses_existing_timestamp_equivalence(self):
         before = {"due": None, "start": None, "notes": "Stable"}
@@ -197,7 +232,15 @@ int main(void) {{
         NSArray *cases = [NSJSONSerialization JSONObjectWithData:input options:0 error:nil];
         NSMutableArray *results = [NSMutableArray array];
         for (NSDictionary *entry in cases) {{
-            [results addObject:@(MutationProjectionMatches(entry[@"before"], entry[@"projection"], entry[@"after"]))];
+            NSMutableDictionary *projection = [entry[@"projection"] mutableCopy];
+            NSDictionary *due = projection[@"due"];
+            // Native action projections canonicalize the closed floating
+            // input to the full read shape before mutation verification.
+            if ([due isKindOfClass:[NSDictionary class]] &&
+                due.count == 3 && [due[@"floating"] isEqual:@YES]) {{
+                projection[@"due"] = CanonicalDueVerificationValue(due);
+            }}
+            [results addObject:@(MutationProjectionMatches(entry[@"before"], projection, entry[@"after"]))];
         }}
         NSData *output = [NSJSONSerialization dataWithJSONObject:results options:0 error:nil];
         [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
