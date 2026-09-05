@@ -44,6 +44,8 @@ All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their
 
 Local wall-clock due: `{"kind":"timed","floating":true,"local_date_time":"2026-09-08T09:30:00"}`. This form has no fixed timezone or UTC offset. Do not add `date_time` or `time_zone`, including null values. Zoned times in a repeated DST hour are rejected because the selected occurrence cannot be preserved; do not replace them with floating time without the user's intent.
 
+For an ordinary timed request, use the user's resolved timezone as in the example. Choose floating when the user intends the clock time to follow the device's timezone, rather than inventing that travel behavior.
+
 The app may show a relative alarm's trigger as its main time. Report due and trigger separately; a verified EventKit relative alarm does not prove the app's separate Early Reminder control is configured.
 
 ## Image follow-up

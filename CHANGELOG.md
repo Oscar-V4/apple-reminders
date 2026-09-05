@@ -4,8 +4,8 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## 0.6.1 — GUI workflow corrections
 
-This is a release candidate. Publication requires a matching signed EventKit
-helper and the versioned release checks. The [GUI flow record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.6.1-gui-flows.md)
+The changes below describe v0.6.1. Its versioned GitHub Release records the
+publication and verification results. The [GUI flow record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.6.1-gui-flows.md)
 separates actual Reminders observations from automated tests and remaining work.
 
 ### Changed
