@@ -36,6 +36,14 @@ reviewed release and start a new Codex task. Do not install a different Python
 to repair the packaged runtime. Startup stops rather than choosing a different
 interpreter, compiling a helper, or changing Gatekeeper settings.
 
+If the error specifically identifies the **runtime cache**, reinstalling alone
+does not replace that cached copy. Fully quit Codex. In Finder, choose
+**Go → Go to Folder…** and open
+`~/Library/Caches/apple-reminders-codex/python-runtime/`. Move only that
+`python-runtime` folder to Trash, then reopen Codex and start a new task. The
+plugin recreates it from the signed capsule. This removes executable cache
+files only; it does not change reminders or operation records.
+
 ## Reminders permission
 
 For first use, ask for a bounded read such as today's reminders. If access has
