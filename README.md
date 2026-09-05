@@ -84,6 +84,7 @@ retry. Repeated requests do not reopen the first permission prompt.
 | What you see | What to do |
 |---|---|
 | A bundled runtime file is missing or invalid | Reinstall the same reviewed release, then start a new Codex task. |
+| A runtime cache error | Follow the [cache recovery steps](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md#bundled-runtime-and-finder-launched-codex). |
 | A developer-tools installer appears during ordinary use | Cancel it and check the installed plugin version; this version's ordinary startup uses its bundled runtime. |
 | The plugin is missing after installation or upgrade | Start a new Codex task. |
 | An advanced feature is unsupported | Continue with ordinary reminders and check that feature's limits in the advanced guide. |

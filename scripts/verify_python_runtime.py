@@ -265,7 +265,7 @@ def run(argv: list[str], *, timeout: int = 90, env: dict[str, str] | None = None
 def verify_signatures(app: Path, architecture: str, team_id: str, *, notarized: bool, macho_paths: list[str], expected_cdhash: str | None = None) -> None:
     developer_id = 'certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
     requirement = f'anchor apple generic and identifier "{BUNDLE_ID}" and certificate leaf[subject.OU] = "{team_id}" and {developer_id}'
-    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", requirement, str(app)])
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", f"={requirement}", str(app)])
     if expected_cdhash is not None:
         result = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=4", str(app)], capture_output=True, text=True, timeout=30, check=False)
         matches = re.findall(r"^CDHash=([0-9a-f]{40})$", result.stderr, re.MULTILINE)
@@ -274,7 +274,7 @@ def verify_signatures(app: Path, architecture: str, team_id: str, *, notarized: 
     nested_requirement = f'anchor apple generic and certificate leaf[subject.OU] = "{team_id}" and {developer_id}'
     for relative in macho_paths:
         path = app / relative
-        run(["/usr/bin/codesign", "--verify", "--strict", "-R", nested_requirement, str(path)])
+        run(["/usr/bin/codesign", "--verify", "--strict", "-R", f"={nested_requirement}", str(path)])
         if run(["/usr/bin/lipo", "-archs", str(path)]).strip().split() != [architecture]:
             raise VerificationError("runtime Mach-O architecture mismatch")
     if notarized:

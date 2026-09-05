@@ -96,6 +96,7 @@ elif tool == 'codesign':
         raise SystemExit(0)
     required = ['--verify', '--deep', '--strict', '--all-architectures', '--test-requirement']
     assert args[:5] == required, args
+    assert args[5].startswith('='), 'codesign treats unprefixed requirements as file paths'
     assert 'anchor apple generic' in args[5], args
     assert 'io.github.oscar-v4.apple-reminders.python-runtime' in args[5], args
     assert 'V8347N9346' in args[5], args
