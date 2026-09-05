@@ -1,7 +1,7 @@
 # 0022 — Bundle the Python runtime for ordinary installation
 
-**Status:** Implementation in progress; distribution requires signed candidates
-and release verification
+**Status:** Implemented for v0.6.0; signed components and native execution
+verified. Publication remains subject to the exact-tag release verifier.
 
 ## Context
 
