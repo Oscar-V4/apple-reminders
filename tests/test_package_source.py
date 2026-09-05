@@ -122,7 +122,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         cls._source_snapshot.cleanup()
         super().tearDownClass()
 
-    def test_extracted_manifest_skips_an_old_python_earlier_in_path(self) -> None:
+    def test_extracted_manifest_does_not_probe_any_host_python(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             archive = build_source_package.build_package(self.plugin_root, base / "build")
@@ -139,9 +139,11 @@ class SourcePackagePolicyTests(unittest.TestCase):
             supported_bin = base / "supported" / "bin"
             old_bin.mkdir(parents=True)
             supported_bin.mkdir(parents=True)
+            old_selected = base / "old-selected"
             old_python = old_bin / "python3"
             old_python.write_text(
                 "#!/bin/sh\n"
+                f"printf selected > {shlex.quote(str(old_selected))}\n"
                 "if [ \"${1-}\" = \"-c\" ]; then exit 1; fi\n"
                 "exit 97\n",
                 encoding="utf-8",
@@ -186,9 +188,10 @@ class SourcePackagePolicyTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertTrue(
+            self.assertFalse(old_selected.exists(), "launcher probed the old host Python")
+            self.assertFalse(
                 selected.is_file(),
-                "launcher did not select the later supported Python",
+                "launcher selected an external supported Python instead of its bundled runtime",
             )
             responses = [json.loads(line) for line in completed.stdout.splitlines()]
             self.assertEqual(len(responses[1]["result"]["tools"]), 9)
@@ -368,7 +371,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2, completed.stdout)
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.5.2")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], manifest["version"])
         tools = responses[1]["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], DEFAULT_MCP_TOOL_NAMES)
         self.assertTrue(all("outputSchema" not in tool for tool in tools))
@@ -647,8 +650,9 @@ class SourcePackagePolicyTests(unittest.TestCase):
             info_payload = plistlib.loads(
                 (REPO_ROOT / "scripts" / "eventkit_helper_app_info.plist").read_bytes()
             )
-            info_payload["CFBundleShortVersionString"] = "0.5.2"
-            info_payload["CFBundleVersion"] = "0.5.2"
+            fixture_version = json.loads((plugin / ".codex-plugin/plugin.json").read_text())["version"]
+            info_payload["CFBundleShortVersionString"] = fixture_version
+            info_payload["CFBundleVersion"] = fixture_version
             info.write_bytes(plistlib.dumps(info_payload, sort_keys=True))
             executable.write_bytes(b"\xca\xfe\xba\xbe" + b"universal-helper")
             executable.chmod(0o755)
@@ -707,7 +711,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 },
                 "notarization_checked": True,
                 "notarized": True,
-                "plugin_version": "0.5.2",
+                "plugin_version": fixture_version,
                 "signature": "developer-id",
                 "team_id": "V8347N9346",
             }

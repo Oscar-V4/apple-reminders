@@ -28,10 +28,11 @@ through Apple services and can affect other devices or shared-list participants.
 
 ## Execution and Network Boundaries
 
-- `.mcp.json` launches a local shell shim that selects a supported Python from
-  the process `PATH` or fixed local install paths, then replaces itself with
-  `mcp/server.py` as a local stdio subprocess. The shim does not deliberately
-  source user shell startup files.
+- `.mcp.json` launches a local shell shim that verifies the packaged Python
+  capsule and signed runtime, then starts `mcp/server.py` as a local stdio
+  subprocess. It does not search for an external Python, download runtime code,
+  or source user shell startup files. The bundled launcher removes inherited
+  Python configuration before starting the packaged interpreter.
 - The MCP server invokes bundled local adapters; packaged runtime ignores
   backend path overrides and does not call a plugin-owned web service.
 - EventKit and private ReminderKit operations communicate with macOS system
@@ -50,6 +51,8 @@ Depending on the commands used, operational files may be created under:
   - idempotency metadata and lock;
   - temporary or legacy version/schema capability records.
 - `~/Library/Caches/apple-reminders-codex/`
+  - verified Python runtime copies under `python-runtime/`, with extraction
+    coordination metadata; these contain runtime code rather than Reminder data;
   - the three locally compiled advanced ReminderKit helpers for section writes,
     image-attachment changes, and exact Recently Deleted inspection or
     recovery, plus their build locks;
@@ -130,11 +133,13 @@ checks rather than the user's live Reminders data.
 
 ## Source and Diagnostic Hygiene
 
-The deterministic source-package policy rejects databases, journals, caches,
-bytecode, `.DS_Store`, screenshots/UI captures, archives, backups, symlinks,
-empty stubs, and unapproved images. Rejected screenshots, archives, backups,
-and data stores are classified by path only; validators do not inspect their
-contents.
+The deterministic package policy rejects user databases, journals, caches,
+`.DS_Store`, screenshots/UI captures, backup archives, unexpected symlinks,
+empty stubs, and unapproved images. The exact reviewed Python runtime capsules
+are a deliberate exception for distribution archives and their upstream
+bytecode; their complete file inventories, digests and provenance are checked.
+Other rejected screenshots, archives, backups and data stores are classified by
+path only; validators do not inspect their contents.
 
 Before sharing logs or command output, remove reminder content, account/list
 names, identifiers, URLs, local paths, hashes, schema fingerprints, and any
@@ -147,12 +152,12 @@ other data that could identify the user or their task history.
 - The public Interface does not expose log purge. After removing or stopping
   the plugin and confirming that no operation is running, users may remove only
   the plugin-owned support files described in this document.
-- Delete compiled helpers, capability records, idempotency metadata, legacy
+- Delete cached Python runtimes, compiled helpers, capability records, idempotency metadata, legacy
   metadata caches, or legacy/explicit-path backups when they are no longer
   needed and no operation is running. The current runtime does not manage the
   retention of backup files produced by older builds.
 - Revoke Reminders access in macOS settings to disable the associated public
-  integration path. The 0.5 runtime does not use macOS Automation or Apple
+  integration path. The current runtime does not use macOS Automation or Apple
   Events.
 
 Removing plugin-owned files does not undo changes already made to Apple

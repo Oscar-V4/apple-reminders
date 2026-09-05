@@ -43,19 +43,19 @@ class PluginValidationTests(unittest.TestCase):
         )
         self.assertEqual(entry["category"], "Productivity")
 
-    def test_readme_separates_released_setup_from_development_behavior(self) -> None:
+    def test_readme_keeps_bundled_installation_short_and_versioned(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         setup = readme.split("## Get started in three steps", 1)[1].split("## Everyday use", 1)[0]
-        self.assertIn("https://www.python.org/downloads/macos/", setup)
-        self.assertIn("Python 3.11 or newer", setup)
-        self.assertIn("codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2", setup)
+        version = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text())["version"]
+        self.assertNotIn("https://www.python.org/downloads/macos/", setup)
+        self.assertIn(f"codex plugin marketplace add Oscar-V4/apple-reminders --ref v{version}", setup)
         self.assertIn("codex plugin add apple-reminders@oscar-v4-reminders", setup)
-        self.assertIn("new task", setup)
+        self.assertRegex(setup, r"new (?:Codex )?task")
         self.assertNotIn("python3 -c", setup)
         self.assertNotIn("xcode-select", setup)
         self.assertNotIn("diagnose_reminders", setup)
-        self.assertIn("Published v0.5.2", readme)
-        self.assertIn("Unreleased development branch", readme)
+        self.assertIn("bundled", readme.lower())
+        self.assertIn("separate Python installation", " ".join(readme.split()))
         self.assertIn("9 Core and diagnostic tools", readme)
         self.assertIn("## Upgrade", readme)
         self.assertIn("## Uninstall", readme)
@@ -135,30 +135,17 @@ class PluginValidationTests(unittest.TestCase):
         interface = manifest["interface"]
 
         self.assertEqual(interface["displayName"], "Apple Reminders for Codex")
-        self.assertIn("notes and screenshots", interface["shortDescription"])
+        self.assertIn("Apple Reminders", interface["shortDescription"])
         self.assertIn("meeting notes", interface["defaultPrompt"][0])
         self.assertIn("owners and deadlines", interface["defaultPrompt"][0])
         self.assertIn("screenshot", interface["defaultPrompt"][1])
         self.assertIn("useful details", interface["defaultPrompt"][1])
         self.assertIn("overdue", interface["defaultPrompt"][2])
         self.assertIn("without Xcode", interface["longDescription"])
-        self.assertIn(
-            "Tag assignments and native URL attachments",
-            interface["longDescription"],
-        )
-        self.assertIn("avoid compilation", interface["longDescription"])
-        self.assertIn(
-            "Section writes, image-attachment changes",
-            interface["longDescription"],
-        )
-        self.assertIn(
-            "require Xcode Command Line Tools",
-            interface["longDescription"],
-        )
-        self.assertNotIn(
-            "Optional section, tag, attachment",
-            interface["longDescription"],
-        )
+        self.assertIn("without Xcode or a separate Python installation", interface["longDescription"])
+        self.assertIn("bundled signed runtime", interface["longDescription"])
+        self.assertIn("Experimental features are off by default", interface["longDescription"])
+        self.assertIn("additional compatibility and developer-tool requirements", interface["longDescription"])
         for prompt in interface["defaultPrompt"]:
             normalized = prompt.casefold()
             for advanced_term in (

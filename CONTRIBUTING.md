@@ -62,7 +62,7 @@ live harness. First read `list_reminder_lists` and copy the exact writable
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/live_smoke.py \
-  --confirm-live-reminders --source-id '<exact-source-id>'
+  --bundled-runtime --confirm-live-reminders --source-id '<exact-source-id>'
 ```
 
 For source-only Doctor output, run
@@ -206,15 +206,20 @@ Use only synthetic fixtures. Never commit, package, or attach:
 - journals, caches, idempotency/capability records, schema dumps tied to a user,
   or container backups;
 - `.DS_Store`, bytecode, screenshots/UI captures, archives, recovery copies, or
-  compiled helpers other than the exact reviewed EventKit app described below.
+  compiled helpers other than the exact reviewed components described below.
 
-The sole planned compiled-artifact exception is
+The EventKit compiled-artifact exception is
 `plugins/apple-reminders/native/AppleRemindersEventKitHelper.app` together with
 `native/eventkit-helper-build.json`. It must come from the protected signing
 workflow, retain the exact allowlisted file tree, pass Developer ID,
 notarization, Gatekeeper, source-hash, mode, and artifact-attestation
 verification, and enter the repository through normal review. Never commit a
 local or ad-hoc build.
+
+The only other binary exceptions are the two signed Python capsules and their
+three metadata files under `plugins/apple-reminders/runtime/`, described below.
+This does not permit arbitrary archives, downloaded tools, or locally built
+executables in the package.
 
 Do not inspect the contents of a suspected screenshot, archive, backup, or user
 data file merely to decide whether it belongs in the package. Classify it by
@@ -244,10 +249,11 @@ proves ancestry, historical build inputs, and the exact workflow attestation.
 Runtime C/plist/lock changes require a fresh runtime; an unrelated plugin
 version or CI-tooling edit does not change the identity of an existing runtime.
 
-Keep the ordinary launcher on the previous path while preparing infrastructure.
-Switch `.mcp.json` to `scripts/launch_bundled_mcp.sh` only when both signed
-capsules and the matching plugin-version EventKit helper are assembled and
-verified. The bundled launcher has no external Python or download fallback.
+The ordinary `.mcp.json` uses `scripts/launch_bundled_mcp.sh`. Both signed
+capsules and the matching plugin-version EventKit helper must remain assembled
+and verified together. The bundled launcher has no external Python or download
+fallback. Its fixed `--render-daily-brief` entrypoint also runs the skill's
+renderer without requiring a host Python installation.
 
 ### Plugin package
 

@@ -2,7 +2,7 @@
 
 ## Before filing an issue
 
-Confirm that you are using the latest tagged release on macOS with Apple Reminders available. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run metadata-only summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure. Opt in to Experimental toolchain diagnosis only for a CLT-required capability failure.
+Confirm the exact installed plugin version and compare it with the latest tagged release. These documents describe v0.6.0; use the matching release for its package and verification results. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run metadata-only summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure. Opt in to Experimental toolchain diagnosis only for a CLT-required capability failure.
 
 ## What to include
 
@@ -11,9 +11,15 @@ Confirm that you are using the latest tagged release on macOS with Apple Reminde
 - Codex desktop or CLI version
 - the exact user goal and tool error code
 - whether Core work still succeeds
+- whether the bundled runtime starts; no separate Python installation is required
 - a minimal, redacted reproduction
 
 Never attach a Reminders database, container archive, diagnostic bundle, reminder content, image attachment, account identifier, token, or absolute home-directory path. Replace exact IDs with stable placeholders while preserving whether two IDs were equal or different.
+
+For a missing or invalid bundled runtime, reinstall the same reviewed release
+and start a new Codex task. Installing Homebrew, another Python, or developer
+tools is not the repair path for ordinary startup. Advanced tools remain off by
+default and retain their separate compatibility requirements.
 
 ## Supported scope
 

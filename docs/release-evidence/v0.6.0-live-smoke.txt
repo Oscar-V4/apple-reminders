@@ -1,0 +1,15 @@
+Core preflight passed: resolved a writable non-delegated source; identifiers omitted.
+step=ensure_list status=passed latency_ms=448.034
+step=ensure_list_replay status=passed latency_ms=7.136
+step=create_reminder status=passed latency_ms=644.066
+step=create_reminder_replay status=passed latency_ms=293.470
+step=bounded_fetch status=passed latency_ms=344.892
+step=exact_read_primary status=passed latency_ms=321.443
+step=exact_read_parallel status=passed latency_ms=289.958
+step=patch_reminder status=passed latency_ms=910.312
+step=stale_reference status=passed latency_ms=291.286
+step=complete_reminder status=passed latency_ms=925.014
+step=reopen_reminder status=passed latency_ms=891.703
+step=delete_reminder status=passed latency_ms=616.803
+step=post_delete_read status=passed latency_ms=291.317
+step=cleanup status=passed latency_ms=2009.707

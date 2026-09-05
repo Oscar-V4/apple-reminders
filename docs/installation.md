@@ -1,53 +1,48 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide covers environment problems, experimental capabilities, development
-launches, and removal. You do not need to complete every section before using
-the plugin.
+This guide describes v0.6.0. The matching
+[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.0) contains
+the versioned package and verification results.
 
-## Published release versus development
+## This version's contract
 
-The pinned installation in the README installs **v0.5.2**, the latest published
-release at the time of this change. It does not install the unreleased changes
-described in [ADR 0021](decisions/0021-core-default-experience.md).
+| Area | v0.6.0 contract |
+|---|---|
+| Tool discovery | 9 Core and diagnostic tools by default; 6 additional experimental tools require `--experimental` startup |
+| Experimental dispatch | Disabled tools are rejected unless the runtime started with `--experimental`; existing operation gates still apply |
+| Core `url` create/change | EventKit URL metadata only by default; native visible-card composition is an experimental operation |
+| Python | Bundled signed Python runtime; no separate Python installation |
+| EventKit helper | Bundled signed, notarized helper with its existing permission identity |
 
-| Contract | Published v0.5.2 | Unreleased development branch |
-|---|---|---|
-| Tool discovery | Static 15-tool interface | Static 9-tool default; 15 with `--experimental` |
-| Experimental dispatch | Tools are listed; each operation still needs its admission and verification requirements | Disabled tools are rejected unless the runtime started with `--experimental`; existing operation gates still apply |
-| Core `url` create/change | EventKit plus native URL attachment composition | EventKit metadata by default; legacy hybrid composition with `--experimental` |
-| Python | Requires Python 3.11+ | Still requires Python 3.11+; avoids probing Apple's developer-tool Python shim and removes unsupported-interpreter fallback |
-| EventKit helper | Bundled signed, notarized helper | Same reviewed helper; no native rebuild is needed for these changes |
+Older releases have different startup and URL behavior. Use the documentation
+at the exact installed tag when diagnosing an older installation.
 
-Use [the v0.5.2 documentation](https://github.com/Oscar-V4/apple-reminders/tree/v0.5.2/docs)
-when inspecting the exact published contract. Documentation on a development
-branch is not evidence that an installed release has changed.
+## Bundled runtime and Finder-launched Codex
 
-## Python and Finder-launched Codex
+This version includes Python 3.13.15 for Apple silicon and Intel Macs. You do
+not need Python, Homebrew, Xcode, or Command Line Tools for ordinary Core work.
+Codex launched from Finder uses the same packaged runtime as Codex launched
+from a terminal; startup does not search `PATH`, activate a virtual environment,
+or run Apple's developer-tool Python shim.
 
-Install Python 3.11 or newer using a macOS installer from
-[python.org](https://www.python.org/downloads/macos/), then fully quit and reopen
-Codex. The runtime has no bundled Python interpreter yet. Existing supported
-Homebrew or python.org installations can be used; Homebrew is not required.
+On first start, the plugin verifies its selected runtime capsule and prepares a
+private copy under `~/Library/Caches/apple-reminders-codex/python-runtime/`.
+Later starts use that verified copy. No interpreter is downloaded at runtime.
+The cache contains runtime code, not reminder content.
 
-A GUI-launched app may see a different `PATH` from Terminal. The launcher checks
-`PATH` and standard Homebrew and python.org locations without sourcing shell
-startup files. A Python that works in an activated virtual environment in
-Terminal may therefore be unavailable to Codex.
+If the runtime or its signature is missing or invalid, reinstall the same
+reviewed release and start a new Codex task. Do not install a different Python
+to repair the packaged runtime. Startup stops rather than choosing a different
+interpreter, compiling a helper, or changing Gatekeeper settings.
 
-The published launcher can probe `/usr/bin/python3`, which belongs to Apple's
-developer tools and may open their installer. Ordinary Core operations do not
-need those tools. Cancel that installer and check the Python installation
-above. The development launcher excludes the system shim, including resolved
-aliases, before testing interpreter versions. **That fix is not in v0.5.2.**
-If a published installation still prompts after installing Python and reopening
-Codex, report the launcher issue through [Support](../SUPPORT.md); do not assume
-that installing Xcode establishes a plugin requirement or compatibility.
-
-If no supported interpreter can be found, the development launcher exits with
-an actionable error. It does not install Python, compile a helper, or silently
-try an unsupported interpreter. A self-contained signed runtime is a future
-distribution priority, not a completed part of this change.
+If the error specifically identifies the **runtime cache**, reinstalling alone
+does not replace that cached copy. Fully quit Codex. In Finder, choose
+**Go → Go to Folder…** and open
+`~/Library/Caches/apple-reminders-codex/python-runtime/`. Move only that
+`python-runtime` folder to Trash, then reopen Codex and start a new task. The
+plugin recreates it from the signed capsule. This removes executable cache
+files only; it does not change reminders or operation records.
 
 ## Reminders permission
 
@@ -69,10 +64,9 @@ profile is not sufficient evidence.
 
 ## Experimental capabilities
 
-The following paths are outside ordinary EventKit Core. In the development
-runtime, all six Native Extension and Recovery tools require explicit
-experimental startup. In v0.5.2 those tools are already listed. In both cases,
-listing a tool does not mean the current Mac supports the requested operation.
+The following paths are outside ordinary EventKit Core. All six Native
+Extension and Recovery tools require explicit experimental startup. Listing a
+tool does not mean the current Mac supports the requested operation.
 
 | Capability | Local compiler requirement |
 |---|---|
@@ -97,17 +91,18 @@ diagnosis uses `execution_mode=experimental_toolchain`. If that reports
 install Apple's Command Line Tools separately. Core does not require this step.
 An unsupported build remains unsupported after installing a compiler.
 
-## Testing the development runtime
+## Opting in to experimental tools
 
-These commands are for a developer working from the repository root, not a
-change to a pinned marketplace installation:
+These commands show the two startup modes from a complete release checkout.
+They are for an isolated MCP client; the packaged Codex configuration uses the
+default mode:
 
 ```bash
 # Default Core and diagnostic MCP server: 9 tools.
-/bin/sh plugins/apple-reminders/scripts/launch_mcp.sh
+/bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh
 
-# Opt-in development MCP server: 15 tools, with existing private-operation gates.
-/bin/sh plugins/apple-reminders/scripts/launch_mcp.sh --experimental
+# Opt-in MCP server: 15 tools, with existing private-operation gates.
+/bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh --experimental
 ```
 
 Each starts an MCP server that expects protocol messages on standard input;
@@ -160,5 +155,5 @@ before removing anything, and separately inspect any custom external legacy
 backup directory that you explicitly configured.
 
 You can also revoke the helper's Reminders access in **System Settings →
-Privacy & Security → Reminders**. The v0.5 runtime does not use macOS Automation
+Privacy & Security → Reminders**. The current runtime does not use macOS Automation
 or Apple Events, and it does not create metadata caches or backup archives.

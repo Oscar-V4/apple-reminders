@@ -2,10 +2,9 @@
 
 This matrix audits the current checked-out public interface as composed user journeys. The live source of truth for tool names and closed actions is `plugins/apple-reminders/schemas/mcp-tools.json`; this document records the safe workflow around that interface.
 
-The development default exposes nine Core/Diagnostics tools. Six Native and
+The v0.6.0 candidate default exposes nine Core/Diagnostics tools. Six Native and
 Recovery tools require an explicit `--experimental` launch before any listed
-Experimental workflow; all existing admission gates still apply. Published
-v0.5.2 still exposes the original 15-tool surface. See
+Experimental workflow; all existing admission gates still apply. See
 [ADR 0021](decisions/0021-core-default-experience.md).
 
 In default Core mode, `url` writes only public EventKit metadata and preserves
@@ -36,6 +35,11 @@ metadata-only receipt is not proof of a visible native card.
 
 ## Runtime dependency boundary
 
+All modes use the packaged Python runtime; there is no separate Python
+installation. Compiler requirements below apply only to the selected advanced
+operation. The package targets macOS 14+, while fresh-user TCC and minimum-OS
+end-to-end execution remain separate acceptance evidence.
+
 | Runtime boundary | Paths | Xcode Command Line Tools |
 | --- | --- | --- |
 | **Stable Core** | Core reads and changes through the bundled signed EventKit helper | Not required; Core and default diagnosis never invoke `clang`. |
@@ -49,7 +53,7 @@ metadata-only receipt is not proof of a visible native card.
 | Sections | Separate exact Reminder Lists, or an agreed text prefix/heading in title or notes. |
 | Native tags | A plain-text label in title or notes, or a [user-authored Shortcut](https://support.apple.com/en-us/106430) using Apple's documented tag-capable Reminders actions. |
 | Native image | A user-provided remote reference in notes, or a text description; never sync a private local path. |
-| Native URL attachment | A contextual link in notes. The current `url` field is hybrid and therefore not Core-only. |
+| Native URL attachment | Use the Core `url` field for EventKit URL metadata, or a contextual link in notes. A visible native card remains experimental. |
 | Recently Deleted recovery | Move active items to an archive list before deletion; use the Reminders UI manually when private recovery is blocked. |
 
 ## Capability and workflow matrix

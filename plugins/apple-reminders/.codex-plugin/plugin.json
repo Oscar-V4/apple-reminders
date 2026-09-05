@@ -1,7 +1,7 @@
 {
   "name": "apple-reminders",
-  "version": "0.5.2",
-  "description": "Turn meeting notes, screenshots, and plans into organized Apple Reminders from Codex on macOS.",
+  "version": "0.6.0",
+  "description": "Read, add, update, and complete Apple Reminders from Codex on your Mac.",
   "author": {
     "name": "Sungsoo Kim (Oscar-V4)",
     "url": "https://github.com/Oscar-V4"
@@ -23,8 +23,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders for Codex",
-    "shortDescription": "Turn notes and screenshots into Apple Reminders",
-    "longDescription": "Turn meeting notes and screenshots into structured Apple Reminders, create items in exact lists, and review overdue or upcoming work. Core runs locally on macOS 14+ without Xcode and uses exact read-backs for successful writes. Tag assignments and native URL attachments avoid compilation but remain version-sensitive private-store features. Section writes, image-attachment changes, and exact Recently Deleted inspection or recovery require Xcode Command Line Tools. Changes may sync through Apple accounts and shared lists; there is no plugin-owned remote backend.",
+    "shortDescription": "Manage Apple Reminders naturally from Codex",
+    "longDescription": "Read what is due, turn notes into reminders, and update or complete items in exact lists. Core runs locally on macOS 14+ without Xcode or a separate Python installation, with a bundled signed runtime and exact read-backs for successful writes. Experimental features are off by default; sections, native tags, attachments, and recovery have additional compatibility and developer-tool requirements. Changes may sync through Apple accounts and shared lists; there is no plugin-owned remote backend.",
     "developerName": "Sungsoo Kim (Oscar-V4)",
     "category": "Productivity",
     "capabilities": [

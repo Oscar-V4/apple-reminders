@@ -14,24 +14,24 @@ private-interface boundary in
 
 ## Start only from a verified release
 
-The checked-in `v0.5.2` commands are release-candidate instructions, not proof
+The checked-in `v0.6.0` commands are release-candidate instructions, not proof
 that the tag or assets already exist. Do not recruit testers until the exact
 tag is published as an immutable two-asset GitHub Release and the canonical
 verifier succeeds from a clean tag checkout:
 
 ```bash
-python3 scripts/verify_release_assets.py v0.5.2
+python3 scripts/verify_release_assets.py v0.6.0
 ```
 
 That command must re-download the deterministic ZIP and `SHA256SUMS`, verify
 the immutable release and shared two-subject SLSA provenance, bind the exact
 tag to canonical GitHub main, rebuild the ZIP twice, audit source, and verify
-the signed-helper manifest without accessing Apple Reminders data.
+the signed EventKit and Python manifests without accessing Apple Reminders data.
 
 Install only the verified exact ref:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -41,8 +41,12 @@ entry does not move its pinned ref.
 
 ## Product and privacy boundary
 
-- Stable Core uses documented EventKit, needs macOS 14+, Python 3.11+, and
-  Reminders permission, and does not need Xcode or Xcode Command Line Tools.
+- Stable Core uses documented EventKit and targets macOS 14+. A bundled Python
+  runtime needs no separate Python installation; Reminders permission is still
+  required. Core does not need Xcode or Xcode Command Line Tools.
+- Default discovery contains 9 Core and diagnostic tools. The 6 additional
+  experimental tools require `--experimental` startup. Default URL writes store
+  EventKit URL metadata only.
 - Experimental Internals are private and version-sensitive. The
   compiler-free private paths and CLT-required private paths remain separate.
 - Every private mutation or exact recovery requires the exact macOS
@@ -66,7 +70,8 @@ Never submit Reminder or list titles, notes, IDs, account data, URLs,
 attachments, screenshots, logs, Doctor output, hashes, database contents,
 build strings, local paths, prompt wording, or free-form machine details. The
 receipt records only exact plugin/Codex versions, hardware class, macOS and
-Python versions, Python source category, Xcode/Command Line Tools state,
+bundled Python version/source, optional external Python presence, Xcode/Command
+Line Tools state,
 bounded scenario outcomes, stable error categories, and cleanup state.
 
 ## Receipt format
@@ -77,7 +82,9 @@ and select exactly one scenario. The closed
 [`external-tester-receipt.schema.json`](external-tester-receipt.schema.json)
 has no field for personal content, identifiers, screenshots, logs, hashes, or
 paths. The checked-in example is synthetic documentation, not external
-evidence.
+evidence. Older receipt source categories remain valid for older versions. The
+optional `external_python` field records `absent`, `installed`, or `not_checked`;
+only `absent` supports the specific no-external-Python environment claim.
 
 Validate before sharing:
 
@@ -105,7 +112,9 @@ change. Record only the bounded outcome, never the synthetic content.
 
 ### `fresh_core_allow`
 
-Use a fresh TCC subject with full Xcode and Command Line Tools both absent.
+Use a fresh TCC subject with external Python, full Xcode and Command Line Tools
+all absent. Record `python.source: bundled` and `external_python: absent`; a
+bundled interpreter alone does not prove that external Python is absent.
 
 - Confirm only `xcode: absent` and `command_line_tools: absent`; do not submit
   command output or a tool path.
@@ -122,7 +131,9 @@ Use a fresh TCC subject with full Xcode and Command Line Tools both absent.
 
 ### `fresh_core_deny`
 
-Use a separate fresh TCC subject with full Xcode and Command Line Tools absent.
+Use a separate fresh TCC subject with external Python, full Xcode and Command
+Line Tools absent. Record `external_python: absent` only after checking that
+precondition; leave it `not_checked` when it has not been checked.
 
 - Verify the release and install the exact tag.
 - Request access once and deny the native prompt.
@@ -153,12 +164,12 @@ Use an actual macOS 14.x subject rather than deployment-target metadata.
 
 ### `upgrade_identity`
 
-The current release-candidate transition is `v0.5.1` to `v0.5.2`.
+The current release-candidate transition is `v0.5.2` to `v0.6.0`.
 
-- On a disposable subject with Reminders permission granted to the `v0.5.1`
+- On a disposable subject with Reminders permission granted to the `v0.5.2`
   signed helper, create one synthetic Reminder with an alarm and read it back.
-- Verify `v0.5.2`, remove the plugin and repo marketplace entry, add the repo at
-  `v0.5.2`, re-add the plugin, and start a new Codex task.
+- Verify `v0.6.0`, remove the plugin and repo marketplace entry, add the repo at
+  `v0.6.0`, re-add the plugin, and start a new Codex task.
 - Run a bounded read and one unrelated synthetic change, confirming canonical
   alarm state through a fresh exact read-back.
 - Record only `granted_without_prompt` or `granted_after_prompt`; do not submit

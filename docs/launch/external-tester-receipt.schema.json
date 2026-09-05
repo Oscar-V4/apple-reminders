@@ -64,6 +64,7 @@
         "source": {
           "type": "string",
           "enum": [
+            "bundled",
             "homebrew",
             "python_org",
             "system",
@@ -198,6 +199,15 @@
         "failed",
         "not_run"
       ]
+    },
+    "external_python": {
+      "type": "string",
+      "enum": [
+        "absent",
+        "installed",
+        "not_checked"
+      ],
+      "description": "Optional external Python presence; bundled runtime use alone does not prove absence."
     }
   }
 }

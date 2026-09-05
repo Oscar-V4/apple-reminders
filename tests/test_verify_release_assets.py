@@ -420,9 +420,9 @@ class ReleaseVerificationDocumentationTests(unittest.TestCase):
             "Source/helper refresh PR",
             "four v4 upload pins",
             "three v4\n   download pins",
-            "470b2251cae3086d774f23afce30a1e9986ed578",
-            "1a1181ee919c31a1912b3ea01b5ce0c6054e8e53",
-            "plugin version `0.5.2`",
+            "eventkit-helper-build.json",
+            "one shared five-subject SLSA statement",
+            "Use a merge commit",
         ):
             self.assertIn(phrase, text)
 

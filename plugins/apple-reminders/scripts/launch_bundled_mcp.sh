@@ -130,7 +130,7 @@ verify_app() {
   [ -z "$unsafe_entry" ] || fail 'The cached runtime contains an unexpected owner, link, or special file. Remove its Python runtime cache and retry.'
   regular_file "$app/Contents/MacOS/apple-reminders-python" &&
     [ -x "$app/Contents/MacOS/apple-reminders-python" ] || fail 'The bundled Python launcher is missing or not executable. Reinstall the plugin.'
-  /usr/bin/codesign --verify --deep --strict --all-architectures --test-requirement "$signing_requirement" "$app" >&2 ||
+  /usr/bin/codesign --verify --deep --strict --all-architectures --test-requirement "=$signing_requirement" "$app" >&2 ||
     fail 'The bundled runtime signature is invalid. Reinstall the plugin or remove its Python runtime cache and retry.'
   # Team/bundle identity alone would also accept an older signed capsule. The
   # root CodeDirectory binds this exact executable and its sealed resources.

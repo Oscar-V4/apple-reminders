@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,13 @@ class PublicBetaClaimTests(unittest.TestCase):
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, target)
+        # Model the assembled release in synthetic copies. The real-tree test
+        # separately requires the actual signed helper to match the plugin.
+        plugin = json.loads((destination / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())
+        helper_path = destination / "plugins/apple-reminders/native/eventkit-helper-build.json"
+        helper = json.loads(helper_path.read_text())
+        helper["plugin_version"] = plugin["version"]
+        helper_path.write_text(json.dumps(helper, indent=2) + "\n")
 
     def run_checker(self, root: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -157,9 +165,8 @@ class PublicBetaClaimTests(unittest.TestCase):
             root = Path(temp_dir)
             self.copy_claim_tree(root)
             for relative in (Path("README.md"), Path("plugins/apple-reminders/README.md")):
-                self.replace(root, relative, "Python 3.11 or newer", "Python 3.11+")
                 self.replace(root, relative, "You do not\nneed Xcode", "You do not\nrequire Xcode")
-                self.replace(root, relative, "latest published release", "current published release")
+                self.replace(root, relative, "versioned package and verification results", "versioned package and the verification results")
                 text = (root / relative).read_text(encoding="utf-8")
                 self.assertNotIn("xcode-select", text)
                 self.assertNotIn("/usr/bin/clang", text)
@@ -169,7 +176,7 @@ class PublicBetaClaimTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_readme_requires_a_positive_python_dependency_statement(self) -> None:
+    def test_readme_requires_a_positive_bundled_runtime_statement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self.copy_claim_tree(root)
@@ -177,47 +184,30 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.replace(
                     root,
                     relative,
-                    "The plugin still needs **Python 3.11 or newer**.",
-                    "The plugin includes everything it needs.",
+                    "The plugin includes a signed Python runtime",
+                    "The plugin uses a Python supplied by your machine",
                 )
 
             completed = self.run_checker(root)
 
         self.assertEqual(completed.returncode, 1)
-        self.assertIn("explicit Python runtime requirement", completed.stderr)
+        self.assertIn("explicit bundled Python runtime", completed.stderr)
 
-    def test_published_and_development_contracts_cannot_be_conflated(self) -> None:
+    def test_versioned_runtime_contracts_cannot_be_conflated(self) -> None:
+        version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
-            (
-                (Path("README.md"), Path("plugins/apple-reminders/README.md")),
-                "Unreleased development branch",
-                "Already available in the installed release",
-                "version boundary",
-            ),
-            (
-                (Path("README.md"), Path("plugins/apple-reminders/README.md")),
-                "15 tools, including experimental tools",
-                "9 Core and diagnostic tools by default",
-                "tool inventory drift",
-            ),
-            (
-                (Path("README.md"), Path("plugins/apple-reminders/README.md")),
-                "Combines EventKit storage with native URL attachment work; it can partly succeed",
-                "Stores EventKit URL metadata only",
-                "URL behavior drift",
-            ),
-            (
-                (Path("docs/installation.md"),),
-                "Static 15-tool interface",
-                "Static 9-tool interface",
-                "tool inventory drift",
-            ),
-            (
-                (Path("docs/installation.md"),),
-                "EventKit plus native URL attachment composition",
-                "EventKit metadata only",
-                "URL behavior drift",
-            ),
+            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+             f"This guide describes **v{version}**", "This guide describes **v0.0.1**", "version identity boundary"),
+            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+             "9 Core and diagnostic tools", "15 Core and diagnostic tools", "default tool inventory"),
+            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+             "6 additional experimental tools", "6 automatically enabled experimental tools", "experimental opt-in inventory"),
+            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+             "EventKit URL metadata only", "EventKit storage plus native URL attachment work", "default URL behavior"),
+            ((Path("docs/installation.md"),),
+             "9 Core and diagnostic tools", "15 Core and diagnostic tools", "default tool inventory"),
+            ((Path("docs/installation.md"),),
+             "no separate Python installation", "a separate Python installation is required", "bundled Python setup boundary"),
         )
         for paths, old, new, expected_error in cases:
             with self.subTest(surface=paths[0], claim=old), tempfile.TemporaryDirectory() as temp_dir:
@@ -225,11 +215,30 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.copy_claim_tree(root)
                 for relative in paths:
                     self.replace(root, relative, old, new)
-
                 completed = self.run_checker(root)
-
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn(expected_error, completed.stderr)
+
+    def test_current_helper_hashes_are_read_from_manifest_not_duplicated_in_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.copy_claim_tree(root)
+            path = root / "plugins/apple-reminders/native/eventkit-helper-build.json"
+            helper = json.loads(path.read_text())
+            helper.update(source_commit="1" * 40, workflow_commit="2" * 40)
+            path.write_text(json.dumps(helper, indent=2) + "\n")
+            completed = self.run_checker(root)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_manifest_evidence_link_cannot_be_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.copy_claim_tree(root)
+            self.replace(root, Path("docs/launch/public-beta-launch-kit.md"),
+                         "native/eventkit-helper-build.json", "native/unverified.json")
+            completed = self.run_checker(root)
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("native/eventkit-helper-build.json", completed.stderr)
 
     def test_installation_guide_keeps_opt_in_and_clean_mac_limits(self) -> None:
         for old, new in (
@@ -287,11 +296,12 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1)
 
     def test_final_evidence_sources_have_drift_guards(self) -> None:
+        version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
             (
                 "helper version",
                 Path("plugins/apple-reminders/native/eventkit-helper-build.json"),
-                '"plugin_version": "0.5.2"',
+                f'"plugin_version": "{version}"',
                 '"plugin_version": "0.5.9"',
             ),
             (

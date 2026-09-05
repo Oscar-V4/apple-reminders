@@ -481,7 +481,7 @@ class McpPackagingTests(unittest.TestCase):
         registered = config["mcpServers"]["apple-reminders-local"]
         self.assertEqual(registered["cwd"], ".")
         self.assertEqual(registered["command"], "/bin/sh")
-        self.assertEqual(registered["args"], ["./scripts/launch_mcp.sh"])
+        self.assertEqual(registered["args"], ["./scripts/launch_bundled_mcp.sh"])
         self.assertNotIn("url", registered)
 
     def test_discovery_is_exact_closed_bounded_and_under_32_kib(self) -> None:

@@ -249,6 +249,33 @@ class PythonRuntimeVerificationTests(unittest.TestCase):
             with self.assertRaisesRegex(verifier.VerificationError, "architecture mismatch"):
                 verifier.verify_signatures(self.root / verifier.APP_NAME, "arm64", "ABCDEFGHIJ", notarized=False, macho_paths=self.manifest["macho_paths"])
 
+    def test_root_and_nested_codesign_requirements_are_literal_expressions(self) -> None:
+        requirements = []
+
+        def inspect(arguments: list[str], **kwargs: object) -> str:
+            if arguments[0] == "/usr/bin/codesign":
+                requirement = arguments[arguments.index("-R") + 1]
+                self.assertTrue(requirement.startswith("="), requirement)
+                self.assertIn('certificate leaf[subject.OU] = "ABCDEFGHIJ"', requirement)
+                self.assertIn('certificate leaf[field.1.2.840.113635.100.6.1.13] exists', requirement)
+                requirements.append(requirement)
+            return "arm64\n" if arguments[0] == "/usr/bin/lipo" else ""
+
+        with mock.patch.object(verifier, "run", side_effect=inspect):
+            verifier.verify_signatures(self.root / verifier.APP_NAME, "arm64", "ABCDEFGHIJ", notarized=False, macho_paths=self.manifest["macho_paths"])
+        self.assertEqual(len(requirements), len(self.manifest["macho_paths"]) + 1)
+        self.assertIn(f'identifier "{verifier.BUNDLE_ID}"', requirements[0])
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS codesign")
+    def test_real_codesign_accepts_literal_requirement_for_existing_signed_helper(self) -> None:
+        helper = REPO_ROOT / "plugins/apple-reminders/native/AppleRemindersEventKitHelper.app"
+        if not helper.is_dir():
+            self.skipTest("the reviewed signed EventKit helper is not present")
+        # This verifies a signature only; it never launches the helper or asks
+        # macOS for Reminders access. The helper has the same Developer ID team.
+        with mock.patch.object(verifier, "BUNDLE_ID", "io.github.oscar-v4.apple-reminders.eventkit-bridge"):
+            verifier.verify_signatures(helper, "arm64", "V8347N9346", notarized=False, macho_paths=[])
+
     def test_signed_verification_propagates_nested_signature_and_notarization_failures(self) -> None:
         app = self.root / verifier.APP_NAME
         for failing_tool in ("nested signature", "notarization"):
