@@ -154,6 +154,28 @@ class RuntimeWorkflowPolicyTests(unittest.TestCase):
             result = subprocess.run(["/bin/bash", "-n"], input=source, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_non_native_unsigned_validation_runs_under_bash_nounset(self) -> None:
+        build = self.jobs[0]
+        start = build.index("          for architecture in arm64 x86_64; do\n")
+        end = build.index("          done\n", start) + len("          done\n")
+        loop = textwrap.dedent(build[start:end])
+        script = """set -euo pipefail
+RUNNER_TEMP=/synthetic-runtime
+artifacts=/synthetic-artifacts
+SOURCE_COMMIT=1111111111111111111111111111111111111111
+WORKFLOW_COMMIT=2222222222222222222222222222222222222222
+uname() { printf 'arm64\\n'; }
+python3() { printf '<%s>' "$@"; printf '\\n'; }
+""" + loop
+        result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = result.stdout.splitlines()
+        self.assertEqual(len(calls), 4)
+        self.assertIn("<--run-probes>", calls[1])
+        self.assertIn("<scripts/verify_python_runtime.py>", calls[3])
+        self.assertIn("<--architecture><x86_64>", calls[3])
+        self.assertNotIn("<--run-probes>", calls[3])
+
     def test_actions_pinned_and_runtime_files_codeowned(self) -> None:
         actions = re.findall(r"(?m)^\s*-\s*uses:\s*([^\s#]+)", self.text)
         self.assertGreaterEqual(len(actions), 10)

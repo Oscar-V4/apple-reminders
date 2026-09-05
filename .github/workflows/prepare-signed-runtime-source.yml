@@ -79,14 +79,15 @@ jobs:
               --write-manifest "$artifacts/python-runtime-build-$architecture.json" \
               --write-archive "$artifacts/python-runtime-macos-$architecture.zip" \
               --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT"
-            probe_args=()
+            verify_args=(
+              --archive "$artifacts/python-runtime-macos-$architecture.zip"
+              --manifest "$artifacts/python-runtime-build-$architecture.json"
+              --architecture "$architecture"
+            )
             if [[ "$(uname -m)" == "$architecture" ]]; then
-              probe_args+=(--run-probes --plugin-root plugins/apple-reminders)
+              verify_args+=(--run-probes --plugin-root plugins/apple-reminders)
             fi
-            python3 scripts/verify_python_runtime.py \
-              --archive "$artifacts/python-runtime-macos-$architecture.zip" \
-              --manifest "$artifacts/python-runtime-build-$architecture.json" \
-              --architecture "$architecture" "${probe_args[@]}"
+            python3 scripts/verify_python_runtime.py "${verify_args[@]}"
           done
           (
             cd "$artifacts"

@@ -18,6 +18,11 @@ fail() {
 
 script_directory=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && pwd)
 plugin_root=$(/usr/bin/dirname "$script_directory")
+entrypoint="$plugin_root/mcp/server.py"
+if [ "${1-}" = --render-daily-brief ]; then
+  entrypoint="$plugin_root/skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+  shift
+fi
 runtime_directory="$plugin_root/runtime"
 app_name=AppleRemindersPythonRuntime.app
 
@@ -41,7 +46,7 @@ regular_file() {
 
 [ ! -L "$runtime_directory" ] && [ -d "$runtime_directory" ] ||
   fail 'The bundled runtime is missing or invalid. Reinstall the Apple Reminders plugin and retry.'
-for file in "$archive" "$manifest" "$checksums" "$plugin_root/mcp/server.py"; do
+for file in "$archive" "$manifest" "$checksums" "$entrypoint"; do
   regular_file "$file" || fail 'A bundled runtime file is missing or invalid. Reinstall the Apple Reminders plugin and retry.'
 done
 
@@ -103,9 +108,14 @@ owned_directory "$HOME/Library/Caches/apple-reminders-codex" private
 cache_parent="$HOME/Library/Caches/apple-reminders-codex/python-runtime"
 owned_directory "$cache_parent" private
 cache="$cache_parent/$archive_hash"
+owned_directory "$cache" private
+ready="$cache/ready"
 staging=
 cleanup() {
   if [ -n "$staging" ] && [ ! -L "$staging" ] && [ -d "$staging" ]; then
+    # A signal can arrive immediately after publication. Never remove the
+    # winning instance, even before the publishing command has returned.
+    [ ! "$staging/ready" -ef "$ready" ] || return 0
     /bin/rm -rf "$staging"
   fi
 }
@@ -136,11 +146,25 @@ verify_app() {
     fail 'The runtime code identity does not match its packaged manifest. Remove its Python runtime cache, reinstall the plugin, and retry.'
 }
 
-if [ -e "$cache" ] || [ -L "$cache" ]; then
-  owned_directory "$cache" private
-else
-  [ -x /usr/bin/lockf ] || fail 'The macOS runtime cache locking utility is missing. Repair the macOS installation and retry.'
-  staging=$(/usr/bin/mktemp -d "$cache_parent/.extract-$archive_hash.XXXXXXXX") || fail 'Could not prepare the private runtime cache.'
+select_cached_instance() {
+  regular_file "$ready" && [ "$(/usr/bin/stat -f %u "$ready")" = "$current_uid" ] &&
+    [ "$(/usr/bin/stat -f %z "$ready")" -eq 18 ] ||
+    fail 'The runtime cache ready receipt is invalid. Remove its Python runtime cache and retry.'
+  instance_name=$(/usr/bin/awk '
+    NR == 1 && length($0) == 17 && /^instance[.][A-Za-z0-9]+$/ { name = $0; next }
+    { bad = 1 }
+    END { if (bad || NR != 1) exit 1; print name }
+  ' "$ready") || fail 'The runtime cache ready receipt is invalid. Remove its Python runtime cache and retry.'
+  instance="$cache/$instance_name"
+  [ ! -L "$instance" ] && [ -d "$instance" ] ||
+    fail 'The runtime cache instance is missing or invalid. Remove its Python runtime cache and retry.'
+  owned_directory "$instance" private
+  regular_file "$instance/ready" && [ "$instance/ready" -ef "$ready" ] ||
+    fail 'The runtime cache ready receipt does not identify its published instance. Remove its Python runtime cache and retry.'
+}
+
+if [ ! -e "$ready" ] && [ ! -L "$ready" ]; then
+  staging=$(/usr/bin/mktemp -d "$cache/instance.XXXXXXXX") || fail 'Could not prepare the private runtime cache.'
   owned_directory "$staging" private
 
   # Validate the complete central-directory listing before extraction. Bounds
@@ -196,26 +220,23 @@ else
   /usr/sbin/spctl --assess --type execute "$staging/$app_name" >&2 ||
     fail 'macOS did not approve the bundled runtime. Reinstall the signed plugin and retry.'
 
-  lock="$cache_parent/.$archive_hash.lock"
-  if [ -e "$lock" ] || [ -L "$lock" ]; then
-    regular_file "$lock" && [ "$(/usr/bin/stat -f %u "$lock")" = "$current_uid" ] ||
-      fail 'The runtime cache lock is invalid. Restore the cache directory and retry.'
+  printf '%s\n' "${staging##*/}" > "$staging/ready" || fail 'Could not prepare the runtime cache ready receipt.'
+  # POSIX link(1) atomically creates a new regular-file name and never replaces
+  # an existing receipt or follows a destination directory. Only fully verified
+  # instances can publish. Concurrent losers validate the winner below; an
+  # interrupted unpublished instance needs no stale-lock recovery or waiting.
+  if ! /bin/link "$staging/ready" "$ready" 2>/dev/null; then
+    [ -e "$ready" ] || [ -L "$ready" ] || fail 'Could not publish the runtime cache. Retry in a moment.'
   fi
-  # The stable kernel lock survives concurrent startups without a stale-PID
-  # protocol. Only the rename is serialized; a loser verifies the winner below.
-  /usr/bin/lockf -k -t 25 "$lock" /bin/sh -c '
-    [ ! -L "$2" ] || exit 78
-    if [ -e "$2" ]; then [ -d "$2" ]; else /bin/mv "$1" "$2"; fi
-  ' "$0" "$staging" "$cache" || fail 'Runtime cache setup is busy or could not finish. Retry in a moment.'
-  owned_directory "$cache" private
 fi
 
+select_cached_instance
 # Check all nested signatures on every launch, including a concurrent winner.
-verify_app "$cache/$app_name"
+verify_app "$instance/$app_name"
 cleanup
 staging=
 PYTHONDONTWRITEBYTECODE=1
 export PYTHONDONTWRITEBYTECODE
 # The signed native shim clears all inherited PYTHON* settings, disables user
 # site packages/bytecode and invokes only its own embedded interpreter.
-exec "$cache/$app_name/Contents/MacOS/apple-reminders-python" "$plugin_root/mcp/server.py" "$@"
+exec "$instance/$app_name/Contents/MacOS/apple-reminders-python" "$entrypoint" "$@"

@@ -30,7 +30,7 @@ class BundledLauncherTests(unittest.TestCase):
 
     Only private copies of the launcher's fixed tool paths are replaced. No
     production test switches, interpreter overrides, or PATH discovery exist.
-    Actual macOS hashing, ZIP inspection/extraction and kernel locking run here;
+    Actual macOS hashing, ZIP inspection/extraction and atomic publication run here;
     these tests are not signing, notarization, or clean-Mac release evidence.
     """
 
@@ -47,6 +47,9 @@ class BundledLauncherTests(unittest.TestCase):
             "raise RuntimeError('The synthetic launcher must not execute MCP')\n",
             encoding="utf-8",
         )
+        renderer = self.plugin / "skills/apple-reminders-daily-brief/scripts/render_daily_brief.py"
+        renderer.parent.mkdir(parents=True)
+        renderer.write_text("raise RuntimeError('The fixture must not execute the real renderer')\n")
         self.runtime = self.plugin / "runtime"
         self.runtime.mkdir()
         self.config_path = self.root / "tool-config.json"
@@ -62,7 +65,7 @@ class BundledLauncherTests(unittest.TestCase):
         # decisions. They execute only data-free fixture code, using the test
         # runner's explicit Python path rather than the launcher's environment.
         tool_source = f"""#!{sys.executable}
-import hashlib, json, os, pathlib, subprocess, sys, time
+import hashlib, json, os, pathlib, signal, subprocess, sys, time
 config = json.loads(pathlib.Path({str(self.config_path)!r}).read_text())
 tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -113,6 +116,17 @@ elif tool == 'ditto':
     if config.get('extraction_failure'):
         raise SystemExit(1)
     raise SystemExit(subprocess.call(['/usr/bin/ditto', *args]))
+elif tool == 'link':
+    assert len(args) == 2, args
+    if config.get('publication_signal') == 'before':
+        os.kill(os.getppid(), signal.SIGTERM)
+        raise SystemExit(1)
+    if config.get('publication_failure'):
+        raise SystemExit(1)
+    status = subprocess.call(['/bin/link', *args], stderr=subprocess.DEVNULL)
+    if status == 0 and config.get('publication_signal') == 'after':
+        os.kill(os.getppid(), signal.SIGTERM)
+    raise SystemExit(status)
 else:
     raise AssertionError(tool)
 """
@@ -122,6 +136,7 @@ else:
         for original in (
             "/usr/bin/uname", "/usr/bin/sw_vers", "/usr/bin/stat",
             "/usr/bin/codesign", "/usr/sbin/spctl", "/usr/bin/ditto",
+            "/bin/link",
         ):
             path = tools / Path(original).name
             path.write_text(tool_source, encoding="utf-8")
@@ -143,8 +158,10 @@ else:
         shim = (
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
-            f"print(json.dumps({{'architecture': {architecture!r}, 'server': sys.argv[1], "
-            "'args': sys.argv[2:], 'no_bytecode': os.environ.get('PYTHONDONTWRITEBYTECODE')}))\n"
+            f"result = {{'architecture': {architecture!r}, 'server': sys.argv[1], "
+            "'args': sys.argv[2:], 'no_bytecode': os.environ.get('PYTHONDONTWRITEBYTECODE')}\n"
+            "if sys.argv[1].endswith('/render_daily_brief.py'): result['stdin'] = sys.stdin.read()\n"
+            "print(json.dumps(result))\n"
         ).encode()
         files = {
             EXECUTABLE: shim,
@@ -204,10 +221,10 @@ else:
     def environment(self, **extra: str) -> dict[str, str]:
         return {"HOME": str(self.home), "PATH": "", **extra}
 
-    def launch(self, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def launch(self, *arguments: str, env: dict[str, str] | None = None, input_text: str = "") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["/bin/sh", str(self.launcher), *arguments], cwd=self.plugin,
-            env=env or self.environment(), input="", text=True,
+            env=env or self.environment(), input=input_text, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35, check=False,
         )
 
@@ -216,13 +233,22 @@ else:
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         return self.home / "Library/Caches/apple-reminders-codex/python-runtime" / digest
 
-    def assert_success(self, result: subprocess.CompletedProcess[str], architecture: str = "arm64", arguments: tuple[str, ...] = ()) -> None:
+    def instance(self) -> Path:
+        return self.cache() / (self.cache() / "ready").read_text().strip()
+
+    def cached_app(self) -> Path:
+        return self.instance() / APP_NAME
+
+    def assert_success(self, result: subprocess.CompletedProcess[str], architecture: str = "arm64", arguments: tuple[str, ...] = (), *, renderer: bool = False, input_text: str = "") -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {
+        expected = {
             "architecture": architecture,
-            "server": str(self.plugin / "mcp/server.py"),
+            "server": str(self.plugin / ("skills/apple-reminders-daily-brief/scripts/render_daily_brief.py" if renderer else "mcp/server.py")),
             "args": list(arguments), "no_bytecode": "1",
-        })
+        }
+        if renderer:
+            expected["stdin"] = input_text
+        self.assertEqual(json.loads(result.stdout), expected)
         self.assertEqual(result.stderr, "")
 
     def assert_failure(self, result: subprocess.CompletedProcess[str], message: str) -> None:
@@ -250,6 +276,15 @@ else:
             path.chmod(0o755)
         self.assert_success(self.launch(env=self.environment(PATH=str(bin_path))))
         self.assertFalse(marker.exists())
+
+    def test_startup_does_not_require_optional_lock_utilities(self) -> None:
+        # macOS 15 CI has no /usr/bin/lockf. Relocate any accidental dependency
+        # in the private fixture so a newer developer Mac cannot mask that bug.
+        source = self.launcher.read_text()
+        for name in ("lockf", "flock", "shlock"):
+            source = source.replace(f"/usr/bin/{name}", shlex.quote(str(self.root / "missing" / name)))
+        self.launcher.write_text(source)
+        self.assert_success(self.launch())
 
     def test_intel_capsule_is_selected_without_arm_capsule(self) -> None:
         self.save_config(architecture="x86_64")
@@ -327,14 +362,14 @@ else:
     def test_signature_rejection_cannot_publish_or_execute_runtime(self) -> None:
         self.save_config(signature_failure=True)
         self.assert_failure(self.launch(), "signature is invalid")
-        self.assertFalse(self.cache().exists())
+        self.assertFalse((self.cache() / "ready").exists())
         self.assertEqual(self.calls("spctl"), [])
-        self.assertEqual(list(self.cache().parent.glob(".extract-*")), [])
+        self.assertEqual(list(self.cache().glob("instance.*")), [])
 
     def test_gatekeeper_rejection_cannot_publish_or_execute_runtime(self) -> None:
         self.save_config(gatekeeper_failure=1)
         self.assert_failure(self.launch(), "macOS did not approve")
-        self.assertFalse(self.cache().exists())
+        self.assertFalse((self.cache() / "ready").exists())
         self.assertEqual(len(self.signature_verifications()), 1)
 
     def test_warm_cache_rechecks_signature_without_reextraction(self) -> None:
@@ -348,7 +383,7 @@ else:
 
     def test_cached_nested_resource_corruption_is_detected(self) -> None:
         self.assert_success(self.launch())
-        (self.cache() / APP_NAME / "Contents/Resources/python/lib/data.txt").write_text("tampered")
+        (self.cached_app() / "Contents/Resources/python/lib/data.txt").write_text("tampered")
         self.assert_failure(self.launch(), "signature is invalid")
         self.assertEqual(len(self.calls("ditto")), 1)
 
@@ -357,7 +392,7 @@ else:
         # Both fixtures pass the same trusted signing requirement. Swapping the
         # sealed content still has to match this capsule's pinned CodeDirectory.
         for name, data in self.fixture_files["x86_64"].items():
-            (self.cache() / APP_NAME / name).write_bytes(data)
+            (self.cached_app() / name).write_bytes(data)
         self.assert_failure(self.launch(), "code identity does not match its packaged manifest")
         self.assertEqual(len(self.calls("ditto")), 1)
         self.assertEqual(len(self.calls("spctl")), 1)
@@ -365,7 +400,7 @@ else:
     def test_extracted_code_identity_must_match_manifest_before_gatekeeper(self) -> None:
         self.save_config(display_cdhash="0" * 40)
         self.assert_failure(self.launch(), "code identity does not match its packaged manifest")
-        self.assertFalse(self.cache().exists())
+        self.assertFalse((self.cache() / "ready").exists())
         self.assertEqual(self.calls("spctl"), [])
 
     def test_code_identity_display_must_be_one_lowercase_digest(self) -> None:
@@ -373,7 +408,7 @@ else:
             with self.subTest(values=values):
                 self.save_config(display_cdhash_lines=values)
                 self.assert_failure(self.launch(), "signed code identity is invalid")
-                self.assertFalse(self.cache().exists())
+                self.assertFalse((self.cache() / "ready").exists())
                 self.assertEqual(self.calls("spctl"), [])
 
     def test_manifest_requires_code_identity_as_a_lowercase_digest_string(self) -> None:
@@ -387,7 +422,7 @@ else:
 
     def test_cached_symlink_is_rejected_before_signature_check(self) -> None:
         self.assert_success(self.launch())
-        resource = self.cache() / APP_NAME / "Contents/Resources/python/lib/data.txt"
+        resource = self.cached_app() / "Contents/Resources/python/lib/data.txt"
         resource.unlink()
         resource.symlink_to(self.root / "outside")
         self.assert_failure(self.launch(), "unexpected owner, link, or special file")
@@ -414,13 +449,13 @@ else:
         self.save_config(foreign_owner=str(self.cache()))
         self.assert_failure(self.launch(), "belongs to another user")
 
-    def test_incomplete_cache_fails_with_actionable_message(self) -> None:
+    def test_incomplete_cache_without_ready_receipt_recovers(self) -> None:
         self.cache().mkdir(parents=True)
-        self.assert_failure(self.launch(), "remove its Python runtime cache")
-        self.assertEqual(self.calls("ditto"), [])
+        self.assert_success(self.launch())
+        self.assertEqual(len(self.calls("ditto")), 1)
 
     def test_orphaned_staging_directory_does_not_block_clean_restart(self) -> None:
-        orphan = self.cache().parent / ".extract-interrupted"
+        orphan = self.cache() / "instance.00000000"
         orphan.mkdir(parents=True)
         (orphan / "partial-file").write_text("incomplete")
         self.assert_success(self.launch())
@@ -429,7 +464,7 @@ else:
     def test_failed_extraction_is_cleaned_and_retry_succeeds(self) -> None:
         self.save_config(extraction_failure=True)
         self.assert_failure(self.launch(), "could not be extracted")
-        self.assertEqual(list(self.cache().parent.glob(".extract-*")), [])
+        self.assertEqual(list(self.cache().glob("instance.*")), [])
         self.save_config(extraction_failure=False)
         self.assert_success(self.launch())
 
@@ -519,12 +554,20 @@ else:
                 finally:
                     path.write_bytes(original)
 
-    def test_invalid_lock_symlink_is_rejected(self) -> None:
-        self.cache().parent.mkdir(parents=True)
-        lock = self.cache().parent / f".{self.cache().name}.lock"
-        lock.symlink_to(self.root / "outside-lock")
-        self.assert_failure(self.launch(), "cache lock is invalid")
-        self.assertFalse(self.cache().exists())
+    def test_invalid_ready_symlink_and_directory_are_rejected_without_writes(self) -> None:
+        self.cache().mkdir(parents=True)
+        ready = self.cache() / "ready"
+        outside = self.root / "outside-ready"
+        outside.mkdir()
+        ready.symlink_to(outside, target_is_directory=True)
+        self.assert_failure(self.launch(), "ready receipt is invalid")
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.calls("ditto"), [])
+        ready.unlink()
+        ready.mkdir()
+        self.assert_failure(self.launch(), "ready receipt is invalid")
+        self.assertEqual(list(ready.iterdir()), [])
+        self.assertEqual(self.calls("ditto"), [])
 
     def test_concurrent_startups_publish_one_complete_cache(self) -> None:
         self.save_config(extraction_delay=0.25)
@@ -541,9 +584,43 @@ else:
                 if process.poll() is None:
                     process.kill()
                 process.communicate()
-        self.assertEqual(list(self.cache().iterdir()), [self.cache() / APP_NAME])
-        self.assertEqual(list(self.cache().parent.glob(".extract-*")), [])
+        self.assertEqual(set(self.cache().iterdir()), {self.instance(), self.cache() / "ready"})
+        self.assertEqual(set(self.instance().iterdir()), {self.cached_app(), self.instance() / "ready"})
+        self.assertTrue(os.path.samefile(self.cache() / "ready", self.instance() / "ready"))
         self.assert_success(self.launch())
+
+    def test_interrupted_publication_recovers_before_and_after_ready_creation(self) -> None:
+        for phase in ("before", "after"):
+            with self.subTest(phase=phase):
+                self.home = self.root / f"home interrupted {phase}"
+                self.home.mkdir()
+                self.save_config(publication_signal=phase)
+                result = self.launch()
+                self.assertEqual(result.returncode, 78, result.stderr)
+                self.assertEqual(result.stdout, "")
+                if phase == "before":
+                    self.assertFalse((self.cache() / "ready").exists())
+                    self.assertEqual(list(self.cache().glob("instance.*")), [])
+                else:
+                    self.assertTrue(self.cached_app().is_dir())
+                    self.assertTrue(os.path.samefile(self.cache() / "ready", self.instance() / "ready"))
+                extractions = len(self.calls("ditto"))
+                self.save_config(publication_signal=None)
+                self.assert_success(self.launch())
+                self.assertEqual(len(self.calls("ditto")), extractions + (phase == "before"))
+
+    def test_daily_brief_dispatch_is_fixed_and_preserves_arguments_and_stdin(self) -> None:
+        arguments = ("--date", "2026-09-05", "--timezone", "Asia/Seoul", "--format", "markdown")
+        input_text = '{"reminders": [], "note": "literal $value"}\n'
+        self.assert_success(
+            self.launch("--render-daily-brief", *arguments, input_text=input_text),
+            arguments=arguments, renderer=True, input_text=input_text,
+        )
+        # Only the first exact flag selects the one fixed renderer. Other flags
+        # stay with MCP; a caller never gains an arbitrary Python-script mode.
+        for forwarded in (("--experimental", "--render-daily-brief"), ("--script", "/tmp/arbitrary.py")):
+            with self.subTest(forwarded=forwarded):
+                self.assert_success(self.launch(*forwarded), arguments=forwarded)
 
     def test_extraction_option_environment_cannot_change_behavior(self) -> None:
         self.assert_success(self.launch(env=self.environment(
@@ -554,8 +631,10 @@ else:
         source = LAUNCHER.read_text()
         for forbidden in ("command -v", "/usr/bin/python3", "xcrun", "xcodebuild", "curl ", "wget ", "--noqtn ", "xattr -d", "eval "):
             self.assertNotIn(forbidden, source)
-        self.assertIn('/usr/bin/lockf -k -t 25', source)
-        self.assertIn('exec "$cache/$app_name/Contents/MacOS/apple-reminders-python"', source)
+        for unavailable in ("/usr/bin/lockf", "/usr/bin/flock", "/usr/bin/shlock"):
+            self.assertNotIn(unavailable, source)
+        self.assertIn('/bin/link "$staging/ready" "$ready"', source)
+        self.assertIn('exec "$instance/$app_name/Contents/MacOS/apple-reminders-python"', source)
 
     def test_shell_syntax(self) -> None:
         result = subprocess.run(["/bin/sh", "-n", str(LAUNCHER)], capture_output=True, text=True, check=False)
