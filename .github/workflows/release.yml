@@ -173,6 +173,16 @@ jobs:
             --verify-root-document-mirrors
           python3 -m unittest discover -s tests -p 'test_*.py' -v
 
+      - name: Verify bundled Python runtime provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_COMMIT: ${{ steps.release_identity.outputs.tag_commit }}
+        run: >-
+          python3 scripts/verify_runtime_provenance.py
+          --runtime-directory "$PLUGIN_ROOT/runtime"
+          --tag-commit "$TAG_COMMIT"
+          --main-ref refs/remotes/origin/main
+
       - name: Bind the expanded helper bytes to the manifest
         env:
           MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}

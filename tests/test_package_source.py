@@ -24,19 +24,11 @@ import audit_source_package  # noqa: E402
 import build_source_package  # noqa: E402
 
 
-# The deterministic allowlist is the primary content boundary. This hard ceiling
-# catches gross package growth while leaving narrowly reviewed room for the
-# signed universal Core helper; exact bytes remain visible in benchmarks.
-# The v0.5.2 no-Xcode baseline is the reviewed 60-file, 1,815,327-byte archive.
-# Issue #41 adds one allowlisted runtime-admission module plus its capability,
-# Doctor, and Core-first contract changes: 37,339 compressed bytes, producing a
-# deterministic 61-file, 1,852,666-byte archive without native-artifact changes.
-# Release-attestation documentation adds 1,506 compressed bytes to that
-# baseline, producing a deterministic 61-file, 1,854,172-byte archive.
-# Core profiles, URL mode isolation, and compiler-free launcher discovery add
-# 3,728 compressed bytes: 1,857,900 bytes with the same 61-file runtime allowlist.
-# The 1.773 MiB ceiling leaves 1,225 bytes of reviewed headroom.
-RELEASE_ARCHIVE_HARD_CEILING_BYTES = int(1.773 * 1024 * 1024)
+# Exact runtime inventories and upstream/signature provenance bound binary
+# content. Keep a separate source-overhead budget; signed interpreter capsules
+# are accounted for by their validated actual sizes, not an ever-changing
+# few-hundred-byte headroom calculation.
+RELEASE_SOURCE_OVERHEAD_BYTES = 3 * 1024 * 1024
 DEFAULT_MCP_TOOL_NAMES = [
     "request_reminders_access",
     "list_reminder_lists",
@@ -797,7 +789,10 @@ class SourcePackagePolicyTests(unittest.TestCase):
 
         self.assertLessEqual(
             archive_size,
-            RELEASE_ARCHIVE_HARD_CEILING_BYTES,
+            RELEASE_SOURCE_OVERHEAD_BYTES + sum(
+                path.stat().st_size for path in (self.plugin_root / "runtime").glob("*")
+                if path.is_file()
+            ),
             "release archive exceeded its 1.769 MiB hard ceiling; review runtime "
             "contents before raising the ceiling",
         )

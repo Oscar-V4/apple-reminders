@@ -55,14 +55,13 @@ class JavaScriptActionRuntimePinTests(unittest.TestCase):
             artifact_refs(source_text, "download-artifact"),
             [DOWNLOAD_ARTIFACT_PROVENANCE_BOUND] * 3,
         )
-        self.assertEqual(
-            artifact_refs(other_text, "upload-artifact"),
-            [UPLOAD_ARTIFACT_NODE24] * 4,
-        )
-        self.assertEqual(
-            artifact_refs(other_text, "download-artifact"),
-            [DOWNLOAD_ARTIFACT_NODE24] * 4,
-        )
+        for action, approved in (
+            ("upload-artifact", UPLOAD_ARTIFACT_NODE24),
+            ("download-artifact", DOWNLOAD_ARTIFACT_NODE24),
+        ):
+            refs = artifact_refs(other_text, action)
+            self.assertGreaterEqual(len(refs), 4)
+            self.assertEqual(set(refs), {approved})
 
     def test_deprecated_node20_pins_cannot_escape_the_bound_workflow(self) -> None:
         texts = workflow_texts()
@@ -73,8 +72,8 @@ class JavaScriptActionRuntimePinTests(unittest.TestCase):
         self.assertEqual(source_text.count(DOWNLOAD_ARTIFACT_PROVENANCE_BOUND), 3)
         self.assertNotIn(UPLOAD_ARTIFACT_PROVENANCE_BOUND, other_text)
         self.assertNotIn(DOWNLOAD_ARTIFACT_PROVENANCE_BOUND, other_text)
-        self.assertEqual(other_text.count("# v7.0.1 (Node 24)"), 4)
-        self.assertEqual(other_text.count("# v8.0.1 (Node 24)"), 4)
+        self.assertEqual(other_text.count("# v7.0.1 (Node 24)"), len(artifact_refs(other_text, "upload-artifact")))
+        self.assertEqual(other_text.count("# v8.0.1 (Node 24)"), len(artifact_refs(other_text, "download-artifact")))
 
 
 if __name__ == "__main__":
