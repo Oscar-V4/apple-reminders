@@ -28,9 +28,9 @@ class LauncherTests(unittest.TestCase):
         (self.plugin / "scripts").mkdir(parents=True)
         (self.plugin / "mcp").mkdir()
         (self.plugin / "mcp/server.py").write_text(
-            "import json, sys\n"
+            "import json, os, sys\n"
             "print(json.dumps({'args': sys.argv[1:], "
-            "'no_bytecode': sys.dont_write_bytecode}))\n",
+            "'no_bytecode': os.environ.get('PYTHONDONTWRITEBYTECODE') == '1'}))\n",
             encoding="utf-8",
         )
 
@@ -63,8 +63,11 @@ class LauncherTests(unittest.TestCase):
         return path
 
     def supported(self, directory: Path) -> Path:
+        # Protect the test runner's own interpreter before legacy version
+        # probes. The fake server checks the launcher's environment export,
+        # not sys.dont_write_bytecode, so -B cannot hide a missing protection.
         return self.executable(
-            directory / "python3", f"exec {shlex.quote(sys.executable)} \"$@\""
+            directory / "python3", f"exec {shlex.quote(sys.executable)} -B \"$@\""
         )
 
     def shim(self) -> Path:
@@ -75,12 +78,18 @@ class LauncherTests(unittest.TestCase):
         )
 
     def launch(
-        self, directories: list[Path] | None = None, *arguments: str
+        self, directories: list[Path] | None = None, *arguments: str,
+        protect_venv_probe: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        environment = {"PATH": ":".join(map(str, directories or []))}
+        if protect_venv_probe:
+            # The real-venv test exercises symlink/environment identity rather
+            # than bytecode policy, and cannot use the synthetic -B wrapper.
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(
             ["/bin/sh", str(self.launcher), *arguments],
             cwd=self.plugin,
-            env={"PATH": ":".join(map(str, directories or []))},
+            env=environment,
             input="",
             text=True,
             stdout=subprocess.PIPE,
@@ -99,6 +108,20 @@ class LauncherTests(unittest.TestCase):
         supported = self.supported(self.root / "user/bin")
         self.assert_success(self.launch([shim.parent, supported.parent]))
         self.assertFalse(self.shim_marker.exists())
+
+    def test_fixture_probe_flag_does_not_mask_missing_server_bytecode_export(self) -> None:
+        self.supported(self.homebrew)
+        source = self.launcher.read_text(encoding="utf-8")
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", source)
+        self.launcher.write_text(
+            source.replace("PYTHONDONTWRITEBYTECODE=1", "unset PYTHONDONTWRITEBYTECODE"),
+            encoding="utf-8",
+        )
+
+        result = self.launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["no_bytecode"])
 
     def test_relative_symlink_chain_to_system_shim_is_not_probed(self) -> None:
         self.shim()
@@ -189,7 +212,7 @@ class LauncherTests(unittest.TestCase):
         (self.plugin / "mcp/server.py").write_text(
             "import sys\nprint(sys.executable)\n", encoding="utf-8"
         )
-        result = self.launch([python.parent])
+        result = self.launch([python.parent], protect_venv_probe=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(python))
 

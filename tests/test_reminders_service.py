@@ -5,6 +5,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,7 @@ from reminders_service import (  # noqa: E402
     SetCompletionAction,
     Snapshot,
     STABLE_USER_FIELDS,
+    UnsupportedAction,
     canonical_action_projection,
     reminder_matches_fields,
 )
@@ -197,6 +199,7 @@ class SemanticReminderAdapter(InMemoryAdapter):
         *,
         alarm: dict[str, Any],
         completed: bool = False,
+        recurring: bool = True,
         provider_drift: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -214,7 +217,7 @@ class SemanticReminderAdapter(InMemoryAdapter):
                 "due": {"kind": "all_day", "date": "2027-08-31"},
                 "start": None,
                 "alarms": [deepcopy(alarm)],
-                "recurrence_rules": [{"frequency": "weekly", "interval": 1}],
+                "recurrence_rules": [{"frequency": "weekly", "interval": 1}] if recurring else [],
                 "list_id": "list-alpha",
             },
             guard=current.guard,
@@ -793,7 +796,11 @@ class CoreModuleTests(unittest.TestCase):
             for action_name, completed, action in actions:
                 with self.subTest(alarm=alarm_name, action=action_name):
                     module = CoreModule(
-                        SemanticReminderAdapter(alarm=alarm, completed=completed),
+                        SemanticReminderAdapter(
+                            alarm=alarm,
+                            completed=completed,
+                            recurring=action_name != "completion",
+                        ),
                         clock=DeterministicClock(),
                         token_source=DeterministicTokens(),
                     )
@@ -835,6 +842,7 @@ class CoreModuleTests(unittest.TestCase):
                         SemanticReminderAdapter(
                             alarm=alarm,
                             completed=completed,
+                            recurring=action_name != "completion",
                             provider_drift={"alarms": []},
                         ),
                         clock=DeterministicClock(),
@@ -1275,6 +1283,50 @@ class CoreModuleTests(unittest.TestCase):
                     result.final_reminder["alarms"][0]["action"],
                     {"type": "procedure", "url": "example:before"},
                 )
+
+    def test_recurring_completion_is_rejected_before_any_adapter_write(self) -> None:
+        adapter = SemanticReminderAdapter(alarm=SEMANTIC_ALARMS["absolute"])
+        module = CoreModule(adapter, token_source=DeterministicTokens())
+        initial = module.read_exact("reminder-1")
+
+        with mock.patch.object(adapter, "apply_action", wraps=adapter.apply_action) as apply:
+            for _ in range(2):
+                with self.assertRaises(UnsupportedAction) as raised:
+                    module.change(initial.reference, {"kind": "set_completion", "completed": True})
+                self.assertEqual(raised.exception.code, "unsupported_recurring_completion")
+                self.assertIn("Reminders app", str(raised.exception))
+            apply.assert_not_called()
+
+        self.assertEqual(module.read_exact("reminder-1").reminder, initial.reminder)
+
+    def test_recurring_completion_revalidates_staleness_before_preflight(self) -> None:
+        adapter = SemanticReminderAdapter(alarm=SEMANTIC_ALARMS["absolute"])
+        module = CoreModule(adapter, token_source=DeterministicTokens())
+        initial = module.read_exact("reminder-1")
+        adapter.external_patch("reminder-1", {"title": "Edited in Reminders"})
+
+        with mock.patch.object(adapter, "apply_action", wraps=adapter.apply_action) as apply:
+            with self.assertRaises(ReferenceRejected) as raised:
+                module.change(initial.reference, {"kind": "set_completion", "completed": True})
+            self.assertEqual(raised.exception.code, "concurrent_modification")
+            apply.assert_not_called()
+
+    def test_recurring_completion_gate_preserves_other_exact_actions(self) -> None:
+        cases = (
+            (False, {"kind": "set_completion", "completed": False}),
+            (True, {"kind": "set_completion", "completed": True}),
+            (True, {"kind": "set_completion", "completed": False}),
+            (False, {"kind": "patch", "patch": {"title": "Rename recurring item"}}),
+            (False, {"kind": "move_to_list", "list_id": "list-beta"}),
+        )
+        for completed, action in cases:
+            with self.subTest(completed=completed, action=action):
+                adapter = SemanticReminderAdapter(alarm=SEMANTIC_ALARMS["absolute"], completed=completed)
+                module = CoreModule(adapter, token_source=DeterministicTokens())
+                initial = module.read_exact("reminder-1")
+                result = module.change(initial.reference, action)
+                self.assertIsNotNone(result.reference)
+                self.assertEqual(result.final_reminder["recurrence_rules"], initial.reminder["recurrence_rules"])
 
     def test_closed_completion_and_list_move_actions_reach_the_adapter(self) -> None:
         cases = (

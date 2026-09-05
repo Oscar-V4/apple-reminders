@@ -129,6 +129,14 @@ class ActionRejected(ValueError):
         self.code = "invalid_action"
 
 
+class UnsupportedAction(ActionRejected):
+    """A valid action has no faithful implementation for this exact state."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class AdapterContractError(RuntimeError):
     """An Adapter response violated the Core seam."""
 
@@ -224,6 +232,13 @@ def _requested_value_matches(expected: Any, actual: Any, *, field: str) -> bool:
     if isinstance(expected, Mapping):
         if not isinstance(actual, Mapping):
             return False
+        if field == "due" and expected.get("floating") is True:
+            if (
+                actual.get("floating") is not True
+                or actual.get("date_time") is not None
+                or actual.get("time_zone") is not None
+            ):
+                return False
         if field.endswith("alarms[]"):
             if (
                 expected.get("_verification_unavailable") is True
@@ -331,10 +346,62 @@ def reminder_matches_action(
 ) -> bool:
     if not isinstance(action, (PatchAction, SetCompletionAction, MoveToListAction)):
         return False
-    return reminder_matches_fields(
-        reminder,
-        canonical_action_projection(before, action),
-    )
+    expected = canonical_action_projection(before, action)
+    if reminder_matches_fields(reminder, expected):
+        return True
+
+    # The native Reminders store can materialize an absent start on the first
+    # due date: floating midnight for all-day, or the same typed date/time for
+    # timed due. These observed normalizations never excuse replacing an
+    # existing start or losing a requested time zone. Other stores may retain
+    # null, and every other requested/omitted stable field still must match.
+    due = expected.get("due")
+    if not (
+        isinstance(action, PatchAction)
+        and "due" in action.patch
+        and "due" in before
+        and before["due"] is None
+        and "start" in before
+        and before["start"] is None
+        and isinstance(due, Mapping)
+    ):
+        return False
+    observed_start = reminder.get("start")
+    if due.get("kind") == "all_day" and isinstance(due.get("date"), str):
+        start_matches = observed_start == {
+            "kind": "timed",
+            "date_time": None,
+            "local_date_time": f"{due['date']}T00:00:00",
+            "time_zone": None,
+            "floating": True,
+        }
+    elif (
+        due.get("kind") == "timed"
+        and set(due) == {"kind", "floating", "local_date_time"}
+        and due["floating"] is True
+        and isinstance(due["local_date_time"], str)
+    ):
+        start_matches = observed_start == {
+            **due,
+            "date_time": None,
+            "time_zone": None,
+        }
+    elif (
+        due.get("kind") == "timed"
+        and set(due) == {"kind", "date_time", "time_zone"}
+        and isinstance(due["date_time"], str)
+        and isinstance(due["time_zone"], str)
+    ):
+        start_matches = (
+            isinstance(observed_start, Mapping)
+            and set(observed_start) == set(due)
+            and _requested_value_matches(due, observed_start, field="start")
+        )
+    else:
+        return False
+    if start_matches:
+        return reminder_matches_fields({**reminder, "start": None}, expected)
+    return False
 
 
 class CoreModule:
@@ -469,6 +536,22 @@ class CoreModule:
         action = self._parse_action(raw_action)
         current = self._revalidated_snapshot(reference)
         before = current.reminder
+        if (
+            isinstance(action, SetCompletionAction)
+            and action.completed
+            and before.get("completed") is not True
+            and before.get("recurrence_rules")
+        ):
+            # EventKit can advance this same ID to the next occurrence while
+            # creating a separate completed item. An exact read of this ID
+            # cannot prove which occurrence completed; retrying would skip it.
+            raise UnsupportedAction(
+                "unsupported_recurring_completion",
+                "Completing this recurring Reminder can advance the same ID to "
+                "the next occurrence. No change was made. Complete the intended "
+                "occurrence once in the Reminders app; do not retry completion "
+                "through the plugin or remove recurrence to bypass this limit.",
+            )
         if isinstance(action, PatchAction):
             replacement = action.patch.get("alarms")
             if (

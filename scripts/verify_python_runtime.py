@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -153,13 +153,7 @@ def load_manifest(
     return manifest
 
 
-def validate_archive(archive: Path, manifest: dict[str, Any]) -> None:
-    regular(archive)
-    signed = manifest.get("signature") == "developer-id"
-    size_key = "archive_bytes" if signed else "unsigned_archive_bytes"
-    hash_key = "archive_sha256" if signed else "unsigned_archive_sha256"
-    if archive.stat().st_size != manifest[size_key] or sha256(archive) != manifest[hash_key]:
-        raise VerificationError("runtime archive hash or size mismatch")
+def manifest_inventory(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     files, directories = manifest.get("files"), manifest.get("directories")
     if not isinstance(files, list) or not isinstance(directories, list) or not 1 <= len(files) + len(directories) <= MAX_ENTRIES:
         raise VerificationError("runtime inventory count invalid")
@@ -199,6 +193,38 @@ def validate_archive(archive: Path, manifest: dict[str, Any]) -> None:
         for parent in PurePosixPath(name.rstrip("/")).parents:
             if str(parent) != "." and str(parent) + "/" not in expected:
                 raise VerificationError("runtime entry has an undeclared parent")
+    return expected
+
+
+def validate_metadata(
+    read: Callable[[str], bytes], manifest: dict[str, Any], expected: dict[str, dict[str, Any]],
+) -> None:
+    info = plistlib.loads(read(APP_NAME + "/Contents/Info.plist"))
+    for key, value in {"CFBundleIdentifier": BUNDLE_ID, "CFBundleExecutable": "apple-reminders-python", "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "14.0", "CFBundleShortVersionString": manifest["runtime_version"], "CFBundleVersion": manifest["runtime_build"]}.items():
+        if info.get(key) != value:
+            raise VerificationError(f"runtime app metadata drift: {key}")
+    upstream_root = APP_NAME + "/Contents/Resources/upstream/"
+    metadata = json.loads(read(upstream_root + "PYTHON.json"))
+    if not isinstance(metadata, dict) or any(metadata.get(key) != manifest[field] for key, field in (("python_version", "runtime_version"), ("target_triple", "target_triple"))):
+        raise VerificationError("runtime upstream Python metadata drift")
+    target = metadata.get("apple_sdk_deployment_target")
+    if not isinstance(target, str) or not re.fullmatch(r"\d+\.\d+", target) or tuple(map(int, target.split("."))) > (14, 0):
+        raise VerificationError("runtime upstream deployment target incompatible")
+    if metadata.get("license_path") != "licenses/LICENSE.cpython.txt":
+        raise VerificationError("runtime CPython license metadata drift")
+    license_name = upstream_root + metadata["license_path"]
+    if license_name not in expected or not read(license_name).strip():
+        raise VerificationError("runtime CPython license is missing or empty")
+
+
+def validate_archive(archive: Path, manifest: dict[str, Any]) -> None:
+    regular(archive)
+    signed = manifest.get("signature") == "developer-id"
+    size_key = "archive_bytes" if signed else "unsigned_archive_bytes"
+    hash_key = "archive_sha256" if signed else "unsigned_archive_sha256"
+    if archive.stat().st_size != manifest[size_key] or sha256(archive) != manifest[hash_key]:
+        raise VerificationError("runtime archive hash or size mismatch")
+    expected = manifest_inventory(manifest)
     with zipfile.ZipFile(archive) as handle:
         entries = handle.infolist()
         if len(entries) != len(expected) or {entry.filename for entry in entries} != set(expected):
@@ -216,22 +242,47 @@ def validate_archive(archive: Path, manifest: dict[str, Any]) -> None:
                 content = handle.read(info)
                 if hashlib.sha256(content).hexdigest() != entry["sha256"] or (content[:4] in MACHO_MAGICS) is not entry["mach_o"]:
                     raise VerificationError("runtime ZIP content or code inventory drift")
-        info = plistlib.loads(handle.read(APP_NAME + "/Contents/Info.plist"))
-        for key, value in {"CFBundleIdentifier": BUNDLE_ID, "CFBundleExecutable": "apple-reminders-python", "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "14.0", "CFBundleShortVersionString": manifest["runtime_version"], "CFBundleVersion": manifest["runtime_build"]}.items():
-            if info.get(key) != value:
-                raise VerificationError(f"runtime app metadata drift: {key}")
-        upstream_root = APP_NAME + "/Contents/Resources/upstream/"
-        metadata = json.loads(handle.read(upstream_root + "PYTHON.json"))
-        if not isinstance(metadata, dict) or any(metadata.get(key) != manifest[field] for key, field in (("python_version", "runtime_version"), ("target_triple", "target_triple"))):
-            raise VerificationError("runtime upstream Python metadata drift")
-        target = metadata.get("apple_sdk_deployment_target")
-        if not isinstance(target, str) or not re.fullmatch(r"\d+\.\d+", target) or tuple(map(int, target.split("."))) > (14, 0):
-            raise VerificationError("runtime upstream deployment target incompatible")
-        if metadata.get("license_path") != "licenses/LICENSE.cpython.txt":
-            raise VerificationError("runtime CPython license metadata drift")
-        license_name = upstream_root + metadata["license_path"]
-        if license_name not in expected or not handle.read(license_name).strip():
-            raise VerificationError("runtime CPython license is missing or empty")
+        validate_metadata(handle.read, manifest, expected)
+
+
+def validate_existing_app(app: Path, manifest: dict[str, Any]) -> None:
+    """Check the exact on-disk inventory without extracting or repairing it."""
+
+    expected = manifest_inventory(manifest)
+    app = app.absolute()
+    if app.name != APP_NAME or any(path.is_symlink() for path in (app, *app.parents)):
+        raise VerificationError("runtime app requires its real non-symlink path")
+    root_stat = app.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_IMODE(root_stat.st_mode) != 0o755:
+        raise VerificationError("runtime app root type or mode drift")
+    seen = {APP_NAME + "/"}
+    pending = [app]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for item in entries:
+                path = Path(item.path)
+                observed = item.stat(follow_symlinks=False)
+                is_directory = stat.S_ISDIR(observed.st_mode)
+                name = APP_NAME + "/" + path.relative_to(app).as_posix() + ("/" if is_directory else "")
+                entry = expected.get(name)
+                if entry is None or name in seen:
+                    raise VerificationError("runtime app inventory does not match manifest")
+                seen.add(name)
+                expected_type = stat.S_IFDIR if entry["directory"] else stat.S_IFREG
+                if stat.S_IFMT(observed.st_mode) != expected_type or stat.S_IMODE(observed.st_mode) != entry["mode"]:
+                    raise VerificationError("runtime app entry type or mode drift")
+                if is_directory:
+                    pending.append(path)
+                else:
+                    if observed.st_size != entry["bytes"] or sha256(path) != entry["sha256"]:
+                        raise VerificationError("runtime app content hash or size drift")
+                    with path.open("rb") as handle:
+                        if (handle.read(4) in MACHO_MAGICS) is not entry["mach_o"]:
+                            raise VerificationError("runtime app code inventory drift")
+    if seen != set(expected):
+        raise VerificationError("runtime app inventory does not match manifest")
+    validate_metadata(lambda name: (app.parent / name).read_bytes(), manifest, expected)
 
 
 def extract_verified(archive: Path, manifest: dict[str, Any], destination: Path) -> Path:
@@ -317,7 +368,9 @@ print(json.dumps({'architecture':platform.machine(),'python':platform.python_ver
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--archive", type=Path)
+    source.add_argument("--app", type=Path, help="Verify an existing app in place without extracting, repairing, or executing it")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--architecture", choices=sorted(ARCHITECTURES), required=True)
     parser.add_argument("--expected-team-id")
@@ -327,18 +380,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plugin-root", type=Path)
     parser.add_argument("--extract-to", type=Path)
     args = parser.parse_args(argv)
+    if args.app and (args.extract_to or args.run_probes):
+        parser.error("--app cannot be combined with --extract-to or --run-probes")
     try:
         manifest = load_manifest(args.manifest, args.architecture, require_signed=args.require_developer_id or args.require_notarized, expected_team_id=args.expected_team_id)
-        validate_archive(args.archive, manifest)
-        with tempfile.TemporaryDirectory(prefix="apple-reminders-runtime-verify-") as temporary:
-            if args.require_developer_id or args.require_notarized or args.run_probes or args.extract_to:
-                destination = args.extract_to or Path(temporary).resolve() / "extracted"
-                app = extract_verified(args.archive, manifest, destination)
-                if args.require_developer_id or args.require_notarized:
-                    verify_signatures(app, args.architecture, args.expected_team_id, notarized=args.require_notarized, macho_paths=manifest["macho_paths"], expected_cdhash=manifest["code_directory_hash"])
-                if args.run_probes:
-                    run_probes(app, args.architecture, args.plugin_root)
-        print(json.dumps({"ok": True, "architecture": args.architecture, "runtime_version": manifest["runtime_version"], "file_count": len(manifest["files"]), "archive_bytes": args.archive.stat().st_size, "signature_checked": args.require_developer_id or args.require_notarized, "notarization_checked": args.require_notarized, "probes_run": args.run_probes}, sort_keys=True))
+
+        def check_app(app: Path) -> None:
+            if args.require_developer_id or args.require_notarized:
+                verify_signatures(app, args.architecture, args.expected_team_id, notarized=args.require_notarized, macho_paths=manifest["macho_paths"], expected_cdhash=manifest["code_directory_hash"])
+            if args.run_probes:
+                run_probes(app, args.architecture, args.plugin_root)
+
+        if args.app:
+            validate_existing_app(args.app, manifest)
+            check_app(args.app)
+        else:
+            validate_archive(args.archive, manifest)
+            with tempfile.TemporaryDirectory(prefix="apple-reminders-runtime-verify-") as temporary:
+                if args.require_developer_id or args.require_notarized or args.run_probes or args.extract_to:
+                    destination = args.extract_to or Path(temporary).resolve() / "extracted"
+                    check_app(extract_verified(args.archive, manifest, destination))
+        print(json.dumps({"ok": True, "architecture": args.architecture, "runtime_version": manifest["runtime_version"], "file_count": len(manifest["files"]), "archive_bytes": args.archive.stat().st_size if args.archive else None, "existing_app_checked": args.app is not None, "signature_checked": args.require_developer_id or args.require_notarized, "notarization_checked": args.require_notarized, "probes_run": args.run_probes}, sort_keys=True))
         return 0
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError, VerificationError) as exc:
         parser.exit(1, f"Python runtime verification failed: {exc}\n")

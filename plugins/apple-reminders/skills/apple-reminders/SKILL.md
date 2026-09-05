@@ -72,11 +72,19 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 
 ## Dates, URLs, and recurrence
 
-- Resolve relative dates in the user's timezone. An all-day due value is `{"kind":"all_day","date":"YYYY-MM-DD"}`. A timed due value includes RFC 3339 `date_time` and an IANA `time_zone`.
+- Resolve relative dates in the user's timezone. An all-day due value is `{"kind":"all_day","date":"YYYY-MM-DD"}`. For an explicitly zoned instant, use RFC 3339 `date_time` and an IANA `time_zone`. For a local wall-clock time that follows the device's current timezone, use `{"kind":"timed","floating":true,"local_date_time":"YYYY-MM-DDTHH:MM:SS"}`. Preserve the user's choice: never silently turn a zoned request into floating time after a failed verification. Repeated DST hours cannot preserve a selected zoned occurrence and are rejected before saving.
 - Add an alarm only when requested. Preserve “before the due date” wording as a due-anchored relative alarm. Before an alarm-only relative patch to an existing Reminder, call `read_reminder` immediately beforehand, confirm its current `due`, inspect the complete current alarm array, and use the returned fresh reference.
+- A relative alarm verifies the EventKit trigger. The Reminders app can display that trigger time as the row's main time; this does not configure or verify its separate Early Reminder control. Describe the due and trigger separately when that distinction matters.
 - `alarms` is a complete-array replacement. Omitting `alarms` preserves every current alarm whenever alarm-array intent is unchanged and the resulting due remains non-null; `null` or `[]` explicitly clears all alarms. Setting `due:null` while retaining a relative alarm is rejected, so pair the due clear with `alarms:null`, `alarms:[]`, or a complete non-relative replacement. An alarm marked `read_only:true` records trigger, offset, or action semantics outside the faithful writable subset and cannot be resubmitted. If the user asks to change alarms while one is present, stop and report that a non-empty replacement is unsafe. Use `null`/`[]` only when the user explicitly requests clearing every alarm.
 - Writable relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant. Absolute and coordinate-backed enter/leave alarms remain available; messaging alarms are not public.
 - Only one validated recurrence rule is supported and it requires a due date.
+- Completing an incomplete recurring Reminder is blocked before mutation with
+  `unsupported_recurring_completion`. Reminders can advance the same ID to the
+  next occurrence and create a different completed item, so retrying could
+  complete another day. Explain how to complete the intended occurrence once
+  in the Reminders app. Never remove recurrence or repeat completion to bypass
+  the limit. A completed historical occurrence without recurrence is a separate
+  exact item; reopening it does not undo the series advance.
 - In the default session, `url` saves public EventKit URL metadata only. Use it
   for a requested URL field; preserve a contextual URL in `notes` when the user
   needs an ordinary visible note link. Preserve existing notes when adding text.

@@ -221,6 +221,119 @@ class EventKitRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(normalized["due"], {"kind": "all_day", "date": "2026-08-31"})
 
+    def test_repeated_due_wall_times_fail_before_native_dispatch(self) -> None:
+        cases = (
+            ("America/New_York", "2026-11-01T01:30:00-04:00"),
+            ("America/New_York", "2026-11-01T01:30:00-05:00"),
+            ("Australia/Lord_Howe", "2026-04-05T01:45:00+11:00"),
+            ("Australia/Lord_Howe", "2026-04-05T01:45:00+10:30"),
+        )
+        for zone_name, timestamp in cases:
+            for operation in ("create_reminder", "update_reminder"):
+                with self.subTest(
+                    zone=zone_name, timestamp=timestamp, operation=operation
+                ):
+                    due = {
+                        "kind": "timed",
+                        "date_time": timestamp,
+                        "time_zone": zone_name,
+                    }
+                    raw = {"schema_version": 1, "operation": operation}
+                    if operation == "create_reminder":
+                        raw.update(
+                            {
+                                "calendar_id": "CALENDAR-1",
+                                "title": "Repeated clock time",
+                                "due": due,
+                            }
+                        )
+                    else:
+                        raw.update(
+                            {
+                                "reminder_id": "REMINDER-1",
+                                "expected_last_modified": "2026-01-01T00:00:00Z",
+                                "patch": {"due": due},
+                            }
+                        )
+                    with (
+                        mock.patch.object(eventkit_bridge, "read_request", return_value=raw),
+                        mock.patch.object(eventkit_bridge, "invoke_native") as invoke_native,
+                        mock.patch.object(eventkit_bridge, "emit") as emit,
+                    ):
+                        exit_code = eventkit_bridge.main([])
+
+                    invoke_native.assert_not_called()
+                    self.assertEqual(exit_code, 2)
+                    payload = emit.call_args.args[0]
+                    self.assertEqual(payload["status"], "failed_no_mutation")
+                    self.assertEqual(payload["error"]["code"], "unsupported_capability")
+                    self.assertEqual(
+                        payload["error"]["reason_code"], "ambiguous_local_time"
+                    )
+                    self.assertIn("Choose a time outside", payload["error"]["message"])
+
+    def test_unambiguous_due_times_neighboring_dst_changes_remain_supported(self) -> None:
+        for timestamp in (
+            "2026-11-01T00:59:59-04:00",
+            "2026-11-01T02:00:00-05:00",
+            "2026-03-08T01:59:59-05:00",
+            "2026-03-08T03:00:00-04:00",
+        ):
+            with self.subTest(timestamp=timestamp):
+                normalized = eventkit_bridge.normalize_due(
+                    {
+                        "kind": "timed",
+                        "date_time": timestamp,
+                        "time_zone": "America/New_York",
+                    },
+                    "$.due",
+                )
+                self.assertEqual(
+                    normalized["date_time"], timestamp[:-6] + ".000" + timestamp[-6:]
+                )
+
+    def test_nonexistent_due_wall_times_and_wrong_dst_offsets_are_rejected(self) -> None:
+        for timestamp in (
+            "2026-03-08T02:30:00-05:00",
+            "2026-03-08T02:30:00-04:00",
+            "2026-11-01T02:30:00-04:00",
+        ):
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+                    eventkit_bridge.normalize_due(
+                        {
+                            "kind": "timed",
+                            "date_time": timestamp,
+                            "time_zone": "America/New_York",
+                        },
+                        "$.due",
+                    )
+                self.assertEqual(raised.exception.code, "time_zone_offset_mismatch")
+
+    def test_absolute_alarms_preserve_both_repeated_hour_instants(self) -> None:
+        for timestamp, expected in (
+            ("2026-11-01T01:30:00-04:00", "2026-11-01T05:30:00.000Z"),
+            ("2026-11-01T01:30:00-05:00", "2026-11-01T06:30:00.000Z"),
+        ):
+            with self.subTest(timestamp=timestamp):
+                alarm = eventkit_bridge.normalize_alarm(
+                    {"kind": "absolute", "date_time": timestamp}, "$.alarms[0]"
+                )
+                self.assertEqual(alarm["date_time"], expected)
+
+    def test_named_zone_conversion_overflow_is_a_typed_input_error(self) -> None:
+        for timestamp, zone_name in (
+            ("9999-12-31T23:59:59Z", "Pacific/Kiritimati"),
+            ("0001-01-01T00:00:00Z", "America/New_York"),
+        ):
+            with self.subTest(timestamp=timestamp, zone_name=zone_name):
+                with self.assertRaises(eventkit_bridge.BridgeValidationError) as raised:
+                    eventkit_bridge.normalize_due(
+                        {"kind": "timed", "date_time": timestamp, "time_zone": zone_name},
+                        "$.due",
+                    )
+                self.assertEqual(raised.exception.code, "invalid_rfc3339")
+
     def test_absolute_alarm_normalizes_to_utc(self) -> None:
         normalized = eventkit_bridge.normalize_request(
             {
@@ -2346,6 +2459,175 @@ class EventKitContractTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed_no_mutation")
         self.assertEqual(payload["error"]["code"], "schema_mismatch")
         self.assertEqual(payload["error"]["reason_code"], "unsupported_schema_version")
+
+
+class EventKitFloatingDueTests(unittest.TestCase):
+    due = {
+        "kind": "timed",
+        "floating": True,
+        "local_date_time": "2026-09-08T09:30:00",
+    }
+
+    def invalid_cases(self):
+        for field, value in (
+            ("time_zone", "Asia/Seoul"),
+            ("time_zone", None),
+            ("date_time", "2026-09-08T09:30:00+09:00"),
+            ("date_time", None),
+            ("floating", False),
+            ("floating", 1),
+            ("floating", "true"),
+        ):
+            yield f"mixed or invalid {field}={value}", {**self.due, field: value}
+        for value in (
+            "2026-09-08T09:30:00Z",
+            "2026-09-08T09:30:00+09:00",
+            "2026-09-08T09:30:00.123",
+            "2026-09-08T09:30",
+            "2026-02-29T09:30:00",
+            "2026-09-08T24:00:00",
+            "2026-09-08T09:60:00",
+            "2026-09-08T09:30:60",
+            "2026-09-08T09:30:00\n",
+        ):
+            yield value, {**self.due, "local_date_time": value}
+        for field in ("floating", "local_date_time"):
+            yield f"missing {field}", {
+                key: value for key, value in self.due.items() if key != field
+            }
+
+    def test_create_and_patch_preserve_explicit_floating_intent(self) -> None:
+        for operation in ("create_reminder", "update_reminder"):
+            with self.subTest(operation=operation):
+                raw = {"schema_version": 1, "operation": operation}
+                fields = {
+                    "due": self.due,
+                    "alarms": [{"kind": "relative", "offset_seconds": -600}],
+                }
+                if operation == "create_reminder":
+                    raw.update({"calendar_id": "CALENDAR-1", "title": "Local task", **fields})
+                else:
+                    raw.update({
+                        "reminder_id": "REMINDER-1",
+                        "expected_last_modified": "2026-09-05T00:00:00Z",
+                        "patch": fields,
+                    })
+                normalized = eventkit_bridge.normalize_request(raw)
+                actual = normalized if operation == "create_reminder" else normalized["patch"]
+                self.assertEqual(actual["due"], self.due)
+                self.assertEqual(actual["alarms"], fields["alarms"])
+
+    def test_invalid_floating_shapes_fail_before_dispatch(self) -> None:
+        for name, due in self.invalid_cases():
+            with self.subTest(name=name):
+                raw = {
+                    "schema_version": 1,
+                    "operation": "create_reminder",
+                    "calendar_id": "CALENDAR-1",
+                    "title": "Invalid local time",
+                    "due": due,
+                }
+                with (
+                    mock.patch.object(eventkit_bridge, "read_request", return_value=raw),
+                    mock.patch.object(eventkit_bridge, "invoke_native") as invoke_native,
+                    mock.patch.object(eventkit_bridge, "emit") as emit,
+                ):
+                    exit_code = eventkit_bridge.main([])
+                invoke_native.assert_not_called()
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(emit.call_args.args[0]["error"]["code"], "invalid_input")
+
+    def test_public_projection_checks_floating_intent_and_exact_wall_time(self) -> None:
+        actual = {**self.due, "date_time": None, "time_zone": None}
+        self.assertTrue(reminder_matches_fields({"due": actual}, {"due": self.due}))
+        for changed in (
+            {**actual, "local_date_time": "2026-09-08T09:20:00"},
+            {**actual, "floating": False},
+            {**actual, "time_zone": "Asia/Seoul"},
+            {**actual, "date_time": "2026-09-08T09:30:00+09:00"},
+            {
+                "kind": "timed",
+                "date_time": "2026-09-08T09:30:00+09:00",
+                "time_zone": "Asia/Seoul",
+            },
+        ):
+            self.assertFalse(reminder_matches_fields({"due": changed}, {"due": self.due}))
+        zoned = {
+            "kind": "timed",
+            "date_time": "2026-09-08T09:30:00+09:00",
+            "time_zone": "Asia/Seoul",
+        }
+        self.assertFalse(reminder_matches_fields({"due": actual}, {"due": zoned}))
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS Foundation")
+    def test_native_floating_components_round_trip_without_event_store(self) -> None:
+        source = PLUGIN_ROOT / "scripts" / "reminders_eventkit.m"
+        valid = [
+            self.due,
+            {**self.due, "local_date_time": "2028-02-29T23:59:59"},
+            {**self.due, "local_date_time": "2026-03-08T02:30:00"},
+            {**self.due, "local_date_time": "2026-11-01T01:30:00"},
+        ]
+        invalid = list(self.invalid_cases())
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / "floating-components.m"
+            binary = Path(temporary) / "floating-components"
+            wrapper.write_text(
+                f'''\
+#define main AppleRemindersProductionMain
+#include "{source.as_posix()}"
+#undef main
+int main(void) {{
+    @autoreleasepool {{
+        NSData *input = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+        NSArray *cases = [NSJSONSerialization JSONObjectWithData:input options:0 error:nil];
+        NSMutableArray *results = [NSMutableArray array];
+        for (NSDictionary *due in cases) {{
+            @try {{
+                NSDateComponents *components = ComponentsFromDueJSON(due);
+                [results addObject:@{{
+                    @"due" : DateComponentsJSON(components),
+                    @"has_time_zone" : components.timeZone != nil ? @YES : @NO,
+                    @"gregorian" : @([components.calendar.calendarIdentifier
+                        isEqual:NSCalendarIdentifierGregorian]),
+                    @"canonical" : CanonicalDueVerificationValue(due),
+                }}];
+            }} @catch (NSException *exception) {{
+                [results addObject:@{{ @"error" : exception.userInfo[@"code"] ?: exception.name }}];
+            }}
+        }}
+        NSData *output = [NSJSONSerialization dataWithJSONObject:results options:0 error:nil];
+        [[NSFileHandle fileHandleWithStandardOutput] writeData:output];
+        return 0;
+    }}
+}}
+''',
+                encoding="utf-8",
+            )
+            compiled = subprocess.run(
+                [
+                    "clang", "-x", "objective-c", "-fobjc-arc",
+                    "-framework", "Foundation", "-framework", "EventKit",
+                    "-framework", "CoreLocation", str(wrapper), "-o", str(binary),
+                ],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            completed = subprocess.run(
+                [str(binary)], input=json.dumps(valid + [due for _, due in invalid]),
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        results = json.loads(completed.stdout)
+        for expected, result in zip(valid, results):
+            with self.subTest(expected=expected):
+                self.assertEqual(result["due"], {**expected, "date_time": None, "time_zone": None})
+                self.assertEqual(result["canonical"], result["due"])
+                self.assertIs(result["has_time_zone"], False)
+                self.assertIs(result["gregorian"], True)
+        for (name, _), result in zip(invalid, results[len(valid):]):
+            with self.subTest(name=name):
+                self.assertIn("error", result)
 
 
 if __name__ == "__main__":

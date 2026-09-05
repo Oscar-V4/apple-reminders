@@ -846,6 +846,39 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertEqual(len(first["idempotency_key_hash"]), 64)
         validate_public_result("ensure_reminder_list", first, "committed")
 
+    def test_duplicate_list_warning_cannot_hide_a_committed_or_unknown_write(self) -> None:
+        for status, mutation_state in (("verified", "committed"), ("unchanged", "unknown")):
+            with self.subTest(status=status, mutation_state=mutation_state):
+                eventkit = FakeEventKit()
+                eventkit.queue(
+                    "ensure_reminder_list",
+                    {
+                        "schema_version": 1,
+                        "ok": True,
+                        "status": status,
+                        "operation": "ensure_reminder_list",
+                        "target": {"source_id": "SOURCE-1", "list_id": "ARBITRARY-LIST"},
+                        "after": {"id": "ARBITRARY-LIST", "title": "Work"},
+                        "warnings": [
+                            {"code": "duplicate_list_name_in_source", "message": "duplicate"}
+                        ],
+                    },
+                    mutation=True,
+                    mutation_state=mutation_state,
+                )
+                result, state = facade(eventkit).call_with_state(
+                    "ensure_reminder_list",
+                    {"source_id": "SOURCE-1", "name": "Work", "idempotency_key": "ensure:uncertain"},
+                )
+
+                self.assertEqual(result["status"], "committed_verification_pending")
+                self.assertEqual(state, mutation_state)
+                self.assertEqual(result["error"]["reason_code"], "ambiguous_list_mutation_outcome")
+                self.assertNotIn("ARBITRARY-LIST", repr(result))
+                self.assertIsNone(result["after"])
+                self.assertEqual(result["next_action"]["tool"], "list_reminder_lists")
+                validate_public_result("ensure_reminder_list", result, state)
+
     def test_ensure_list_dispatch_exception_is_pending(self) -> None:
         eventkit = FakeEventKit()
         eventkit.fail(
@@ -1705,9 +1738,10 @@ class V2CoreFacadeTests(unittest.TestCase):
                         "date": "2027-08-31",
                     }
                     before["alarms"] = [copy.deepcopy(alarm)]
-                    before["recurrence_rules"] = [
-                        {"frequency": "weekly", "interval": 1}
-                    ]
+                    before["recurrence_rules"] = (
+                        [] if action_name == "completion"
+                        else [{"frequency": "weekly", "interval": 1}]
+                    )
                     committed = {
                         **copy.deepcopy(before),
                         **copy.deepcopy(delta),
@@ -1917,6 +1951,62 @@ class V2CoreFacadeTests(unittest.TestCase):
         self.assertNotIn("list_id", eventkit.calls[2][1])
         self.assertEqual(result["operation"], "change_reminder.move_to_list")
         self.assertEqual(result["after"]["list_id"], "LIST-2")
+
+    def test_recurring_completion_returns_actionable_no_write_in_both_modes(self) -> None:
+        for experimental in (False, True):
+            with self.subTest(experimental=experimental):
+                eventkit = FakeEventKit()
+                before = {
+                    **native_reminder(),
+                    "due": {"kind": "all_day", "date": "2026-09-08"},
+                    "recurrence_rules": [{"frequency": "daily", "interval": 1}],
+                }
+                eventkit.queue("read_reminder", read_receipt(before))
+                eventkit.queue("read_reminder", read_receipt(before))
+                subject = facade(eventkit, enable_experimental=experimental)
+                reference = subject.read_reminder({"reminder_id": before["id"]})["data"]["reminder"]["reference"]
+
+                result, state = subject.call_with_state(
+                    "change_reminder",
+                    {"reference": reference, "action": {"kind": "set_completion", "completed": True}},
+                )
+
+                self.assertEqual(result["status"], "failed_no_mutation")
+                self.assertEqual(state, "not_mutated")
+                self.assertEqual(result["error"]["code"], "unsupported_capability")
+                self.assertEqual(result["error"]["reason_code"], "unsupported_recurring_completion")
+                self.assertIn("Reminders app", result["error"]["message"])
+                self.assertFalse(result["error"]["retryable"])
+                self.assertFalse(result["recovery"]["automatic_retry_safe"])
+                self.assertNotIn("rev1.", repr(result))
+                self.assertFalse(any(mutation for _, _, mutation in eventkit.calls))
+                validate_public_result("change_reminder", result, state)
+
+    def test_completed_historical_occurrence_reopens_as_that_exact_item(self) -> None:
+        eventkit = FakeEventKit()
+        before = {
+            **native_reminder(reminder_id="COMPLETED-OCCURRENCE", completed=True),
+            "due": {"kind": "all_day", "date": "2026-09-07"},
+            "recurrence_rules": [],
+        }
+        after = {**before, "completed": False, "last_modified": "2026-09-05T09:00:00.000Z"}
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("read_reminder", read_receipt(before))
+        eventkit.queue("reopen_reminder", mutation_receipt("reopen_reminder", before, after), mutation=True)
+        eventkit.queue("read_reminder", read_receipt(after))
+        subject = facade(eventkit)
+        reference = subject.read_reminder({"reminder_id": before["id"]})["data"]["reminder"]["reference"]
+
+        result, state = subject.call_with_state(
+            "change_reminder", {"reference": reference, "action": {"kind": "set_completion", "completed": False}}
+        )
+
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["after"]["id"], "COMPLETED-OCCURRENCE")
+        self.assertEqual(result["after"]["due"], before["due"])
+        self.assertEqual(result["after"]["recurrence_rules"], [])
+        self.assertEqual([name for name, _, mutation in eventkit.calls if mutation], ["reopen_reminder"])
+        validate_public_result("change_reminder", result, state)
 
     def test_known_concurrent_change_returns_a_structured_fresh_read_failure(self) -> None:
         eventkit = FakeEventKit()

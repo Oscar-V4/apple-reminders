@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
+import os
 import plistlib
 import stat
 import sys
@@ -240,6 +242,106 @@ class PythonRuntimeVerificationTests(unittest.TestCase):
                 self.save_manifest()
                 with self.assertRaises(verifier.VerificationError):
                     verifier.load_manifest(self.manifest_path, "arm64", require_signed=True, expected_team_id="ABCDEFGHIJ", repo_root=self.repo)
+
+    def test_existing_app_validation_accepts_exact_bytes_without_writing(self) -> None:
+        app = verifier.extract_verified(self.archive, self.manifest, self.root / "existing")
+        before = {
+            path.relative_to(app): (path.stat().st_mode, path.stat().st_mtime_ns)
+            for path in (app, *app.rglob("*"))
+        }
+        with mock.patch.object(verifier.subprocess, "run", side_effect=AssertionError("inventory check must not execute code")):
+            verifier.validate_existing_app(app, self.manifest)
+        after = {
+            path.relative_to(app): (path.stat().st_mode, path.stat().st_mtime_ns)
+            for path in (app, *app.rglob("*"))
+        }
+        self.assertEqual(before, after)
+
+    def test_existing_app_rejects_added_missing_changed_or_nonregular_entries(self) -> None:
+        names = (
+            "bytecode", "directory", "missing", "content", "file mode",
+            "directory mode", "root mode", "file symlink", "directory symlink", "fifo",
+        )
+        for index, name in enumerate(names):
+            with self.subTest(change=name):
+                app = verifier.extract_verified(self.archive, self.manifest, self.root / f"existing-{index}")
+                target = app / "Contents/Resources/upstream/licenses/LICENSE.cpython.txt"
+                if name == "bytecode":
+                    (app / "Contents/linecache.cpython-313.pyc").write_bytes(b"unexpected bytecode")
+                elif name == "directory":
+                    (app / "Contents/__pycache__").mkdir()
+                elif name == "missing":
+                    target.unlink()
+                elif name == "content":
+                    target.write_bytes(b"x" * target.stat().st_size)
+                elif name == "file mode":
+                    target.chmod(0o755)
+                elif name == "directory mode":
+                    (app / "Contents").chmod(0o700)
+                elif name == "root mode":
+                    app.chmod(0o700)
+                elif name == "file symlink":
+                    target.unlink()
+                    target.symlink_to(self.manifest_path)
+                elif name == "directory symlink":
+                    directory = target.parent
+                    target.unlink()
+                    directory.rmdir()
+                    directory.symlink_to(self.root, target_is_directory=True)
+                else:
+                    target.unlink()
+                    os.mkfifo(target)
+                with self.assertRaises(verifier.VerificationError):
+                    verifier.validate_existing_app(app, self.manifest)
+                if name == "bytecode":
+                    self.assertEqual((app / "Contents/linecache.cpython-313.pyc").read_bytes(), b"unexpected bytecode")
+
+    def test_existing_app_rejects_symlinked_root_or_parent(self) -> None:
+        parent = self.root / "existing"
+        app = verifier.extract_verified(self.archive, self.manifest, parent)
+        root_alias = self.root / "root-alias" / verifier.APP_NAME
+        root_alias.parent.mkdir()
+        root_alias.symlink_to(app, target_is_directory=True)
+        parent_alias = self.root / "parent-alias"
+        parent_alias.symlink_to(parent, target_is_directory=True)
+        for alias in (root_alias, parent_alias / verifier.APP_NAME):
+            with self.subTest(alias=alias), self.assertRaisesRegex(verifier.VerificationError, "non-symlink"):
+                verifier.validate_existing_app(alias, self.manifest)
+
+    def test_existing_app_cli_checks_inventory_before_signature_without_extracting(self) -> None:
+        app = verifier.extract_verified(self.archive, self.manifest, self.root / "existing")
+        manifest = {**self.manifest, "code_directory_hash": "a" * 40}
+        args = ["--app", str(app), "--manifest", str(self.manifest_path), "--architecture", "arm64", "--expected-team-id", "ABCDEFGHIJ", "--require-developer-id"]
+        with (
+            mock.patch.object(verifier, "load_manifest", return_value=manifest),
+            mock.patch.object(verifier, "extract_verified") as extract,
+            mock.patch.object(verifier, "validate_archive") as archive,
+            mock.patch.object(verifier, "run_probes") as probes,
+            mock.patch.object(verifier, "verify_signatures") as signatures,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            self.assertEqual(verifier.main(args), 0)
+            self.assertIs(json.loads(output.getvalue())["existing_app_checked"], True)
+            signatures.assert_called_once_with(app, "arm64", "ABCDEFGHIJ", notarized=False, macho_paths=manifest["macho_paths"], expected_cdhash="a" * 40)
+            extra = app / "Contents/linecache.cpython-313.pyc"
+            extra.write_bytes(b"unexpected bytecode")
+            signatures.reset_mock()
+            with mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as raised:
+                verifier.main(args)
+            self.assertEqual(raised.exception.code, 1)
+            signatures.assert_not_called()
+            self.assertTrue(extra.exists())
+            extract.assert_not_called()
+            archive.assert_not_called()
+            probes.assert_not_called()
+
+    def test_existing_app_cli_rejects_extraction_execution_or_an_archive(self) -> None:
+        args = ["--app", str(self.root / verifier.APP_NAME), "--manifest", str(self.manifest_path), "--architecture", "arm64"]
+        for incompatible in (["--extract-to", str(self.root / "output")], ["--run-probes"], ["--archive", str(self.archive)]):
+            with self.subTest(options=incompatible), mock.patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as raised:
+                    verifier.main(args + incompatible)
+                self.assertEqual(raised.exception.code, 2)
 
     def test_signed_verification_rejects_a_nested_native_architecture_mismatch(self) -> None:
         def inspect(arguments: list[str], **kwargs: object) -> str:

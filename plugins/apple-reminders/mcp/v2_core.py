@@ -47,6 +47,7 @@ from reminders_service import (  # noqa: E402
     ReferenceRevalidationFailed,
     SetCompletionAction,
     Snapshot,
+    UnsupportedAction,
     mutation_state_after_unverified_projection,
     reminder_matches_fields,
     unverified_mutation_projection,
@@ -508,6 +509,16 @@ def _next_action(
         }
     if code == "sync_pending" and operation == "request_reminders_access":
         return None
+    if code == "ambiguous_scope" and operation == "ensure_reminder_list":
+        return {
+            "kind": "fresh_read",
+            "tool": "list_reminder_lists",
+            "retry_original_once": False,
+            "message": (
+                "List the exact Reminder account's lists and choose the intended "
+                "list_id before creating or moving a Reminder."
+            ),
+        }
     if (
         code == "concurrent_modification"
         and operation == "fetch_reminders"
@@ -1204,6 +1215,42 @@ class V2CoreFacade:
                     "exact source before retrying."
                 ),
             )
+        warnings = payload.get("warnings")
+        duplicate_name = isinstance(warnings, list) and any(
+            isinstance(warning, Mapping)
+            and warning.get("code") == "duplicate_list_name_in_source"
+            for warning in warnings
+        )
+        if status in {"unchanged", "verified"} and duplicate_name:
+            # The signed helper's legacy ensure operation returns the first
+            # identifier when names collide. That historical selection is not
+            # authority to choose a destination, including on durable replay.
+            if status != "unchanged" or _reply_mutation_state(reply) != "not_mutated":
+                return self._pending_list_result(
+                    source_id,
+                    reason_code="ambiguous_list_mutation_outcome",
+                    message=(
+                        "More than one Reminder List has this exact name, and the "
+                        "list operation's write outcome is uncertain. List the "
+                        "exact account before another mutation."
+                    ),
+                )
+            result = self._mutation_failure(
+                "ensure_reminder_list",
+                target={"source_id": source_id, "list_id": None},
+                code="ambiguous_scope",
+                reason_code="duplicate_list_name_in_source",
+                message=(
+                    "More than one Reminder List in this account has the exact "
+                    "name. No list was selected or created; list the account's "
+                    "lists and choose the intended list_id."
+                ),
+                retryable=False,
+            )
+            operation_id = payload.get("operation_id")
+            if isinstance(operation_id, str) and operation_id:
+                result["operation_id"] = operation_id
+            return result
         before_raw = payload.get("before")
         after_raw = payload.get("after")
         before = (
@@ -1854,7 +1901,11 @@ class V2CoreFacade:
                 self._change_failure(
                     public_operation,
                     None,
-                    code="invalid_input",
+                    code=(
+                        "unsupported_capability"
+                        if isinstance(exc, UnsupportedAction)
+                        else "invalid_input"
+                    ),
                     reason_code=exc.code,
                     message=str(exc),
                     retryable=False,

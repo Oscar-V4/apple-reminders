@@ -31,7 +31,7 @@ its state; a conflict is not permission to create it again with a fresh key.
 - `create_reminder {list_id, title, idempotency_key, ...fields}`: create once and return final exact state plus a fresh reference when verified.
 - `change_reminder {reference, action}`: patch fields, set completion, or move to another list.
 - `delete_reminder {reference}`: delete through EventKit and require exact local-absence evidence. That receipt does not itself prove UI state or future recoverability.
-- `ensure_reminder_list {source_id, name, idempotency_key}`: return an exact existing list or create it in that account. Color and emblem are not public fields.
+- `ensure_reminder_list {source_id, name, idempotency_key}`: return a uniquely named existing list or create it in that account. Duplicate exact names return `ambiguous_scope` with no selected list; list that account's lists and resolve the intended `list_id`. Color and emblem are not public fields.
 
 `change_reminder.action` is exactly one of:
 
@@ -40,6 +40,21 @@ its state; a conflict is not permission to create it again with a fresh key.
 {"kind":"set_completion","completed":true}
 {"kind":"move_to_list","list_id":"EXACT-LIST-ID"}
 ```
+
+Timed due has two explicit forms. `{"kind":"timed","date_time":"2026-09-08T09:30:00+09:00","time_zone":"Asia/Seoul"}` requests a zoned instant; `{"kind":"timed","floating":true,"local_date_time":"2026-09-08T09:30:00"}` requests a local wall-clock time following the device timezone. Floating input uses whole seconds and must not include `date_time` or `time_zone`, even as null. Reads include null zone/timestamp fields to expose floating storage; those output-only nulls are not writable input. Never silently downgrade a zoned request to floating time. Zoned repeated DST hours return `unsupported_capability/ambiguous_local_time` before saving.
+
+A relative alarm specifies an EventKit trigger. On the tested Reminders build it can appear as the main row time while the app's separate Early Reminder control remains unset. Receipt verification covers the due metadata and alarm trigger, not that UI control.
+
+`set_completion` with `completed:true` rejects an incomplete Reminder with
+nonempty `recurrence_rules` before mutation: `unsupported_capability` /
+`unsupported_recurring_completion`. EventKit can advance the same ID to the
+next occurrence and create a completed item with a different ID. The plugin
+does not have a faithful public occurrence-lineage contract; complete the
+intended occurrence once in the Reminders app. Do not retry completion, remove
+recurrence, or recreate the item to bypass this limit. Ordinary one-off
+completion, exact historical-occurrence reopen, and other supported edits
+remain available. Reopening a completed historical occurrence without
+recurrence reopens only that exact item; it does not undo the series advance.
 
 Alarm-only relative patch sequence:
 

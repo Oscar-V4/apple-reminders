@@ -13,7 +13,7 @@ Preserve wording, choose an exact destination, and create each intended Reminder
 2. Call `list_reminder_lists`. If the destination is missing or duplicate by display name, show exact account/list candidates. Do not create a list unless asked.
 3. If asked to create a list, use `ensure_reminder_list` with exact `source_id`, exact name, and a fresh idempotency key. The public interface does not set list color or emblem.
 4. Call `create_reminder` with exact `list_id`, preserved title, and a unique idempotency key. For multi-capture, process at most 25 items one at a time; stop on the first ambiguous, pending, partial, or failed result. Include only supplied or delegated fields.
-5. Use typed due values. A timed due includes RFC 3339 offset and IANA timezone. Alerts belong in `alarms`; add one only when the user requests a notification. Preserve relative wording such as “2 weeks before” as a due-anchored relative alarm instead of converting it to an absolute date.
+5. Use typed due values. Use RFC 3339 offset and IANA timezone for a zoned instant, or the explicit floating form below for a local wall-clock time that follows the device timezone. Preserve the user's intended semantics; do not silently switch forms after a failed write. Alerts belong in `alarms`; add one only when the user requests a notification. Preserve relative wording such as “2 weeks before” as a due-anchored relative alarm instead of converting it to an absolute date.
 6. In the default Core session, use `url` for a requested URL field; this saves
    EventKit metadata only. Preserve a contextual URL in `notes` when a visible
    note link is intended. Do not claim a native attachment card from metadata
@@ -41,6 +41,12 @@ Timed example:
 ```
 
 All-day due: `{"kind":"all_day","date":"YYYY-MM-DD"}`. Absolute alarms use their own RFC 3339 `date_time`; location alarms require explicit coordinates and `enter` or `leave`. A due-anchored relative alarm is `{"kind":"relative","offset_seconds":-1209600}` for two weeks before. Relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant. A relative alarm requires a same-create due value. One recurrence rule is supported and requires a due value.
+
+Local wall-clock due: `{"kind":"timed","floating":true,"local_date_time":"2026-09-08T09:30:00"}`. This form has no fixed timezone or UTC offset. Do not add `date_time` or `time_zone`, including null values. Zoned times in a repeated DST hour are rejected because the selected occurrence cannot be preserved; do not replace them with floating time without the user's intent.
+
+For an ordinary timed request, use the user's resolved timezone as in the example. Choose floating when the user intends the clock time to follow the device's timezone, rather than inventing that travel behavior.
+
+The app may show a relative alarm's trigger as its main time. Report due and trigger separately; a verified EventKit relative alarm does not prove the app's separate Early Reminder control is configured.
 
 ## Image follow-up
 

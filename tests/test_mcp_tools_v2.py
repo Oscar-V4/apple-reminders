@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,52 @@ class McpToolsV2SchemaTests(unittest.TestCase):
                 tool_name,
             )
 
+    def test_floating_timed_due_is_a_closed_explicit_create_and_patch_shape(self) -> None:
+        if str(PLUGIN_ROOT) not in sys.path:
+            sys.path.insert(0, str(PLUGIN_ROOT))
+        from mcp import server
+
+        due = {
+            "kind": "timed",
+            "floating": True,
+            "local_date_time": "2026-09-08T09:30:00",
+        }
+        for tool_name in ("create_reminder", "change_reminder"):
+            with self.subTest(tool_name=tool_name):
+                tool = self.by_name[tool_name]
+                floating = next(
+                    branch for branch in tool["inputSchema"]["$defs"]["due"]["oneOf"]
+                    if "floating" in branch["properties"]
+                )
+                self.assertEqual(set(floating["properties"]), set(due))
+                self.assertEqual(set(floating["required"]), set(due))
+                self.assertIs(floating["additionalProperties"], False)
+                self.assertIs(floating["properties"]["floating"]["const"], True)
+                self.assertEqual(floating["properties"]["local_date_time"]["maxLength"], 19)
+
+                def arguments(value):
+                    if tool_name == "create_reminder":
+                        return {
+                            "list_id": "LIST-1", "title": "Local task",
+                            "idempotency_key": "floating-due-test", "due": value,
+                        }
+                    return {
+                        "reference": "rev1." + "A" * 32,
+                        "action": {"kind": "patch", "patch": {"due": value}},
+                    }
+
+                self.assertEqual(server.validate_arguments(tool, arguments(due)), arguments(due))
+                for invalid in (
+                    {**due, "floating": False},
+                    {**due, "floating": 1},
+                    {**due, "time_zone": "Asia/Seoul"},
+                    {**due, "date_time": None},
+                    {**due, "local_date_time": "2026-09-08T09:30:00Z"},
+                    {key: value for key, value in due.items() if key != "floating"},
+                ):
+                    with self.subTest(invalid=invalid):
+                        with self.assertRaises(server.ToolInputError):
+                            server.validate_arguments(tool, arguments(invalid))
     def test_alarm_array_contract_describes_create_and_replace_all_updates(
         self,
     ) -> None:

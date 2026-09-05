@@ -11,9 +11,10 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes **v0.6.0**. Use the matching
-[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.0) for the
-versioned package and verification results.
+This guide describes **v0.6.1**. Confirm the matching
+[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1) is
+published before installing this version; it records the package and
+verification results.
 
 The plugin includes a signed Python runtime, so there is **no separate Python
 installation**. Ordinary startup offers **9 Core and diagnostic tools**.
@@ -33,7 +34,7 @@ Ask Codex to run these commands, or run them in a terminal where the `codex`
 command is available:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
