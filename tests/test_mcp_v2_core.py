@@ -199,16 +199,98 @@ def mutation_receipt(
     }
 
 
-def facade(eventkit: FakeEventKit) -> V2CoreFacade:
+def facade(
+    eventkit: FakeEventKit, *, enable_experimental: bool = False
+) -> V2CoreFacade:
     return V2CoreFacade(
         eventkit,
         token_source=DeterministicTokens(),
         operation_id_source=DeterministicOperationIDs(),
         reference_ttl_seconds=30.0,
+        enable_experimental=enable_experimental,
     )
 
 
 class V2CoreFacadeTests(unittest.TestCase):
+    def test_url_create_receipt_identifies_the_selected_runtime(self) -> None:
+        for experimental in (False, True):
+            with self.subTest(experimental=experimental):
+                eventkit = FakeEventKit()
+                created = {
+                    **native_reminder(title="Open the project"),
+                    "url": "https://example.com/project",
+                }
+                eventkit.queue(
+                    "create_reminder",
+                    mutation_receipt("create_reminder", {}, created),
+                    mutation=True,
+                )
+                eventkit.queue("read_reminder", read_receipt(created))
+                subject = facade(eventkit, enable_experimental=experimental)
+
+                result = subject.create_reminder(
+                    {
+                        "list_id": "LIST-1",
+                        "title": created["title"],
+                        "url": created["url"],
+                        "idempotency_key": "create-url-runtime-mode",
+                    }
+                )
+
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(
+                    result["backend"],
+                    "eventkit_plus_native_url" if experimental else "eventkit_public_sdk",
+                )
+                self.assertEqual(result["after"]["url"], created["url"])
+                self.assertTrue(result["verification"]["matched"])
+                validate_public_result("create_reminder", result, "committed")
+
+    def test_url_patch_receipt_identifies_the_selected_runtime(self) -> None:
+        for experimental in (False, True):
+            for url in ("https://example.com/project", None):
+                with self.subTest(experimental=experimental, url=url):
+                    eventkit = FakeEventKit()
+                    before = {
+                        **native_reminder(),
+                        "url": "https://example.com/original",
+                    }
+                    after = {
+                        **before,
+                        "url": url,
+                        "last_modified": "2026-08-25T01:00:01.000Z",
+                    }
+                    eventkit.queue("read_reminder", read_receipt(before))
+                    eventkit.queue("read_reminder", read_receipt(before))
+                    eventkit.queue("read_reminder", read_receipt(after))
+                    eventkit.queue(
+                        "update_reminder",
+                        mutation_receipt("update_reminder", before, after),
+                        mutation=True,
+                    )
+                    subject = facade(eventkit, enable_experimental=experimental)
+                    reference = subject.read_reminder({"reminder_id": before["id"]})[
+                        "data"
+                    ]["reminder"]["reference"]
+
+                    result = subject.change_reminder(
+                        {
+                            "reference": reference,
+                            "action": {"kind": "patch", "patch": {"url": url}},
+                        }
+                    )
+
+                    self.assertEqual(result["status"], "verified")
+                    self.assertEqual(
+                        result["backend"],
+                        "eventkit_plus_native_url"
+                        if experimental and url is not None
+                        else "eventkit_public_sdk",
+                    )
+                    self.assertEqual(result["after"]["url"], url)
+                    self.assertTrue(result["verification"]["matched"])
+                    validate_public_result("change_reminder", result, "committed")
+
     def test_list_and_fetch_reject_non_object_items_beyond_public_limit(self) -> None:
         cases = (
             (
@@ -970,7 +1052,7 @@ class V2CoreFacadeTests(unittest.TestCase):
         }
         eventkit.queue("create_reminder", receipt, mutation=True)
 
-        result = facade(eventkit).create_reminder(
+        result = facade(eventkit, enable_experimental=True).create_reminder(
             {
                 "list_id": "LIST-1",
                 "title": "Open spec",

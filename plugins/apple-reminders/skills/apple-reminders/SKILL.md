@@ -1,6 +1,6 @@
 ---
 name: apple-reminders
-description: Manage native Apple Reminders from Codex. Use to turn notes, screenshots, or plans into reminders; brief bounded tasks; manage lists, sections, dates, alarms, completion, safe create/change/delete/recover work, tags, and attachments. Native flags, raw UI selection, bulk repair, and backup apply are not public operations.
+description: "Manage Apple Reminders from Codex: capture notes or screenshots, brief upcoming work, and create, change, complete, or delete exact reminders. Sections, tags, native attachments, and recovery require an explicitly enabled Experimental session."
 ---
 
 # Apple Reminders
@@ -10,6 +10,12 @@ documented EventKit. Sections, tag assignments, native attachments, and exact
 Recently Deleted work are Experimental Internals. A missing or blocked
 capability is not permission to call a deprecated CLI, edit the Reminders
 database, improvise with AppleScript/UI automation, or bypass the runtime gate.
+
+The default session exposes nine Core and diagnosis tools. Six Experimental
+tools appear only after an explicit `--experimental` launch. If a tool is absent
+or returns `experimental_disabled`, explain the limit and use an agreed Core
+alternative or manual Reminders action. A request for an attachment does not
+authorize changing the plugin configuration or installing developer tools.
 
 Read [references/public-interface.md](references/public-interface.md) only when exact action fields or receipt semantics are needed.
 
@@ -33,7 +39,8 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 6. Use `delete_reminder` only with a fresh exact reference. It uses EventKit deletion and requires verified local absence; that receipt alone does not prove UI state, retention, or later recoverability.
 7. Before a destructive workflow, offer a move to a dedicated archive Reminder
    List through Core. Use private Recently Deleted only when the item is already
-   deleted and the user explicitly requests exact recovery. Run targeted
+   deleted and the user explicitly requests exact recovery in an enabled
+   Experimental session. Run targeted
    `diagnose_reminders` with `scope=recovery`; continue only when the exact
    capability is available. Use `inspect_recently_deleted` list mode only for
    bounded discovery. Follow a cursor only with the identical account and limit;
@@ -43,7 +50,8 @@ Read [references/public-interface.md](references/public-interface.md) only when 
    Compare the deleted `account_id` with the destination list's `source.id`,
    never resolve duplicate list titles without them, recover one item at a time,
    and stop on any non-verified result.
-8. For explicitly requested Native Extension work, diagnose the matching
+8. For explicitly requested Native Extension work in an enabled Experimental
+   session, diagnose the matching
    `sections`, `tags`, or `attachments` scope first. Continue only when the
    result says `support_tier=experimental_internals`, `available=true`, and the
    build/schema admission passed. Resolve the exact reminder and use the public
@@ -57,7 +65,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 
 - When a normal Core call returns `permission_denied` with `request_reminders_access`, request access once and retry the original operation once. Stop after denial.
 - Use `diagnose_reminders` for an explicitly requested Experimental capability
-  before its first mutation, or after a relevant failure. Start with
+  in an enabled Experimental session before its first mutation, or after a relevant failure. Start with
   `detail_level=summary`; request `full` only when the summary identifies a
   specific area. Public scopes include `recovery`.
 - Doctor is content-free. It does not prove future writes, iCloud convergence, or iPhone visibility.
@@ -69,12 +77,14 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - `alarms` is a complete-array replacement. Omitting `alarms` preserves every current alarm whenever alarm-array intent is unchanged and the resulting due remains non-null; `null` or `[]` explicitly clears all alarms. Setting `due:null` while retaining a relative alarm is rejected, so pair the due clear with `alarms:null`, `alarms:[]`, or a complete non-relative replacement. An alarm marked `read_only:true` records trigger, offset, or action semantics outside the faithful writable subset and cannot be resubmitted. If the user asks to change alarms while one is present, stop and report that a non-empty replacement is unsafe. Use `null`/`[]` only when the user explicitly requests clearing every alarm.
 - Writable relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant. Absolute and coordinate-backed enter/leave alarms remain available; messaging alarms are not public.
 - Only one validated recurrence rule is supported and it requires a due date.
-- A non-null URL on Core create/change is one hybrid EventKit plus private native
-  attachment operation. For a Core-only default, put a contextual link in
-  `notes`. Use the URL field only when the user wants the native URL behavior and
-  the Experimental URL capability is admitted. Do not add the same URL again
-  after `verified`.
-- If a fresh same-URL patch returns `ambiguous_visible_url_attachment`, do not retry or guess which extra URL is stale. Follow `read_reminder` to obtain a fresh Reference, inspect native attachments, and clean up only an exact user-intended attachment ID.
+- In the default session, `url` saves public EventKit URL metadata only. Use it
+  for a requested URL field; preserve a contextual URL in `notes` when the user
+  needs an ordinary visible note link. Preserve existing notes when adding text.
+  A verified metadata write does not prove a native attachment card is visible.
+- An explicitly enabled Experimental session retains hybrid EventKit plus
+  native URL attachment behavior for a string URL. Check the admitted URL
+  capability first and do not add the URL again after a verified hybrid result.
+- In Experimental mode, if a fresh same-URL patch returns `ambiguous_visible_url_attachment`, do not retry or guess which extra URL is stale. Follow `read_reminder` to obtain a fresh Reference, inspect native attachments, and clean up only an exact user-intended attachment ID.
 - Clearing Core `patch.url` does not delete existing URL attachment objects; attachment deletion is explicit.
 
 ## Lists, sections, tags, and attachments
@@ -107,5 +117,5 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 ## Reporting
 
 - Name the exact list and section when location matters; include exact Reminder IDs for follow-up.
-- Report `unchanged`, `verified`, `committed_verification_pending`, or `partial_success` exactly. Failed operations are not successes.
+- Explain results in the user’s language: saved and checked, unchanged, or saved but still awaiting verification. Preserve the meaning of `committed_verification_pending` and `partial_success`; include the exact status when troubleshooting. Failed operations are not successes.
 - Keep responses concise and do not expose raw database rows, private paths, or full note bodies unless targeted troubleshooting requires them.

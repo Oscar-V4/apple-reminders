@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Production EventKit adapter for the public v2 Core Module.
 
-The MCP server injects the local subprocess transports.  This module owns the
-hybrid EventKit/native URL workflow and exposes only the ``EventKitPort``
+The MCP server injects the local subprocess transports.  Core uses EventKit
+only by default.  An explicitly enabled Experimental runtime can also compose
+the legacy native URL attachment workflow through the same ``EventKitPort``
 interface consumed by :mod:`v2_core`.
 """
 
@@ -98,12 +99,14 @@ class CoreBackend:
         build_adapter_argv: ArgvBuilder,
         idempotency_call: IdempotencyCall,
         receipt_validator: ReceiptValidator,
+        enable_experimental: bool = False,
     ) -> None:
         self._bridge_call = bridge_call
         self._adapter_call = adapter_call
         self._build_adapter_argv = build_adapter_argv
         self._idempotency_call = idempotency_call
         self._receipt_validator = receipt_validator
+        self._enable_experimental = enable_experimental
 
     def invoke(
         self,
@@ -836,7 +839,7 @@ class CoreBackend:
                 bridge_arguments.get("patch"), dict
             ):
                 visible_url = bridge_arguments["patch"].get("url")
-            if isinstance(visible_url, str):
+            if self._enable_experimental and isinstance(visible_url, str):
                 payload = self._ensure_visible_url_attachment(payload, visible_url)
             projected_state = validated_receipt_mutation_state(payload)
             executed_state = (
@@ -857,6 +860,17 @@ class CoreBackend:
                     "operation": operation,
                     **bridge_arguments,
                 }
+                if tool_name == "create_reminder" and isinstance(
+                    bridge_arguments.get("url"), str
+                ):
+                    # The same URL has different completion semantics in the
+                    # two runtimes. Never replay a metadata-only receipt as a
+                    # verified visible attachment (or the reverse).
+                    request["url_write_mode"] = (
+                        "native_attachment"
+                        if self._enable_experimental
+                        else "eventkit_metadata_only"
+                    )
                 payload = self._idempotency_call(
                     operation=durable_operation,
                     key=idempotency_key,

@@ -25,6 +25,7 @@ RECEIPT_EXAMPLE = Path("docs/launch/examples/external-tester-receipt.example.jso
 RELEASE_VERIFICATION = Path("docs/release-verification.md")
 RELEASE_VERIFIER = Path("scripts/verify_release_assets.py")
 RELEASE_WORKFLOW = Path(".github/workflows/release.yml")
+INSTALLATION_GUIDE = Path("docs/installation.md")
 EXPERIMENTAL_DECISION = Path(
     "docs/decisions/0020-fail-closed-experimental-runtime-gate.md"
 )
@@ -55,6 +56,7 @@ MARKETING_SURFACES = (
     TESTER_WORKFLOW,
     SOCIAL_ASSET_README,
     RELEASE_VERIFICATION,
+    INSTALLATION_GUIDE,
 )
 FORBIDDEN_CLAIM_RE = re.compile(
     r"\b(?:official|approved|certified|production-ready)\b", re.IGNORECASE
@@ -66,6 +68,10 @@ RELEASE_TAG_RE = re.compile(
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 BLANKET_XCODE_RE = re.compile(
     r"Python\s+3\.11\+\s*,\s*Xcode(?:\s+Command\s+Line\s+Tools)?",
+    re.IGNORECASE,
+)
+UNIVERSAL_MAC_SUPPORT_RE = re.compile(
+    r"\b(?:works?|runs?)\s+on\s+(?:all|every|any)\s+Mac(?:s|OS)?\b",
     re.IGNORECASE,
 )
 
@@ -114,6 +120,56 @@ def _require_all(
 ) -> None:
     for needle in needles:
         _require(text, needle, relative, errors)
+
+
+def _claim_text(text: str) -> str:
+    """Ignore line wrapping and inline emphasis when checking reader-facing facts."""
+    return " ".join(text.replace("**", "").replace("`", "").split())
+
+
+def _require_claim(
+    text: str,
+    pattern: str,
+    relative: Path,
+    errors: list[str],
+    *,
+    label: str,
+) -> None:
+    if re.search(pattern, _claim_text(text), re.IGNORECASE) is None:
+        errors.append(f"{relative.as_posix()}: missing {label}")
+
+
+def _require_release_comparison(
+    text: str, tag: str, relative: Path, errors: list[str]
+) -> None:
+    """Keep released behavior in its own table column, not just mentioned somewhere."""
+    rows = [
+        [_claim_text(cell) for cell in line.strip().strip("|").split("|")]
+        for line in text.splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if not any(
+        len(row) == 3
+        and row[1] == f"Published {tag}"
+        and row[2] == "Unreleased development branch"
+        for row in rows
+    ):
+        errors.append(f"{relative.as_posix()}: published/development version boundary missing")
+    for label, published, development in (
+        ("tool inventory", r"\b15(?:-tool| tools?)\b", r"\b9(?:-tool| Core| tools?)\b"),
+        (
+            "URL behavior",
+            r"\bEventKit\b.*\bnative URL attachment\b",
+            r"\bEventKit(?: URL)? metadata (?:only|by default)\b",
+        ),
+    ):
+        if not any(
+            len(row) == 3
+            and re.search(published, row[1], re.IGNORECASE)
+            and re.search(development, row[2], re.IGNORECASE)
+            for row in rows
+        ):
+            errors.append(f"{relative.as_posix()}: published/development {label} drift")
 
 
 def check_claims(root: Path = REPO_ROOT) -> list[str]:
@@ -169,6 +225,10 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         if BLANKET_XCODE_RE.search(texts[relative]):
             errors.append(
                 f"{relative.as_posix()}: blanket Xcode requirement hides the Core boundary"
+            )
+        if UNIVERSAL_MAC_SUPPORT_RE.search(_claim_text(texts[relative])):
+            errors.append(
+                f"{relative.as_posix()}: unsupported universal Mac compatibility claim"
             )
 
     for relative in (LAUNCH_KIT, TESTER_WORKFLOW):
@@ -234,25 +294,50 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         readme,
         (
             install_command,
-            "macOS 14 or newer",
-            "Python 3.11 or newer",
-            "Reminders permission for Core operations",
-            "Ordinary Core use does **not** require Xcode or Xcode Command Line Tools",
-            "Stable Core",
-            "Experimental Internals",
-            "compiler-free private",
-            "CLT-required private",
-            "exact immutable build/schema allowlist match",
-            "runtime_unverified",
-            "unsupported_build",
-            "/usr/bin/xcode-select -p",
-            "`PATH` clang entries",
-            "/usr/bin/clang",
-            "selected developer directory",
-            "canonical release verifier",
-            "immutable release and SLSA attestations",
+            add_command,
+            "https://www.python.org/downloads/macos/",
+            "macOS permission prompt",
+            "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md",
+            "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md",
         ),
         readme_path,
+        errors,
+    )
+    for pattern, label in (
+        (r"macOS\s+14(?:\+| or newer| and later)", "minimum macOS requirement"),
+        (
+            r"(?:plugin|runtime)\s+(?:still\s+)?(?:needs?|requires?)\s+Python\s+3\.11(?:\+| or newer| and later)",
+            "explicit Python runtime requirement",
+        ),
+        (
+            r"(?:Core|Ordinary reminder work).{0,200}?do(?:es)? not\s+(?:need|require)\s+Xcode",
+            "ordinary Core without user Xcode",
+        ),
+        (
+            rf"(?:latest|current) published release is\s+{re.escape(tag)}\b",
+            "published release identity",
+        ),
+        (r"Start a\s+new\s+(?:Codex\s+)?task", "new-task installation step"),
+    ):
+        _require_claim(readme, pattern, readme_path, errors, label=label)
+    _require_release_comparison(readme, tag, readme_path, errors)
+
+    installation = texts[INSTALLATION_GUIDE]
+    _require_release_comparison(installation, tag, INSTALLATION_GUIDE, errors)
+    _require_all(
+        installation,
+        (
+            "exact reviewed macOS version/build, Reminders version/build, and relevant schema evidence",
+            "does not bypass admission",
+            "Disabled tools are rejected unless the runtime started with `--experimental`",
+            "/bin/sh plugins/apple-reminders/scripts/launch_mcp.sh --experimental",
+            "`execution_mode=metadata_only`",
+            "`execution_mode=experimental_toolchain`",
+            "Core does not require this step",
+            "An unsupported build remains unsupported after installing a compiler",
+            "still need acceptance testing on fresh nondeveloper Macs",
+        ),
+        INSTALLATION_GUIDE,
         errors,
     )
 

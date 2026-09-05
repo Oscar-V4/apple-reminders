@@ -2,211 +2,113 @@
 
 [![CI](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Oscar-V4/apple-reminders/actions/workflows/ci.yml)
 
-Give Codex the messy input—meeting notes, screenshots, or an everyday plan—and
-get organized Apple Reminders back on your Mac.
+Ask Codex to show what is due, add reminders from your notes, and update or
+complete them in Apple Reminders on your Mac.
 
-With this plugin, Codex can extract action items and dates, create reminders in
-the right lists, brief upcoming work, and safely organize or update reminders
-with verified read-backs.
+This is an independent, open-source community plugin. It is not an Apple or
+OpenAI product or endorsed integration. Reminder operations run locally;
+selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
-The runtime has two explicit support tiers. **Stable Core** uses documented
-EventKit and remains available independently. **Experimental Internals** use
-private ReminderKit or the Reminders SQLite store and are admitted only for an
-exact reviewed macOS version/build, Reminders version/build, and command-schema
-fingerprint. Unknown builds fail before private mutation.
+## Which version am I installing?
 
-Try prompts like:
+**The latest published release is v0.5.2.** The three steps below install that
+exact release. Changes on the development branch are not included in it.
 
-- `Turn these meeting notes into one reminder per action item, preserving owners and deadlines, then add them to my Project list.`
-- `Create one reminder per screenshot in my Job Search list. Keep any dates and useful details you find.`
-- `Show me everything overdue, due today, and coming up this week.`
-- `Move the reminders for this project into my Project Archive list after showing me the plan.`
-
-These prompts use Core. Section, tag, native attachment, and exact recovery
-work is Experimental and is not an onboarding default.
-
-This repository hosts an independent, open-source community plugin for Apple
-Reminders. Its MCP server and macOS adapters run locally, while tool results
-return to Codex as described in [PRIVACY.md](PRIVACY.md). This is not an Apple
-or OpenAI product or endorsed integration.
-
-See the [workflow capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
-for supported journeys, explicit evidence boundaries, and deliberately
-withheld operations.
-
-## Requirements
-
-- macOS 14 or newer with Apple Reminders available for the current user.
-- Python 3.11 or newer.
-- Reminders permission for Core operations.
-
-Ordinary Core use does **not** require Xcode or Xcode Command Line Tools. The
-plugin includes a universal EventKit helper that is Developer ID signed,
-notarized by Apple, and stapled for offline Gatekeeper verification. Tag
-assignments and native URL attachment operations also avoid runtime
-compilation, but remain version-sensitive guarded private-store paths. Section
-creation or moves, image-attachment changes, and exact Recently Deleted
-inspection or recovery compile three private Objective-C helpers locally and
-therefore require Xcode Command Line Tools.
-
-| Runtime boundary | Included paths | Command Line Tools |
+| Behavior | Published v0.5.2 | Unreleased development branch |
 |---|---|---|
-| **Stable Core** | Core reads and changes through the bundled signed EventKit helper | Not required; Core never invokes `clang`. |
-| **Experimental, compiler-free private** | Tag mutation, URL-only attachment mutation, and read-only native section, tag, or attachment inspection | Not required; these paths never invoke `clang`. |
-| **Experimental, CLT-required private** | Section mutation, image-attachment mutation, and exact Recently Deleted inspection or recovery | Required by the requested operation; compiler diagnosis is separately opt-in. |
+| Tools available at startup | 15 tools, including experimental tools | 9 Core and diagnostic tools by default |
+| Advanced native and recovery tools | Listed, but individual capabilities can be blocked | 6 additional tools require explicit `--experimental` startup |
+| A reminder's URL field | Combines EventKit storage with native URL attachment work; it can partly succeed | Default stores EventKit URL metadata only; a visible URL card is not promised |
 
-Command Line Tools are only a dependency for helper-backed paths; their
-presence, a successful compile, or a selector check is never compatibility
-evidence. Experimental work also needs an exact immutable build/schema
-allowlist match. Missing build metadata reports `runtime_unverified`; a new or
-unlisted build reports `unsupported_build`. Neither condition disables Core.
+Experimental capabilities still require a supported macOS/Reminders build and
+successful verification. Enabling them does not remove those requirements.
+For the design and remaining work, see [Product direction](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/product-direction.md).
 
-End users do not need an Apple Developer Program membership. Maintainers use it
-only to sign and notarize the bundled Core release helper.
+## Get started in three steps
 
-For Python, Finder-launched Codex checks `PATH` plus standard Homebrew and
-python.org locations. Availability is capability-specific, so Core remains
-usable when an advanced Native or Recovery capability is unavailable.
+You need a Mac running **macOS 14 or newer**, Apple Reminders, and Codex.
+Ordinary reminder work uses a bundled, signed and notarized helper. You do not
+need Xcode, Command Line Tools, or an Apple Developer membership for that work.
 
-## 60-second setup check
+### 1. Install Python once
 
-Before the first install, confirm Python:
+The plugin still needs **Python 3.11 or newer**. Download a macOS installer from
+[python.org](https://www.python.org/downloads/macos/), open it, and follow its
+installation steps. Then fully quit and reopen Codex.
 
-```bash
-python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
-```
+If you already have a supported Python installation, keep it. A self-contained
+plugin that needs no separate Python installation is planned, not released.
 
-If you plan to create or move sections, change image attachments, or inspect or
-recover one exact Recently Deleted item, also run `/usr/bin/xcode-select -p`.
-If that command fails, run `xcode-select --install`, finish installation, and
-restart Codex. Runtime admission ignores `PATH` clang entries and the
-`/usr/bin/clang` installer shim; it accepts only an executable at a fixed path
-under the selected developer directory. Core and compiler-free private paths do not invoke `clang`. These include tag assignments, native URL attachment
-operations, and read-only section or attachment inspection.
+### 2. Install the pinned plugin release
 
-This check confirms only that a compiler is installed. It does not enable an
-unallowlisted build or prove a private mutation safe.
-
-## Quick Start
-
-Install the pinned 0.5.2 repo-marketplace release:
+Ask Codex to run these commands, or run them in a terminal where the `codex`
+command is available:
 
 ```bash
 codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.5.2
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
-Start a new Codex task so that it loads the installed skills and tools, then try:
+Already installed an older version? Follow [Upgrade](#upgrade) below.
+
+### 3. Start a new Codex task and ask naturally
+
+Start a **new task** so Codex loads the installed plugin, then try:
 
 ```text
-Show me everything overdue, due today, and coming up this week.
-Add "Submit expense report" to my Work list for Friday at 3 PM.
+Show my overdue reminders and everything due today.
 ```
 
-Starting with 0.5.0, Core uses the stable signed helper above instead of a
-locally compiled ad-hoc helper. macOS may ask for Reminders access again after
-this upgrade because the helper's code-signing identity changed.
+When Codex requests Reminders access, allow it in the macOS permission prompt.
+You can then ask:
 
-Before installing a future release, use the repository's
-[canonical release verifier](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md).
-It downloads the published ZIP and checksum again and verifies immutable
-release and SLSA attestations, exact tag ancestry, deterministic rebuilds, the
-source audit, and signed-helper manifest provenance without reading Reminders.
+```text
+Add "Submit expense report" to my Work list for Friday at 3 PM.
+Mark the expense report reminder as complete.
+```
 
-## First permission
+Codex will resolve the exact list and reminder before making changes. No
+separate diagnostic command is needed for normal first use.
 
-When requested, run `request_reminders_access` and answer the macOS prompt.
-The tool can report its request but cannot observe the prompt itself; denial
-does not trigger an automatic prompt loop. Normal first use needs no Doctor.
-If access was already denied or later revoked, running the access tool again
-does not show the first-time prompt again. Re-enable Reminders access for the
-signed helper in **System Settings → Privacy & Security**, then retry one
-bounded Core read. Do not reset TCC. A signed-helper identity change can make
-macOS ask again after an update; the plugin reports the authorization state but
-still cannot claim that it observed the prompt.
+## Everyday use
 
-## Public Interface
+- “Turn these meeting notes into reminders in my Project list.”
+- “Show what is due this week.”
+- “Move the reminders for this project into my Project Archive list.”
 
-The plugin exposes one static 15-tool Interface. It is intentionally
-smaller than the internal development surface:
+For **v0.5.2**, ask to put links in the reminder's **notes** when you want the
+ordinary EventKit path. Its separate URL field also attempts experimental native
+attachment work. Sections, native tags, image attachments, and Recently Deleted
+recovery have additional limits; see [Advanced setup and troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md).
 
-| Module | Public tools |
+After a change, Codex checks the saved result. If it reports partial success or
+pending verification, ask it to check that reminder before retrying. A verified
+local change does not prove it has appeared on every device yet.
+
+## Permissions and troubleshooting
+
+If access was denied or later revoked, open **System Settings → Privacy &
+Security → Reminders**, re-enable access for the plugin's signed helper, and
+retry your request. Repeated requests do not reopen the first permission prompt.
+An upgrade from the old, locally built helper can require permission again.
+
+| What you see | What to do |
 |---|---|
-| Core | `request_reminders_access`, `list_reminder_lists`, `fetch_reminders`, `read_reminder`, `create_reminder`, `change_reminder`, `delete_reminder`, `ensure_reminder_list` |
-| Experimental Native Extension | `inspect_reminder_native`, `create_reminder_section`, `organize_reminder`, `change_reminder_attachment` |
-| Experimental Recovery | `inspect_recently_deleted`, `recover_deleted_reminder` |
-| Diagnostics | `diagnose_reminders` |
+| Python is missing or too old | Install Python 3.11+ from python.org, then fully reopen Codex. |
+| A developer-tools installer appears | Cancel it for ordinary use; install Python as in step 1. The development branch fixes the launcher probe that can cause this. |
+| The plugin is missing after installation or upgrade | Start a new Codex task. |
+| An advanced feature is unsupported | Continue with ordinary reminders; see the advanced guide for that feature's limits. |
+| A change is unconfirmed | Ask Codex to read the exact reminder before trying the change again. |
 
-Core reads and non-URL writes remain usable if every Experimental capability is
-missing. URL writes are hybrid EventKit plus private native attachment work and
-may report partial success; use a note link for a Core-only alternative. See the
-[capability matrix](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md)
-for exact evidence and intentionally withheld operations.
-
-## References and mutation results
-
-`read_reminder` returns one short-lived `rev1` Reference; a change consumes it,
-and stale reuse requires a fresh exact read. Receipts distinguish `unchanged`,
-`verified`, `committed_verification_pending`, `partial_success`,
-`failed_no_mutation`, and `failed_manual_repair_required`. Pending, partial, or
-manual-repair results must not be retried blindly. `verified` covers only the
-named read-back evidence, not convergence to every device or shared-list member.
-
-## Architecture and trust boundary
-
-Skills grant no macOS permission. The local MCP validates inputs and Receipts;
-Core launches only the reviewed helper bundled in the installed plugin and does
-not download or automatically compile a fallback. A missing or invalid bundle
-fails before mutation. Version-sensitive private paths first pass the exact
-build/schema admission gate and remain behind exact read-back gates. Only
-section writes, image-attachment changes, and exact Recently Deleted inspection
-or recovery retain a separate local-build dependency. There is no automatic
-SQLite, AppleScript, UI-automation, or helper fallback.
-
-## Diagnosis and troubleshooting
-
-Use `diagnose_reminders` only after a relevant failure. Its bounded default is
-content-free and can target the affected capability. The default
-`execution_mode=metadata_only` does not run `xcode-select` or `clang`. Only an
-explicit `execution_mode=experimental_toolchain` request for an Experimental
-Native Extension or Recovery failure may run the private-helper
-toolchain gate. That gate checks `xcode-select -p` first, never runs
-`xcode-select --install`, and does not invoke the `/usr/bin/clang` shim when no
-active developer directory is selected.
-
-Common cases:
-
-- **Unsupported Python:** install Python 3.11+ via Homebrew or python.org, then
-  restart Codex.
-- **Permission not determined:** run the explicit `request_reminders_access`
-  step once, review the macOS prompt, then retry the original operation once.
-- **Permission denied or revoked:** do not loop the access request. Re-enable
-  the signed helper under **System Settings → Privacy & Security**, then retry
-  one bounded Core read. Do not reset TCC.
-- **Reference stale or consumed:** call `read_reminder` again and retry with the
-  new Reference. Do not replay the old token.
-- **Verification pending:** read the exact reminder before deciding whether to
-  retry. Blind retry can duplicate a change whose first result was unknown.
-- **Bundled Core helper unavailable:** reinstall the same reviewed release tag,
-  then run targeted diagnosis if the failure persists. Core does not silently
-  compile or download a replacement.
-- **Section/image/Recovery helper build failure:** Core remains independently
-  usable. Run metadata-only targeted diagnosis first. Run Experimental
-  toolchain diagnosis only if you want to test that CLT-required capability;
-  if it reports no active developer directory, you may then choose to run
-  `xcode-select --install`, finish installation, and restart Codex. A compiler
-  does not override `runtime_unverified` or `unsupported_build`.
-- **Experimental build blocked:** keep using Core or choose the documented
-  substitute in the capability matrix. Do not retry, bypass the gate, or treat
-  a static schema/compiler check as approval.
-- **Plugin changes are not visible:** start a new Codex task after install,
-  upgrade, removal, or re-addition so tool discovery is refreshed.
+For other failures, ask Codex to diagnose the specific problem. See
+[Support](SUPPORT.md) before opening an issue; omit real reminder contents,
+screenshots, databases, and private logs.
 
 ## Upgrade
 
-The Quick Start pins one release tag. Refreshing that marketplace keeps the
-configured tag; it does not select a newer release. To move to another release,
-replace `vX.Y.Z` below with the exact tag you reviewed:
+Installation is pinned to a release. Refreshing the marketplace keeps that tag.
+Read [CHANGELOG.md](CHANGELOG.md), then replace `vX.Y.Z` with the exact published
+release you want:
 
 ```bash
 codex plugin remove apple-reminders@oscar-v4-reminders
@@ -215,62 +117,24 @@ codex plugin marketplace add Oscar-V4/apple-reminders --ref vX.Y.Z
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
-This changes only the Codex plugin installation; it does not delete Apple
-Reminders data. Start a new Codex task after upgrading. Read
-[CHANGELOG.md](CHANGELOG.md) before crossing a minor or major version.
+Start a new Codex task afterward. These commands change the plugin installation;
+they do not delete Apple Reminders data. Maintainers and advanced users can use
+the [release verifier](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md) to inspect a published artifact's provenance.
 
 ## Uninstall
 
-The CLI has no separate disable command. Removing the plugin never deletes
-Reminders data; add it again later to re-enable it:
-
 ```bash
 codex plugin remove apple-reminders@oscar-v4-reminders
-# Later:
-codex plugin add apple-reminders@oscar-v4-reminders
+codex plugin marketplace remove oscar-v4-reminders
 ```
 
-Start a new Codex task after either command. Removal does not delete reminders
-or automatically erase plugin-created local support data.
-For a full uninstall, also run
-`codex plugin marketplace remove oscar-v4-reminders`. Review
-[PRIVACY.md](PRIVACY.md) before separately deleting local support data.
+Start a new Codex task. Removal leaves your reminders intact and does not erase
+local support data or revoke macOS permissions. See [Privacy: user control](PRIVACY.md#user-control)
+and the [full removal guide](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md#full-removal) for those optional steps.
 
-## Internals and contribution
+## More information
 
-The closed contract is `plugins/apple-reminders/schemas/mcp-tools.json`.
-See the [architecture guide](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/architecture.md),
-the [Experimental threat model](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/experimental-internals-threat-model.md),
-the [runtime-gate decision](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/decisions/0020-fail-closed-experimental-runtime-gate.md),
-and [contribution checks](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
-
-## Local files and privacy
-
-Internal or development operations can create support data under:
-
-- `~/Library/Application Support/apple-reminders-codex/`
-- `~/Library/Caches/apple-reminders-codex/`
-
-These folders may contain sensitive identifiers, operation records, helpers,
-or legacy cache/backup artifacts. The 0.5 runtime does not create metadata
-caches or backup archives; Recently Deleted recovery is exact and user-directed.
-See [PRIVACY.md](PRIVACY.md#user-control) before inspecting or removing them.
-
-To remove local support data safely, first remove or stop the plugin, start a
-new Codex task, and confirm that no Reminders operation is running. In Finder,
-use **Go → Go to Folder…** for each exact path, then move only its
-`apple-reminders-codex` folder to Trash—never a parent directory. This clears
-local support data but does not undo Reminders or iCloud changes.
-For a full uninstall, also revoke Reminders access in **System Settings →
-Privacy & Security**, and separately inspect any custom external legacy backup
-directory that you explicitly configured. The 0.5 runtime does not use macOS
-Automation or Apple Events.
-
-## License and contributions
-
-See [LICENSE](LICENSE), [PRIVACY.md](PRIVACY.md), [TERMS.md](TERMS.md),
-[SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and the
-[contribution guide](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md).
-Never include real reminder data,
-screenshots, databases, archives, backups, journals, or caches in issues,
-fixtures, commits, or release artifacts.
+- [Installation and advanced troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md)
+- [Supported workflows](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md) and [architecture](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/architecture.md)
+- [Product direction](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/product-direction.md) and [contribution guide](https://github.com/Oscar-V4/apple-reminders/blob/main/CONTRIBUTING.md)
+- [Privacy](PRIVACY.md), [Terms](TERMS.md), [Security](SECURITY.md), [Support](SUPPORT.md), and [License](LICENSE)

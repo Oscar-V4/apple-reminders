@@ -115,6 +115,7 @@ def run_server(
     adapter_path: Path | None = None,
     eventkit_bridge_path: Path | None = None,
     doctor_path: Path | None = None,
+    enable_experimental: bool = False,
 ) -> list[dict[str, Any]]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -128,7 +129,7 @@ def run_server(
         if path is not None:
             env[TEST_BACKEND_ENVIRONMENTS[name]] = str(path)
     completed = subprocess.run(
-        [sys.executable, str(SERVER_HARNESS)],
+        [sys.executable, str(SERVER_HARNESS), *(["--experimental"] if enable_experimental else [])],
         cwd=PLUGIN_ROOT,
         env=env,
         input="".join(json.dumps(message) + "\n" for message in messages),
@@ -962,8 +963,9 @@ class McpProtocolTests(unittest.TestCase):
         self.dispatch = self.server._LocalToolDispatch(
             self.server.DEFAULT_BACKEND_PATHS,
             facade_overrides=overrides,
+            enable_experimental=True,
         )
-        options: dict[str, Any] = {"dispatch": self.dispatch}
+        options: dict[str, Any] = {"dispatch": self.dispatch, "enable_experimental": True}
         if clock is not None:
             options["clock"] = clock
         if max_calls_per_minute is not None:
@@ -988,7 +990,7 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(initialized["serverInfo"]["name"], "apple-reminders-local")
         self.assertEqual(
             {tool["name"] for tool in responses[1]["result"]["tools"]},
-            PUBLIC_TOOLS,
+            CORE_TOOLS | DIAGNOSTIC_TOOLS,
         )
         self.assertTrue(
             all(
@@ -1779,6 +1781,7 @@ class McpProtocolTests(unittest.TestCase):
                     },
                 ],
                 doctor_path=doctor,
+                enable_experimental=True,
             )
             doctor_argv = json.loads(
                 doctor.with_suffix(".argv").read_text(encoding="utf-8")

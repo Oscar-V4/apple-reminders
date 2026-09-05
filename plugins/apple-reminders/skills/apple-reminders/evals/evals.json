@@ -5,11 +5,11 @@
   },
   {
     "prompt": "스크린샷 파일을 '취업캠프 준비' 미리알림에 첨부하고 아이폰에서 보일 수 있는지 확인해줘.",
-    "expected_behavior": "Resolves the exact reminder and source image, obtains a fresh opaque reference, inspects attachments, uses change_reminder_attachment with attach_image and an idempotency key, and reports mobile evidence without claiming iPhone confirmation."
+    "expected_behavior": "If Experimental tools are absent, explains the limit and offers an appropriate Core or manual Reminders action without enabling them. Only in an explicitly enabled Experimental session: Resolves the exact reminder and source image, obtains a fresh opaque reference, inspects attachments, uses change_reminder_attachment with attach_image and an idempotency key, and reports mobile evidence without claiming iPhone confirmation."
   },
   {
     "prompt": "'생각 주머니' 목록에서 실행 가능한 항목만 이번 주 섹션으로 옮겨줘.",
-    "expected_behavior": "Inspects the exact list and section structure, identifies the qualifying set, obtains a fresh opaque reference for each target, uses organize_reminder move_to_section, and avoids broad moves unless standing delegation or approval covers them."
+    "expected_behavior": "If Experimental tools are absent, explains the limit and offers an appropriate Core or manual Reminders action without enabling them. Only in an explicitly enabled Experimental session: Inspects the exact list and section structure, identifies the qualifying set, obtains a fresh opaque reference for each target, uses organize_reminder move_to_section, and avoids broad moves unless standing delegation or approval covers them."
   },
   {
     "prompt": "'치과 예약' 미리알림 지워줘.",
@@ -17,11 +17,11 @@
   },
   {
     "prompt": "화면 위 4개를 지웠다가 복구하고 사진을 하나의 미리알림에 모아줘.",
-    "expected_behavior": "Treats top four as literal current UI identity, maps every observed row to one exact ID, and stops rather than substituting API order unless the user explicitly approves that reinterpretation. It confirms that one Reminder with separate copied images is intended, completes and verifies every copy before any separately authorized deletion, and if sources are already deleted follows snapshot-bound discovery plus fresh del1 recovery one item at a time."
+    "expected_behavior": "If Experimental tools are absent, explains the limit and offers an appropriate Core or manual Reminders action without enabling them. Only in an explicitly enabled Experimental session: Treats top four as literal current UI identity, maps every observed row to one exact ID, and stops rather than substituting API order unless the user explicitly approves that reinterpretation. It confirms that one Reminder with separate copied images is intended, completes and verifies every copy before any separately authorized deletion, and if sources are already deleted follows snapshot-bound discovery plus fresh del1 recovery one item at a time."
   },
   {
     "prompt": "최근 삭제된 '치과 예약'을 쇼핑 목록으로 복구해줘.",
-    "expected_behavior": "Uses snapshot-bound paged Recently Deleted discovery, restarts after pagination_snapshot_stale, disambiguates exact IDs, inspects the exact deleted item immediately before recovery, matches its account_id to the destination list source.id as the same-account check, passes a fresh opaque del1 and idempotency key to recover_deleted_reminder, and reports the local macOS/private-framework and 30-day retention boundary."
+    "expected_behavior": "If Experimental tools are absent, explains the limit and offers an appropriate Core or manual Reminders action without enabling them. Only in an explicitly enabled Experimental session: Uses snapshot-bound paged Recently Deleted discovery, restarts after pagination_snapshot_stale, disambiguates exact IDs, inspects the exact deleted item immediately before recovery, matches its account_id to the destination list source.id as the same-account check, passes a fresh opaque del1 and idempotency key to recover_deleted_reminder, and reports the local macOS/private-framework and 30-day retention boundary."
   },
   {
     "prompt": "지난주 완료한 일 브리핑을 우선순위까지 사람이 읽기 쉽게 보여줘.",

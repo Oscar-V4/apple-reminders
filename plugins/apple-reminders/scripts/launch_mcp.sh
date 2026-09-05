@@ -9,7 +9,32 @@ set -u
 script_directory=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && pwd)
 plugin_root=$(/usr/bin/dirname "$script_directory")
 server_path="$plugin_root/mcp/server.py"
-fallback_python=
+
+# /usr/bin/python3 belongs to Apple's developer tools. Merely probing it can
+# open the Command Line Tools installer on a Mac that has no toolchain. Resolve
+# symlinks before checking, so PATH aliases cannot accidentally invoke it.
+is_non_system_python() {
+  python_path=$1
+  python_links=0
+  while :
+  do
+    python_directory=$(CDPATH= cd -P "$(/usr/bin/dirname "$python_path")" 2>/dev/null && pwd) || return 1
+    python_path="$python_directory/${python_path##*/}"
+    [ -L "$python_path" ] || break
+    python_links=$((python_links + 1))
+    [ "$python_links" -le 32 ] || return 1
+    python_target=$(/usr/bin/readlink "$python_path") || return 1
+    case "$python_target" in
+      /*) python_path=$python_target ;;
+      *) python_path="$python_directory/$python_target" ;;
+    esac
+  done
+  case "$python_path" in
+    "/usr/bin/python3"|"/bin/python3") return 1 ;;
+  esac
+  # Also recognize hard links to the system shim without executing it.
+  [ ! "$python_path" -ef "/usr/bin/python3" ]
+}
 
 is_supported_python() {
   [ -n "$1" ] && [ -x "$1" ] &&
@@ -33,25 +58,18 @@ do
   [ -n "$directory" ] || directory=.
   candidate="$directory/python3"
   [ -x "$candidate" ] || continue
-  [ -n "$fallback_python" ] || fallback_python=$candidate
+  is_non_system_python "$candidate" || continue
   if is_supported_python "$candidate"; then
     PYTHONDONTWRITEBYTECODE=1
     export PYTHONDONTWRITEBYTECODE
-    exec "$candidate" "$server_path"
+    exec "$candidate" "$server_path" "$@"
   fi
 done
 set +f
 IFS=$original_ifs
 
-# Preserve the server's structured unsupported-runtime response when an older
-# Python is the only interpreter visible.
-if [ -n "$fallback_python" ]; then
-  PYTHONDONTWRITEBYTECODE=1
-  export PYTHONDONTWRITEBYTECODE
-  exec "$fallback_python" "$server_path"
-fi
-
 printf '%s\n' \
-  'Apple Reminders requires Python 3.11 or newer. Install Python, restart Codex, and retry.' \
+  'Apple Reminders requires Python 3.11 or newer.' \
+  'Install the macOS installer from https://www.python.org/downloads/macos/, restart Codex, and retry. Xcode is not required.' \
   >&2
 exit 78
