@@ -940,13 +940,6 @@ class DurableEnsureListTests(unittest.TestCase):
                     status=status,
                     operation_id="00000000-0000-4000-8000-000000000001",
                 )
-                if status == "unchanged":
-                    receipt["warnings"] = [
-                        {
-                            "code": "duplicate_list_name_in_source",
-                            "message": "untrusted native wording",
-                        }
-                    ]
                 bridge_call = mock.Mock(return_value=transport(receipt))
                 support = Path(temp_dir) / "support"
                 arguments = {
@@ -973,19 +966,97 @@ class DurableEnsureListTests(unittest.TestCase):
                     )
                 if status == "unchanged":
                     self.assertEqual(replay["before"]["title"], "Work")
-                    self.assertEqual(
-                        replay["warnings"],
-                        [
-                            {
-                                "code": "duplicate_list_name_in_source",
-                                "message": (
-                                    "More than one reminder list in this source has the exact "
-                                    "name; the first stable identifier was returned."
-                                ),
-                            }
-                        ],
-                    )
                 self.assertEqual(bridge_call.call_count, 1)
+
+    def test_duplicate_exact_list_names_reject_first_call_and_durable_replay(self) -> None:
+        receipt = ensure_list_receipt(
+            list_id="ARBITRARY-FIRST-LIST",
+            source_id="SOURCE-1",
+            name="동일한 목록 🧪",
+            status="unchanged",
+            operation_id="00000000-0000-4000-8000-000000000001",
+        )
+        receipt["warnings"] = [
+            {
+                "code": "duplicate_list_name_in_source",
+                "message": "More than one list matched; the first identifier was returned.",
+            }
+        ]
+        bridge_call = mock.Mock(return_value=transport(receipt))
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "동일한 목록 🧪",
+            "idempotency_key": "ensure:duplicate:current",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            first, first_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+            replay, replay_state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+
+        self.assertEqual(bridge_call.call_count, 1)
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(first["operation_id"], replay["operation_id"])
+        self.assertEqual(first["idempotency_key_hash"], replay["idempotency_key_hash"])
+        for result, state in ((first, first_state), (replay, replay_state)):
+            self.assertEqual(result["status"], "failed_no_mutation")
+            self.assertEqual(state, "not_mutated")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "ambiguous_scope")
+            self.assertEqual(
+                result["error"]["reason_code"], "duplicate_list_name_in_source"
+            )
+            self.assertEqual(result["target"], {"source_id": "SOURCE-1", "list_id": None})
+            self.assertIsNone(result["before"])
+            self.assertIsNone(result["after"])
+            self.assertNotIn("ARBITRARY-FIRST-LIST", repr(result))
+            self.assertEqual(result["next_action"]["tool"], "list_reminder_lists")
+            self.assertFalse(result["next_action"]["retry_original_once"])
+            validate_public_result("ensure_reminder_list", result, state)
+
+    def test_legacy_duplicate_list_success_receipt_is_rejected_after_upgrade(self) -> None:
+        receipt = ensure_list_receipt(
+            list_id="LEGACY-ARBITRARY-LIST",
+            source_id="SOURCE-1",
+            name="Work",
+            status="unchanged",
+            operation_id="00000000-0000-4000-8000-000000000001",
+        )
+        receipt["warnings"] = [
+            {"code": "duplicate_list_name_in_source", "message": "legacy warning"}
+        ]
+        bridge_call = mock.Mock(return_value=transport(receipt))
+        arguments = {
+            "source_id": "SOURCE-1",
+            "name": "Work",
+            "idempotency_key": "ensure:duplicate:legacy",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "support"
+            backend = make_backend(
+                bridge_call=bridge_call,
+                idempotency_call=bound_idempotency(support),
+            )
+            old_reply = backend.invoke("ensure_reminder_list", arguments, mutation=True)
+            self.assertEqual(old_reply.payload["status"], "unchanged")
+            self.assertEqual(old_reply.payload["after"]["id"], "LEGACY-ARBITRARY-LIST")
+
+            result, state = self.facade(bridge_call, support).call_with_state(
+                "ensure_reminder_list", arguments
+            )
+
+        self.assertEqual(bridge_call.call_count, 1)
+        self.assertTrue(result["replayed"])
+        self.assertEqual(result["status"], "failed_no_mutation")
+        self.assertEqual(result["error"]["code"], "ambiguous_scope")
+        self.assertNotIn("LEGACY-ARBITRARY-LIST", repr(result))
+        validate_public_result("ensure_reminder_list", result, state)
 
     def test_fresh_bridge_cannot_spoof_replayed_provenance(self) -> None:
         receipt = ensure_list_receipt(

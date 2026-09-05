@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "plugin_ref": "v0.6.0",
+  "plugin_ref": "v0.6.1",
   "codex_version": "0.1.0",
   "hardware": "apple_silicon",
   "macos_version": "14.7",

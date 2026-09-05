@@ -478,6 +478,32 @@
                   "time_zone"
                 ],
                 "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "timed"
+                  },
+                  "floating": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "local_date_time": {
+                    "type": "string",
+                    "minLength": 19,
+                    "maxLength": 19,
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$",
+                    "description": "Local calendar time as YYYY-MM-DDTHH:MM:SS, without an offset or fractional seconds."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "floating",
+                  "local_date_time"
+                ],
+                "additionalProperties": false,
+                "description": "Explicit local wall-clock due time with no persisted time zone or fixed UTC instant."
               }
             ]
           },
@@ -761,7 +787,7 @@
     {
       "name": "change_reminder",
       "title": "Change reminder",
-      "description": "Change public Reminder fields, completion, or list membership through one closed action and a fresh opaque Reference. Omitted fields stay unchanged. By default URL updates public EventKit metadata only; existing native attachments are preserved.",
+      "description": "Change public Reminder fields, completion, or list membership through one closed action and a fresh opaque Reference. Omitted fields stay unchanged. Completing an incomplete recurring Reminder is rejected before mutation; complete the intended occurrence once in the Reminders app. By default URL updates public EventKit metadata only; existing native attachments are preserved.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -880,6 +906,32 @@
                   "time_zone"
                 ],
                 "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "timed"
+                  },
+                  "floating": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "local_date_time": {
+                    "type": "string",
+                    "minLength": 19,
+                    "maxLength": 19,
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$",
+                    "description": "Local calendar time as YYYY-MM-DDTHH:MM:SS, without an offset or fractional seconds."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "floating",
+                  "local_date_time"
+                ],
+                "additionalProperties": false,
+                "description": "Explicit local wall-clock due time with no persisted time zone or fixed UTC instant."
               }
             ]
           },

@@ -499,6 +499,49 @@ static NSDateComponents *ComponentsFromDueJSON(NSDictionary *due) {
         return components;
     }
     if ([kind isEqualToString:@"timed"]) {
+        if (due[@"floating"] != nil || due[@"local_date_time"] != nil) {
+            NSSet *allowed = [NSSet setWithArray:@[ @"kind", @"floating", @"local_date_time" ]];
+            for (NSString *key in due) {
+                if (![allowed containsObject:key]) {
+                    RaiseRequest(@"invalid_floating_due",
+                                 @"Floating due values cannot include a time zone, offset timestamp, or other fields",
+                                 @"invalid_request", @{});
+                }
+            }
+            id floating = due[@"floating"];
+            if (![floating isKindOfClass:[NSNumber class]] ||
+                CFGetTypeID((__bridge CFTypeRef)floating) != CFBooleanGetTypeID() ||
+                ![floating boolValue]) {
+                RaiseRequest(@"invalid_floating_due", @"floating must be true", @"invalid_request", @{});
+            }
+            NSString *local = RequiredString(due, @"local_date_time");
+            NSRegularExpression *expression = [NSRegularExpression
+                regularExpressionWithPattern:@"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+                                      options:0 error:nil];
+            NSTextCheckingResult *match = [expression firstMatchInString:local options:0
+                                                                  range:NSMakeRange(0, local.length)];
+            if (match == nil || !NSEqualRanges(match.range, NSMakeRange(0, local.length))) {
+                RaiseRequest(@"invalid_local_date_time",
+                             @"local_date_time must use YYYY-MM-DDTHH:MM:SS without a time zone or UTC offset",
+                             @"invalid_request", @{});
+            }
+            // UTC is only a calendar validation aid here, never a stored zone.
+            NSDate *date = ParseISODate([local stringByAppendingString:@"Z"]);
+            NSString *canonical = date == nil ? nil : ISODateString(date);
+            if (canonical.length < 19 || ![[canonical substringToIndex:19] isEqual:local]) {
+                RaiseRequest(@"invalid_local_date_time", @"local_date_time is not a valid calendar time",
+                             @"invalid_request", @{});
+            }
+            NSCalendar *validationCalendar = [[NSCalendar alloc]
+                initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+            validationCalendar.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+            NSCalendarUnit units = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+                                   NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond;
+            NSDateComponents *components = [validationCalendar components:units fromDate:date];
+            components.calendar = calendar;
+            components.timeZone = nil;
+            return components;
+        }
         NSString *dateString = RequiredString(due, @"date_time");
         NSString *zoneName = RequiredString(due, @"time_zone");
         NSDate *date = ParseISODate(dateString);
@@ -1188,6 +1231,48 @@ static BOOL ProjectionMatches(NSDictionary *requested, NSDictionary *actual) {
     return YES;
 }
 
+static BOOL MutationProjectionMatches(NSDictionary *before,
+                                      NSDictionary *requested,
+                                      NSDictionary *actual) {
+    if (ProjectionMatches(requested, actual)) {
+        return YES;
+    }
+    // The native Reminders store can materialize an absent start on the
+    // first due date: floating midnight for all-day, or the exact canonical
+    // zoned date/time for zoned timed due. Never replace an existing start or
+    // excuse time-zone loss. Other stores may retain null, and every other
+    // stable user field still must match.
+    id due = requested[@"due"];
+    if (before[@"due"] != [NSNull null] ||
+        before[@"start"] != [NSNull null] ||
+        requested[@"start"] != [NSNull null] ||
+        ![due isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    NSDictionary *derivedStart = nil;
+    if ([due[@"kind"] isEqual:@"all_day"] &&
+        [due[@"date"] isKindOfClass:[NSString class]]) {
+        derivedStart = @{
+            @"kind" : @"timed",
+            @"date_time" : [NSNull null],
+            @"local_date_time" : [due[@"date"] stringByAppendingString:@"T00:00:00"],
+            @"time_zone" : [NSNull null],
+            @"floating" : @YES,
+        };
+    } else if ([due[@"kind"] isEqual:@"timed"] &&
+               [(NSDictionary *)due count] == 3 &&
+               [due[@"date_time"] isKindOfClass:[NSString class]] &&
+               [due[@"time_zone"] isKindOfClass:[NSString class]]) {
+        derivedStart = due;
+    }
+    if (![actual[@"start"] isEqual:derivedStart]) {
+        return NO;
+    }
+    NSMutableDictionary *normalized = [actual mutableCopy];
+    normalized[@"start"] = [NSNull null];
+    return ProjectionMatches(requested, normalized);
+}
+
 static BOOL RequestedFieldsAlreadyMatch(NSDictionary *requested, NSDictionary *actual) {
     for (NSString *key in requested) {
         id expected = requested[key] ?: (id)[NSNull null];
@@ -1559,7 +1644,8 @@ static NSDictionary *SaveAndVerify(EKEventStore *store,
             ? (EKReminder *)item
             : nil;
         NSDictionary *actual = readBack == nil ? @{} : ReminderJSON(readBack);
-        BOOL matched = readBack != nil && ProjectionMatches(expectedProjection, actual);
+        BOOL matched = readBack != nil &&
+            MutationProjectionMatches(before, expectedProjection, actual);
         NSDictionary *verification = @{
             @"state" : matched ? @"read_back" : @"pending",
             @"read_back" : @(readBack != nil),

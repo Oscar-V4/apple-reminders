@@ -1,14 +1,14 @@
-# Apple Reminders 0.6.0 public beta launch kit
+# Apple Reminders 0.6.1 public beta launch kit
 
-This is the maintained launch packet for the `v0.6.0` release candidate. This
+This is the maintained launch packet for the `v0.6.1` release candidate. This
 documentation change does not create a tag or GitHub Release, change repository settings, record a demo, or post to a
 social channel. Candidate commands and announcement copy become usable only
 after every publication gate below passes for the exact tag.
 
 ## Candidate source of truth
 
-- Version: the plugin manifest declares `0.6.0`; publication requires a matching
-  signed EventKit helper and the intended immutable ref `v0.6.0`.
+- Version: the plugin manifest declares `0.6.1`; publication requires a matching
+  signed EventKit helper and the intended immutable ref `v0.6.1`.
 - Distribution: independent, open-source community plugin from this GitHub
   repo marketplace.
 - Stable Core: documented EventKit operations targeting macOS 14+, with a
@@ -64,14 +64,14 @@ evidence, not proof of sync to every device or shared-list participant.
 The command that will install the candidate pins one exact ref:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
 Do not distribute these commands as a working release until all of the
 following are true:
 
-1. `v0.6.0` resolves to the intended merge commit and the manifest, changelog,
+1. `v0.6.1` resolves to the intended merge commit and the manifest, changelog,
    signed-helper manifest, ZIP name, and checksum inventory agree.
 2. The tag workflow emits one two-subject SLSA statement for the deterministic
    ZIP and `SHA256SUMS`, verifies it before the only contents-write step, and
@@ -79,7 +79,7 @@ following are true:
 3. From an exact clean tag checkout, the canonical verifier succeeds:
 
    ```bash
-   python3 scripts/verify_release_assets.py v0.6.0
+   python3 scripts/verify_release_assets.py v0.6.1
    ```
 
    It must re-download both assets, verify the immutable release and SLSA
@@ -178,7 +178,7 @@ preview setting was changed; that separate manual action remains in issue #29.
 
 Use only after the publication gate passes.
 
-> Apple Reminders for Codex `v0.6.0` 공개 베타를 배포했습니다. 독립
+> Apple Reminders for Codex `v0.6.1` 공개 베타를 배포했습니다. 독립
 > 오픈소스 커뮤니티 프로젝트입니다.
 >
 > macOS 14 이상을 대상으로 하며 Python 실행환경을 함께 제공합니다.
@@ -189,14 +189,14 @@ Use only after the publication gate passes.
 >
 > 플러그인 소유 원격 백엔드는 없지만 tool results return to Codex라는
 > 경계가 있습니다. 개인정보 안내:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/PRIVACY.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.1/PRIVACY.md
 >
 > 설치:
-> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0`
+> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1`
 > `codex plugin add apple-reminders@oscar-v4-reminders`
 >
 > 릴리스 검증 방법:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/docs/release-verification.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.1/docs/release-verification.md
 > synthetic data만 사용하는 외부 테스트:
 > https://github.com/Oscar-V4/apple-reminders/issues/30
 >
@@ -206,7 +206,7 @@ Use only after the publication gate passes.
 
 Use only after the publication gate passes.
 
-> Apple Reminders for Codex `v0.6.0` is available as a public beta from an
+> Apple Reminders for Codex `v0.6.1` is available as a public beta from an
 > independent, open-source community project.
 >
 > Stable Core targets macOS 14+ and uses bundled Python with a signed EventKit
@@ -217,14 +217,14 @@ Use only after the publication gate passes.
 >
 > There is no plugin-owned remote backend, but tool results return to Codex.
 > Privacy boundary:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/PRIVACY.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.1/PRIVACY.md
 >
 > Install:
-> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0`
+> `codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1`
 > `codex plugin add apple-reminders@oscar-v4-reminders`
 >
 > Verify the release:
-> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.0/docs/release-verification.md
+> https://github.com/Oscar-V4/apple-reminders/blob/v0.6.1/docs/release-verification.md
 > Privacy-safe synthetic Mac testers are welcome:
 > https://github.com/Oscar-V4/apple-reminders/issues/30
 >

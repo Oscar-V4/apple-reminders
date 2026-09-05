@@ -1,13 +1,14 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes v0.6.0. The matching
-[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.0) contains
-the versioned package and verification results.
+This guide describes v0.6.1. Confirm the matching
+[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1) is
+published before installing; its page records the package and verification
+results.
 
 ## This version's contract
 
-| Area | v0.6.0 contract |
+| Area | v0.6.1 contract |
 |---|---|
 | Tool discovery | 9 Core and diagnostic tools by default; 6 additional experimental tools require `--experimental` startup |
 | Experimental dispatch | Disabled tools are rejected unless the runtime started with `--experimental`; existing operation gates still apply |

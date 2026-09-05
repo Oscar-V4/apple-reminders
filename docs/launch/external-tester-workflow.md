@@ -14,13 +14,13 @@ private-interface boundary in
 
 ## Start only from a verified release
 
-The checked-in `v0.6.0` commands are release-candidate instructions, not proof
+The checked-in `v0.6.1` commands are release-candidate instructions, not proof
 that the tag or assets already exist. Do not recruit testers until the exact
 tag is published as an immutable two-asset GitHub Release and the canonical
 verifier succeeds from a clean tag checkout:
 
 ```bash
-python3 scripts/verify_release_assets.py v0.6.0
+python3 scripts/verify_release_assets.py v0.6.1
 ```
 
 That command must re-download the deterministic ZIP and `SHA256SUMS`, verify
@@ -31,7 +31,7 @@ the signed EventKit and Python manifests without accessing Apple Reminders data.
 Install only the verified exact ref:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -164,12 +164,12 @@ Use an actual macOS 14.x subject rather than deployment-target metadata.
 
 ### `upgrade_identity`
 
-The current release-candidate transition is `v0.5.2` to `v0.6.0`.
+The current release-candidate transition is `v0.6.0` to `v0.6.1`.
 
-- On a disposable subject with Reminders permission granted to the `v0.5.2`
+- On a disposable subject with Reminders permission granted to the `v0.6.0`
   signed helper, create one synthetic Reminder with an alarm and read it back.
-- Verify `v0.6.0`, remove the plugin and repo marketplace entry, add the repo at
-  `v0.6.0`, re-add the plugin, and start a new Codex task.
+- Verify `v0.6.1`, remove the plugin and repo marketplace entry, add the repo at
+  `v0.6.1`, re-add the plugin, and start a new Codex task.
 - Run a bounded read and one unrelated synthetic change, confirming canonical
   alarm state through a fresh exact read-back.
 - Record only `granted_without_prompt` or `granted_after_prompt`; do not submit

@@ -38,6 +38,15 @@ developer-tool installation unchanged.
 7. Halt the entire run on the first `committed_verification_pending`, `partial_success`, concurrent-modification/stale result, ambiguity, or failure. Report the exact unresolved target and its read-only next action before considering another chunk.
 8. After a fully verified chunk, report applied and unchanged counts, refresh summaries for the next chunk, and continue only while it remains inside the approved scope.
 
+Before proposing completion, inspect each candidate's current recurrence.
+Core rejects completion of an incomplete recurring Reminder before mutation as
+`unsupported_recurring_completion`; direct the user to complete that occurrence
+once in the Reminders app. Keep it out of an automatic completion batch, and do
+not clear recurrence or retry to get past the limit. The original ID may now
+identify the next occurrence after a GUI completion. To reopen a completed
+historical occurrence, discover its exact ID with a bounded completed read;
+reopening that item does not rewind or merge the active series.
+
 Native organization actions:
 
 ```json

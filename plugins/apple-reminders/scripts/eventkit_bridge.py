@@ -199,6 +199,7 @@ RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
 )
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+LOCAL_DATE_TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$")
 
 
 class BridgeValidationError(ValueError):
@@ -402,6 +403,27 @@ def parse_date(value: Any, path: str) -> str:
     return parsed.isoformat()
 
 
+def parse_local_date_time(value: Any, path: str) -> str:
+    text = normalized_string(value, path)
+    if not LOCAL_DATE_TIME_RE.fullmatch(text):
+        fail(
+            "invalid_local_date_time",
+            f"{path} must use YYYY-MM-DDTHH:MM:SS without a time zone or UTC offset",
+            details={"path": path},
+        )
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.isoformat(timespec="seconds") != text:
+            raise ValueError("local calendar fields must not normalize")
+    except ValueError:
+        fail(
+            "invalid_local_date_time",
+            f"{path} is not a valid local calendar date and time",
+            details={"path": path},
+        )
+    return parsed.isoformat(timespec="seconds")
+
+
 def normalized_url(value: Any, path: str) -> str | None:
     if value is None:
         return None
@@ -440,9 +462,25 @@ def normalize_due(value: Any, path: str) -> dict[str, Any] | None:
         require_fields(due, {"kind", "date"}, path)
         return {"kind": "all_day", "date": parse_date(due["date"], f"{path}.date")}
     if kind == "timed":
+        if "floating" in due or "local_date_time" in due:
+            reject_unknown(due, {"kind", "floating", "local_date_time"}, path)
+            require_fields(due, {"kind", "floating", "local_date_time"}, path)
+            if not normalized_bool(due["floating"], f"{path}.floating"):
+                fail(
+                    "invalid_floating_due",
+                    f"{path}.floating must be true for a local wall-clock due time",
+                    details={"path": f"{path}.floating"},
+                )
+            return {
+                "kind": "timed",
+                "floating": True,
+                "local_date_time": parse_local_date_time(
+                    due["local_date_time"], f"{path}.local_date_time"
+                ),
+            }
         reject_unknown(due, {"kind", "date_time", "time_zone"}, path)
         require_fields(due, {"kind", "date_time", "time_zone"}, path)
-        canonical, parsed = parse_rfc3339(due["date_time"], f"{path}.date_time")
+        _, parsed = parse_rfc3339(due["date_time"], f"{path}.date_time")
         zone_name = normalized_string(due["time_zone"], f"{path}.time_zone")
         try:
             zone = ZoneInfo(zone_name)
@@ -452,14 +490,34 @@ def normalize_due(value: Any, path: str) -> dict[str, Any] | None:
                 f"{path}.time_zone must be a known IANA time-zone name",
                 details={"path": f"{path}.time_zone", "value": zone_name},
             )
-        expected_offset = parsed.astimezone(zone).utcoffset()
+        try:
+            local = parsed.astimezone(zone)
+        except (OverflowError, ValueError):
+            fail(
+                "invalid_rfc3339",
+                f"{path}.date_time is outside the supported calendar range in {zone_name}",
+                details={"path": f"{path}.date_time", "time_zone": zone_name},
+            )
+        expected_offset = local.utcoffset()
         if expected_offset != parsed.utcoffset():
             fail(
                 "time_zone_offset_mismatch",
                 f"{path}.date_time offset does not match {zone_name} at that instant",
                 details={"path": path, "time_zone": zone_name},
             )
-        local = parsed.astimezone(zone)
+        # EventKit stores due values as NSDateComponents with a named zone.
+        # Those components cannot retain which occurrence of a repeated wall
+        # time the caller selected with an explicit offset. Reject both folds
+        # before saving rather than silently choosing a different instant.
+        if local.replace(fold=0).utcoffset() != local.replace(fold=1).utcoffset():
+            fail(
+                "ambiguous_local_time",
+                f"{path}.date_time occurs twice in {zone_name}; Apple Reminders cannot "
+                "preserve the selected occurrence. Choose a time outside the repeated "
+                "interval or use an all-day due date",
+                status="unsupported",
+                details={"path": path, "time_zone": zone_name},
+            )
         return {
             "kind": "timed",
             "date_time": local.isoformat(timespec="milliseconds"),

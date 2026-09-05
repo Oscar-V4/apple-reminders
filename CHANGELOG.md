@@ -2,6 +2,34 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.6.1 — GUI workflow corrections
+
+This is a release candidate. Publication requires a matching signed EventKit
+helper and the versioned release checks. The [GUI flow record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/v0.6.1-gui-flows.md)
+separates actual Reminders observations from automated tests and remaining work.
+
+### Changed
+
+- Added explicit floating timed due input for a local wall-clock deadline with
+  no persisted named timezone or fixed UTC instant. Zoned timed input remains
+  strict and is never silently converted to floating time. Travel behavior has
+  not been verified across devices.
+- Completing an incomplete recurring reminder now stops before writing. In the
+  Reminders app, completion can advance the original ID to the next occurrence
+  and create a separate completed item; retrying that ID can complete another
+  day. Complete the intended occurrence once in Reminders instead. Ordinary
+  one-off completion and exact completed-item reopening remain available.
+
+### Fixed
+
+- Exact duplicate list names now return `ambiguous_scope` without choosing an
+  arbitrary destination, including when replaying an older operation receipt.
+- Ambiguous zoned due times during a daylight-saving clock rollback are rejected
+  before writing because EventKit cannot preserve which repeated time was meant.
+- Setting the first all-day due date now accepts Reminders' observed automatic
+  start value only when it is midnight on that same day. Existing starts and
+  every other preserved field still require exact verification.
+
 ## 0.6.0 — bundled runtime
 
 The changes below describe v0.6.0. Its versioned GitHub Release records the
