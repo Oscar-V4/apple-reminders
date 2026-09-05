@@ -24,6 +24,18 @@ APP_NAME = "AppleRemindersPythonRuntime.app"
 EXECUTABLE = "Contents/MacOS/apple-reminders-python"
 
 
+def python_fixture_source(body: str) -> str:
+    # A shebang cannot quote an interpreter path containing spaces. The shell
+    # executes this preamble; Python sees it as a harmless module docstring.
+    # -B also keeps fixture imports from changing a signed bundled interpreter.
+    return (
+        "#!/bin/sh\n"
+        f"'''exec' {shlex.quote(sys.executable)} -B \"$0\" \"$@\"\n"
+        "' '''\n"
+        + body
+    )
+
+
 @unittest.skipUnless(platform.system() == "Darwin", "uses the supported macOS stock utilities")
 class BundledLauncherTests(unittest.TestCase):
     """Synthetic capsules only: never start MCP or access a Reminders store.
@@ -64,8 +76,7 @@ class BundledLauncherTests(unittest.TestCase):
         # These stubs are isolated fixtures for platform answers and trust
         # decisions. They execute only data-free fixture code, using the test
         # runner's explicit Python path rather than the launcher's environment.
-        tool_source = f"""#!{sys.executable}
-import hashlib, json, os, pathlib, signal, subprocess, sys, time
+        tool_source = python_fixture_source(f"""import hashlib, json, os, pathlib, signal, subprocess, sys, time
 config = json.loads(pathlib.Path({str(self.config_path)!r}).read_text())
 tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -130,7 +141,7 @@ elif tool == 'link':
     raise SystemExit(status)
 else:
     raise AssertionError(tool)
-"""
+""")
         source = LAUNCHER.read_text(encoding="utf-8")
         tools = self.root / "private fixed tools"
         tools.mkdir()
@@ -156,8 +167,7 @@ else:
         self, architecture: str = "arm64", *,
         extra_entries: list[tuple[str, int, bytes]] | None = None,
     ) -> Path:
-        shim = (
-            f"#!{sys.executable}\n"
+        shim = python_fixture_source(
             "import json, os, sys\n"
             f"result = {{'architecture': {architecture!r}, 'server': sys.argv[1], "
             "'args': sys.argv[2:], 'no_bytecode': os.environ.get('PYTHONDONTWRITEBYTECODE')}\n"
