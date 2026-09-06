@@ -10,8 +10,9 @@ opts in only to legacy hybrid URL composition. See [ADR 0023](decisions/0023-nat
 Default Core `url` writes EventKit metadata and preserves existing native cards.
 Use explicit attachment actions for a native URL card, or a contextual note link
 when visible text is the goal. A metadata receipt does not prove card rendering.
-Signed candidate artifacts and release acceptance remain pending; the
-[signoff record](release-evidence/release-candidate-signoff.md) separates those gates from
+Signed candidate artifacts and packaged startup smoke are verified; the
+[signoff record](release-evidence/release-candidate-signoff.md) separates those
+results from still-pending publication, clean-user acceptance, and
 operation-specific compatibility evidence.
 
 ## Evidence boundary
@@ -43,9 +44,9 @@ execution remain separate acceptance evidence.
 
 | Path | Ordinary dependency | Evidence and availability |
 | --- | --- | --- |
-| Stable Core | Bundled signed EventKit helper and Python; Reminders permission | No Xcode or CLT. New v0.7.0 helper artifact still requires release acceptance. |
+| Stable Core | Bundled signed EventKit helper and Python; Reminders permission | No Xcode or CLT. Signed v0.7.0 artifact verified; clean-user acceptance remains pending. |
 | Native metadata, tags, URL-only attachments, deleted inventory | Guarded private-store adapter | Exact OS/app/schema admission; a read is not write evidence. Tags lack current acceptance evidence. |
-| Native images, sections, exact deleted inspection/recovery | Verified prebuilt signed universal Native bundle | No user compiler. New signed artifact acceptance remains pending; sections lack current compatibility evidence. |
+| Native images, sections, exact deleted inspection/recovery | Verified prebuilt signed universal Native bundle | No user compiler. Signed artifact/resolver checks passed; operation-specific acceptance remains separate and sections lack current compatibility evidence. |
 | Packaging diagnosis | Platform and plugin-owned metadata/static source | No Reminders store/schema, permission, Native runtime, or private admission probes. |
 | Contributor source fallback | Explicit `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1` plus selected developer tools | Development only; cannot bypass exact capability admission. |
 

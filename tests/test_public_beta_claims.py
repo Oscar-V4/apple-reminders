@@ -272,7 +272,7 @@ class PublicBetaClaimTests(unittest.TestCase):
 
     def test_native_candidate_keeps_evidence_and_core_availability_boundaries(self) -> None:
         for old, new in (
-            ("signing and packaged-release evidence remain pending", "signed Native release has shipped"),
+            ("publication and clean-user acceptance remain pending", "signed Native release has shipped"),
             ("Sections and tags do not yet have\nacceptance evidence", "Sections and tags work on every supported build"),
             ("Missing or unavailable Native support leaves healthy Core usable", "Missing Native support disables all Core operations"),
         ):

@@ -323,7 +323,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "Ordinary users need no Xcode or Command Line Tools",
             "Source compilation cannot grant OS/app/schema admission",
             "still need acceptance testing on fresh nondeveloper Macs",
-            "signing and packaged-release evidence remain pending",
+            "publication and clean-user acceptance remain pending",
             "Sections and tags do not yet have acceptance evidence",
             "Missing or unavailable Native support leaves healthy Core usable",
         ),

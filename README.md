@@ -15,7 +15,7 @@ This guide describes the **Unreleased source candidate** for **v0.7.0**.
 Before using the installation commands below, confirm that the matching
 [v0.7.0 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0)
 is published and its verification gates passed. These commands do not mean
-that the tag, signed artifacts, or release already exist.
+that the tag or published release already exists.
 
 For the historical stable version, use the
 [v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
@@ -29,12 +29,14 @@ startup exposes **9 Core and diagnostic tools** and rejects Native dispatch.
 exposes 15 tools. Default URL writes store **EventKit URL metadata only**.
 An explicit attachment action adds or changes a native URL card.
 
-The candidate requires a verified prebuilt signed universal Native helper bundle
-for image, section, and exact recovery operations, without a user compiler.
-Signing, notarization, packaged-artifact checks, and clean-Mac acceptance must
-be recorded before this becomes a release claim. Exact OS/app/schema admission
-still applies; section and tag functionality lack current acceptance evidence.
-See the [candidate signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md) for pending evidence.
+The candidate includes a prebuilt signed universal Native helper bundle for
+image, section, and exact recovery operations, without a user compiler. Both
+helper bundles passed signature, notarization, stapling, and provenance checks;
+the packaged startup smoke also passed. Publication and clean-user acceptance
+remain pending. Exact OS/app/schema admission still applies, and section/tag
+functionality lacks current acceptance evidence. See the
+[candidate signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md)
+for verified results and remaining gates.
 
 ## Get started in three steps
 

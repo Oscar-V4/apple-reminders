@@ -27,8 +27,9 @@ That command must re-download the deterministic ZIP and `SHA256SUMS`, verify
 the immutable release and shared two-subject SLSA provenance, bind the exact
 tag to canonical GitHub main, rebuild the ZIP twice, audit source, and verify
 the signed EventKit, Native, and Python manifests without accessing Apple
-Reminders data. Candidate EventKit/Native artifacts and release signoff remain
-pending; see [v0.7.0 signoff](../release-evidence/release-candidate-signoff.md).
+Reminders data. Candidate EventKit/Native signing and provenance verification
+passed; publication and clean-user acceptance remain pending. See
+[v0.7.0 signoff](../release-evidence/release-candidate-signoff.md).
 
 Install only the verified exact ref:
 

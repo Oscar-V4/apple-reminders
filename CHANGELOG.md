@@ -4,9 +4,9 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
-No v0.7.0 publication or completed signing is asserted here. The candidate
-requires matching signed EventKit and Native artifacts and successful release
-verification. See the [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
+The v0.7.0 candidate contains verified signed, notarized, and stapled EventKit
+and Native bundles with authenticated provenance. Publication and clean-user
+acceptance remain pending. See the [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
 
 ## 0.7.0 — Unreleased candidate
 
@@ -25,8 +25,9 @@ verification. See the [signoff record](https://github.com/Oscar-V4/apple-reminde
 - Native helper paths target a verified prebuilt signed universal bundle, with
   no ordinary-user Xcode or Command Line Tools dependency. Source fallback is
   contributor-only through `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`.
-  Bundle signing, notarization, and packaged release acceptance remain pending;
-  this entry does not announce a released artifact.
+  Both helper signatures and signing attestations have been verified. Packaged
+  startup smoke passed; this entry does not announce a published release or
+  completed clean-user acceptance.
 - Skills diagnose exact capability availability instead of asking users to
   enable Experimental mode. Private support remains `experimental_internals`;
   OS/app/schema admission, reference safety, and final read-back remain strict.

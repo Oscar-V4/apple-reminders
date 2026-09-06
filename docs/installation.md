@@ -18,7 +18,7 @@ has its own tagged documentation and different startup behavior.
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
 | EventKit helper | Bundled signed, notarized helper with its existing permission identity |
-| Native helper | Candidate requires a verified prebuilt signed universal bundle; signing and packaged-release evidence remain pending |
+| Native helper | Prebuilt signed universal bundle verified; publication and clean-user acceptance remain pending |
 
 ## Bundled runtime and Finder-launched Codex
 

@@ -117,7 +117,9 @@ user-facing promise.
      repository evidence, with verified bundled-helper execution where required.
      There is no runtime opt-out; sections and tags still lack acceptance evidence.
    - Uses a verified prebuilt signed universal Native helper bundle by default.
-     Bundle signing and release acceptance remain pending for this source candidate.
+     Candidate signatures, notarization/stapling, and provenance are verified;
+     publication and clean-user acceptance remain pending. See the
+     [signoff record](release-evidence/release-candidate-signoff.md).
      Explicit contributor `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1` permits
      source fallback; fixed developer-directory compiler selection never grants
      capability admission or becomes ordinary-user setup.

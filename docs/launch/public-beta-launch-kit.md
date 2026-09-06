@@ -9,7 +9,8 @@ after every publication gate below passes for the exact tag.
 
 - Version: the plugin manifest declares `0.7.0`; publication requires a matching
   signed EventKit helper, signed Native helper, and intended immutable ref
-  `v0.7.0`. Both new helper artifacts remain pending at this documentation checkpoint.
+  `v0.7.0`. Both helper bundles and signing attestations are verified;
+  the release itself is not yet published.
 - Distribution: independent, open-source community plugin from this GitHub
   repo marketplace.
 - Stable Core: documented EventKit operations targeting macOS 14+, with a
@@ -43,12 +44,13 @@ overrides; compiler presence never grants compatibility admission.
 
 Publication requires Developer ID signatures, notarization, stapled tickets
 and verified source provenance for the EventKit helper, Native helper, and both
-Python capsules. New EventKit/Native artifact acceptance is still pending. Read the exact candidate manifests rather than copying source hashes
-into this document:
+Python capsules. EventKit/Native signature, notarization/stapling, and signing
+provenance checks passed for the candidate. Publication and clean-user acceptance
+remain pending. Read the exact manifests and
+[signoff record](../release-evidence/release-candidate-signoff.md) for evidence:
 
 - [EventKit helper manifest](../../plugins/apple-reminders/native/eventkit-helper-build.json)
-- Native helper: `plugins/apple-reminders/native/native-helper-build.json` must
-  accompany the complete signed app; no missing candidate file is evidence.
+- [Native helper manifest](../../plugins/apple-reminders/native/native-helper-build.json)
 - [Apple silicon Python manifest](../../plugins/apple-reminders/runtime/python-runtime-build-arm64.json)
 - [Intel Python manifest](../../plugins/apple-reminders/runtime/python-runtime-build-x86_64.json)
 
