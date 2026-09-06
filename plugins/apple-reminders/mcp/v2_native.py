@@ -1208,6 +1208,10 @@ class NativeFacade:
                         "automatic_retry_safe": False,
                     }
                 else:
+                    if command == "attach_image":
+                        # Final matching already bound this backend ID to the
+                        # observed image; never infer identity from a page delta.
+                        target["attachment_id"] = receipt["target"]["attachment_id"]
                     verification = {
                         "state": "read_back",
                         "write_performed": result_state == "committed",

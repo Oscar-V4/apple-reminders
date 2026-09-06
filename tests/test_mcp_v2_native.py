@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from copy import deepcopy
 import sys
@@ -175,6 +176,89 @@ class NativeFacadeTests(unittest.TestCase):
             native_mutation=backend.native_mutation,
             native_copy_mutation=backend.native_copy_mutation,
         )
+
+    def image_receipt(self, *, status: str = "verified") -> dict[str, Any]:
+        receipt = mutation_payload("attach_image", status=status, after={
+            "reminder": {"id": "REMINDER-1"},
+            "attachments": [
+                {"id": attachment_id, "type": "image", "filename": "private.png",
+                 "sync": {"mobile_visible_likely": True}}
+                for attachment_id in ("EXISTING-1", "ATTACHMENT-NEW", "EXISTING-2")
+            ],
+            "truncated": False,
+        })
+        receipt["target"] = {"reminder_id": "REMINDER-1", "attachment_id": "ATTACHMENT-NEW"}
+        receipt["verification"].update(final_attachment_content_matched=True, mobile_visible_likely=True)
+        return receipt
+
+    def call_image_receipt(self, receipt: dict[str, Any], *, fail_final_read: bool = False):
+        backend, references = Backend(), References()
+        references.fail_fresh_read = fail_final_read
+        state = "not_mutated" if receipt["status"] == "unchanged" else "committed"
+        backend.native_mutation_payloads["attach_image"] = MutationOutcome(receipt=receipt, mutation_state=state)
+        result, result_state = self.make_facade(backend, references=references).call_with_state("change_reminder_attachment", {
+            "reference": f"rev1.{'x' * 32}",
+            "action": {"kind": "attach_image", "image_path": "/tmp/private.png", "idempotency_key": "image-key"},
+        })
+        validate_public_result("change_reminder_attachment", result, result_state)
+        self.assertEqual(len(backend.native_mutations), 1)
+        return result, references
+
+    def test_image_target_and_mcp_summary_keep_exact_id_among_existing_attachments(self) -> None:
+        from mcp import server
+
+        for truncated in (False, True):
+            with self.subTest(truncated=truncated):
+                receipt = self.image_receipt()
+                receipt["after"]["truncated"] = truncated
+                result, _ = self.call_image_receipt(receipt)
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(result["target"]["attachment_id"], "ATTACHMENT-NEW")
+                self.assertTrue(result["verification"]["matched"])
+                summary = json.loads(server.tool_result(result, is_error=False)["content"][0]["text"])
+                self.assertEqual(summary["target"]["attachment_id"], "ATTACHMENT-NEW")
+                self.assertNotIn("private.png", json.dumps(summary))
+
+    def test_image_target_is_not_inferred_when_receipt_or_final_identity_is_missing(self) -> None:
+        for fault in ("missing_target", "mismatched_target", "target_outside_page", "duplicate_target", "final_read_failed"):
+            with self.subTest(fault=fault):
+                receipt = self.image_receipt()
+                if fault == "missing_target":
+                    receipt["target"].pop("attachment_id")
+                elif fault == "mismatched_target":
+                    receipt["target"]["attachment_id"] = "UNRELATED-ID"
+                elif fault == "target_outside_page":
+                    receipt["after"]["attachments"].pop(1)
+                    receipt["after"]["truncated"] = True
+                elif fault == "duplicate_target":
+                    receipt["after"]["attachments"].append(deepcopy(receipt["after"]["attachments"][1]))
+                result, _ = self.call_image_receipt(receipt, fail_final_read=fault == "final_read_failed")
+                self.assertEqual(result["status"], "committed_verification_pending")
+                self.assertIsNone(result["target"]["attachment_id"])
+                self.assertIsNone(result["after"])
+
+    def test_image_replay_returns_original_id_only_after_current_verification(self) -> None:
+        for status in ("verified", "unchanged"):
+            for still_matches in (True, False):
+                with self.subTest(status=status, still_matches=still_matches):
+                    receipt = self.image_receipt(status=status)
+                    receipt["replayed"] = True
+                    if not still_matches:
+                        receipt["after"]["attachments"][1]["sync"]["mobile_visible_likely"] = False
+                    result, references = self.call_image_receipt(receipt)
+                    self.assertTrue(result["replayed"])
+                    self.assertEqual(references.fresh_reads, ["REMINDER-1"])
+                    self.assertEqual(result["target"]["attachment_id"], "ATTACHMENT-NEW" if still_matches else None)
+                    self.assertEqual(result["status"], status if still_matches else "committed_verification_pending")
+
+    def test_pending_image_receipt_keeps_unknown_public_target(self) -> None:
+        receipt = self.image_receipt(status="committed_verification_pending")
+        receipt["verification"] = {"state": "pending", "write_performed": True, "final_read": False, "matched": None}
+        receipt["recovery"] = {"semantics": "read_reminder_before_retry", "automatic_retry_safe": False}
+        result, references = self.call_image_receipt(receipt)
+        self.assertEqual(result["status"], "committed_verification_pending")
+        self.assertIsNone(result["target"]["attachment_id"])
+        self.assertEqual(references.fresh_reads, [])
 
     def test_create_section_preserves_exact_list_id_and_receipt(self) -> None:
         backend = Backend()
