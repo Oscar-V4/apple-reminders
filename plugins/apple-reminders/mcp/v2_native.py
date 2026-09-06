@@ -1549,6 +1549,12 @@ class NativeFacade:
                 "mutation_status_ok_mismatch",
                 "Native receipt status and ok flag disagree.",
             )
+        # The central adapter contract permits failure receipts without a
+        # before snapshot. Older durable failures used that shape; an absent
+        # snapshot must not obscure their original error or mutation evidence.
+        # Present malformed values and successful receipts remain strict.
+        if status in FAILURE_STATUSES and "before" not in receipt:
+            receipt["before"] = {}
         required_objects = {"target", "before", "after", "verification", "recovery"}
         if any(not isinstance(receipt.get(name), Mapping) for name in required_objects):
             raise FacadeError(
@@ -1584,6 +1590,25 @@ class NativeFacade:
                 "invalid_native_receipt_error",
                 "Native mutation receipt error is invalid.",
             )
+        if status in FAILURE_STATUSES and "error" in receipt:
+            # Making legacy failures projectable must not expose diagnostic
+            # text that the old fallback hid (paths, names, or raw exceptions).
+            receipt["error"] = {
+                **dict(receipt["error"]),
+                "message": (
+                    "The native operation outcome requires manual inspection before another attempt."
+                    if status == "failed_manual_repair_required" else
+                    "The native operation was rejected without a write; read the exact reminder before another attempt."
+                ),
+            }
+        if status == "failed_manual_repair_required" and not receipt.get("warnings"):
+            # Legacy adapter failures omitted warnings as well as snapshots.
+            # Supply only the public contract's status-derived caution; retain
+            # the original error and independent unknown/committed evidence.
+            receipt["warnings"] = [{
+                "code": "manual_inspection_required",
+                "message": "The operation outcome requires manual inspection; do not retry automatically.",
+            }]
         if status in {"unchanged", "verified"} and not receipt["after"]:
             raise FacadeError(
                 "schema_mismatch",

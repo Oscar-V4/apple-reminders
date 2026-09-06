@@ -195,6 +195,7 @@ def command_failure_receipt(
         operation=operation or args.command,
         backend="adapter_boundary",
         target=target,
+        before={},
         after={},
         verification={
             "state": "not_performed" if mutation_not_performed else "manual_repair_required",
