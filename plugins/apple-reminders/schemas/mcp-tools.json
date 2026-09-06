@@ -1318,7 +1318,7 @@
     {
       "name": "inspect_recently_deleted",
       "title": "Inspect recently deleted reminders",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
+      "description": "Native operation with capability-specific compatibility checks. List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1425,7 +1425,7 @@
     {
       "name": "recover_deleted_reminder",
       "title": "Recover deleted reminder",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Recover one exact Recently Deleted Reminder into an exact writable Reminder List using a fresh opaque del1 Reference. Recovery preserves the Reminder identity and verifies its attachment set before reporting success.",
+      "description": "Native operation with capability-specific compatibility checks. Recover one exact Recently Deleted Reminder into an exact writable Reminder List using a fresh opaque del1 Reference. Recovery preserves the Reminder identity and verifies its attachment set before reporting success.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1469,7 +1469,7 @@
     {
       "name": "inspect_reminder_native",
       "title": "Inspect reminder details",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
+      "description": "Native operation with capability-specific compatibility checks. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1683,7 +1683,7 @@
     {
       "name": "create_reminder_section",
       "title": "Create reminder section",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
+      "description": "Native operation with capability-specific compatibility checks. Create or repair one section inside one exact Reminder List through ReminderKit, with CloudKit version read-back before verified success.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1714,7 +1714,7 @@
     {
       "name": "organize_reminder",
       "title": "Organize reminder",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
+      "description": "Native operation with capability-specific compatibility checks. Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1804,7 +1804,7 @@
     {
       "name": "change_reminder_attachment",
       "title": "Change reminder attachment",
-      "description": "Experimental; available only with explicit --experimental launch and existing compatibility gates. Attach, copy, replace, or delete one exact image or URL attachment through a closed action. copy_image uses fresh exact source and destination References and never exposes the source file path. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
+      "description": "Native operation with capability-specific compatibility checks. Attach, copy, replace, or delete one exact image or URL attachment through a closed action. copy_image uses fresh exact source and destination References and never exposes the source file path. Image files must be absolute regular non-symlink PNG/JPEG files no larger than 25 MiB or 40 megapixels.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1992,7 +1992,7 @@
     {
       "name": "diagnose_reminders",
       "title": "Diagnose Reminders",
-      "description": "Run one content-free diagnosis and report the requested area plus Stable or Experimental tier, compiler requirement, runtime/build/schema state, and the precise blocked reason. The default is a small, non-executing Core summary; developer tools run only through explicit Experimental toolchain mode, and static private-framework path absence is inconclusive.",
+      "description": "Run a content-free diagnosis of the requested scope and report capability support, bundled helper readiness, runtime/build/schema state, and the precise blocked reason. Packaging diagnosis reads only artifact metadata. Ordinary Native operations use verified bundled helpers without a compiler; developer source builds require explicit opt-in.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2008,7 +2008,7 @@
               "packaging"
             ],
             "default": "core",
-            "description": "core diagnoses Stable Core. tags plus read-only native inspection and URL-only attachment paths are compiler-free private capabilities. Section mutation, image attachment mutation, and exact recovery are CLT-required private capabilities; native_extension and attachments may span both private boundaries."
+            "description": "core diagnoses Stable Core. Native scopes report exact capability availability. Image, section, and recovery operations use a verified prebuilt helper; ordinary users need no compiler. Packaging scope never probes private stores or account permissions."
           },
           "detail_level": {
             "enum": [
@@ -2023,7 +2023,7 @@
               "experimental_toolchain"
             ],
             "default": "metadata_only",
-            "description": "metadata_only never starts developer tools. experimental_toolchain is the only mode that may run the private-helper compiler gate and is only for an explicitly requested Experimental capability diagnosis."
+            "description": "metadata_only never starts developer tools. experimental_toolchain is only for explicit developer diagnosis, and source compilation requires APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1. Neither mode bypasses capability admission."
           }
         },
         "additionalProperties": false

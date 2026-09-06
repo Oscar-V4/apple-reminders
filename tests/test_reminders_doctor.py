@@ -632,15 +632,15 @@ class ReportContractTests(unittest.TestCase):
             boundaries["compiler_free_private"]["requires_command_line_tools"]
         )
         self.assertEqual(
-            boundaries["compiler_required_private"]["paths"],
+            boundaries["bundled_native"]["paths"],
             [
                 "section_mutation",
                 "image_attachment_mutation",
                 "exact_recently_deleted",
             ],
         )
-        self.assertTrue(
-            boundaries["compiler_required_private"]["requires_command_line_tools"]
+        self.assertFalse(
+            boundaries["bundled_native"]["requires_command_line_tools"]
         )
 
     def test_experimental_diagnosis_fails_closed_across_usable_stores(

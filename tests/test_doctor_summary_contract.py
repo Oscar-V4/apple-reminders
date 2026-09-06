@@ -100,7 +100,7 @@ class DoctorSummaryCliTests(unittest.TestCase):
         self.assertFalse(report["execution"]["compiler_process_attempted"])
         self.assertEqual(
             set(report["capabilities"]["runtime_boundaries"]),
-            {"core", "compiler_free_private", "compiler_required_private"},
+            {"core", "compiler_free_private", "bundled_native"},
         )
         self.assertNotIn("details", report["checks"]["platform"])
         self.assertEqual(
@@ -188,8 +188,8 @@ class DoctorSummaryMcpContractTests(unittest.TestCase):
         self.assertIn("recovery", scopes)
         description = scope["description"]
         self.assertIn("Stable Core", description)
-        self.assertIn("compiler-free private", description)
-        self.assertIn("CLT-required private", description)
+        self.assertIn("verified prebuilt helper", description)
+        self.assertIn("ordinary users need no compiler", description)
 
     def test_mcp_initialize_instructions_do_not_repeat_a_long_playbook(self) -> None:
         server = load_server_module()

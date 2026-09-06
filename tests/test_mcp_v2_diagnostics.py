@@ -207,7 +207,7 @@ class DiagnosticsFacadeTests(unittest.TestCase):
         )
         self.assertEqual(
             set(result["data"]["capability_boundaries"]),
-            {"core", "compiler_free_private", "compiler_required_private"},
+            {"core", "compiler_free_private", "bundled_native"},
         )
         self.assertFalse(result["data"]["privacy"]["prompt_triggered"])
         validate_public_result("diagnose_reminders", result)
