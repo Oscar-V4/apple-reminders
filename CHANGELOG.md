@@ -2,6 +2,19 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## Unreleased
+
+### Fixed
+
+- Experimental helper compilation now supplies the macOS SDK from the selected
+  Xcode or Command Line Tools installation. This fixes missing AppKit headers
+  in both diagnosis and image/section/recovery helper builds.
+- Attachment admission now compares the command-scoped fingerprint of the
+  previously recorded schema. The whole-diagnostic hash had incorrectly rejected
+  the supported build. Exact OS/app and schema checks remain enforced.
+- CI exercises the production compiler/SDK path and a metadata-only schema
+  fixture catches whole-schema versus command-schema mismatches.
+
 ## 0.6.1 — GUI workflow corrections
 
 The changes below describe v0.6.1. Its versioned GitHub Release records the

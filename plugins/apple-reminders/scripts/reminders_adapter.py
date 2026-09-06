@@ -606,7 +606,7 @@ def preflight_experimental_command(args: argparse.Namespace) -> dict[str, Any] |
         else None
     )
     compiler_available = bool(compiler_probe and compiler_probe.available)
-    if compiler_probe and compiler_probe.compiler_path is not None:
+    if compiler_probe and compiler_probe.available:
         setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
     if spec.compiler_requirement == "required" and not compiler_available:
         compiler_decision = evaluate_capability(
@@ -651,7 +651,7 @@ def require_image_helper_compiler(args: argparse.Namespace) -> None:
     """Resolve the conditional delete route before any image helper dispatch."""
 
     compiler_probe = resolve_selected_clang()
-    if compiler_probe.compiler_path is not None:
+    if compiler_probe.available:
         setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
         return
     capability = dict(getattr(args, "_experimental_capability", {}) or {})
@@ -673,12 +673,12 @@ def require_image_helper_compiler(args: argparse.Namespace) -> None:
     )
 
 
-def require_private_helper_compiler() -> Path:
-    """Return the fixed selected clang path or fail before helper preparation."""
+def require_private_helper_compiler() -> list[str]:
+    """Return selected clang plus its SDK or fail before helper preparation."""
 
     compiler_probe = resolve_selected_clang()
-    if compiler_probe.compiler_path is not None:
-        return compiler_probe.compiler_path
+    if compiler_probe.available:
+        return compiler_probe.compiler_command
     raise MutationNotStartedError(
         "This Experimental helper requires selected Xcode Command Line Tools.",
         code="unsupported_capability",
@@ -1807,7 +1807,7 @@ def reminderkit_attach_helper() -> Path:
             try:
                 proc = run_bounded_process(
                     [
-                        clang,
+                        *clang,
                         "-x",
                         "objective-c",
                         "-fobjc-arc",
@@ -1873,7 +1873,7 @@ def reminderkit_sections_helper() -> Path:
             try:
                 proc = run_bounded_process(
                     [
-                        clang,
+                        *clang,
                         "-x",
                         "objective-c",
                         "-fobjc-arc",
@@ -1935,7 +1935,7 @@ def reminderkit_recover_helper() -> Path:
             try:
                 proc = run_bounded_process(
                     [
-                        clang,
+                        *clang,
                         "-x",
                         "objective-c",
                         "-fobjc-arc",

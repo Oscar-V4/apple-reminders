@@ -26,8 +26,11 @@ SupportTier = Literal["stable_core", "experimental_internals"]
 CompilerRequirement = Literal["not_required", "required", "conditional"]
 
 ATTACHMENT_SCHEMA_FINGERPRINT = (
-    "82761d59e465cf4c90ca8c98bb51eab498c6976e81d608023535f3bf0ec63d62"
+    "4536d8d7330f95ab6f1e39dd5f7f04d6970cd52fa5da1c948a51e1d96e2e44e1"
 )
+# This is the attachment_mutation_db projection of the recorded whole-schema
+# 82761d...d62 evidence, not an additional OS/schema admission. See the
+# metadata-only fixture and docs/release-evidence/attachment-preflight-fix.md.
 RECOVERY_SCHEMA_FINGERPRINT = (
     "adaa7c550726b35e592085a531fba649466a6099ec8cbb863bf726143fcf5634"
 )
@@ -38,9 +41,12 @@ REMINDERS_APP_CANDIDATES = (
     Path("/Applications/Reminders.app"),
 )
 XCODE_SELECT_PATH = Path("/usr/bin/xcode-select")
-_SELECTED_CLANG_RELATIVE_PATHS = (
-    Path("Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"),
-    Path("usr/bin/clang"),
+_SELECTED_TOOLCHAIN_RELATIVE_PATHS = (
+    (
+        Path("Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"),
+        Path("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"),
+    ),
+    (Path("usr/bin/clang"), Path("SDKs/MacOSX.sdk")),
 )
 _TOOLCHAIN_PROBE_OUTPUT_LIMIT_BYTES = 16 * 1024
 
@@ -81,10 +87,17 @@ class DeveloperToolchainProbe:
     compiler_path: Path | None
     reason_code: str
     selection_attempted: bool
+    sdk_path: Path | None = None
 
     @property
     def available(self) -> bool:
-        return self.compiler_path is not None
+        return self.compiler_path is not None and self.sdk_path is not None
+
+    @property
+    def compiler_command(self) -> list[str]:
+        if not self.available:
+            raise ValueError("A selected compiler and macOS SDK are required")
+        return [str(self.compiler_path), "-isysroot", str(self.sdk_path)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,18 +246,24 @@ def _usable_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def _usable_sdk(path: Path) -> bool:
+    return path.is_dir() and os.access(path, os.R_OK | os.X_OK)
+
+
 def resolve_selected_clang(
     *,
     xcode_select: Path = XCODE_SELECT_PATH,
     runner: Callable[[list[str], float], Any] = _run_toolchain_probe,
     selection_tool_usable: Callable[[Path], bool] = _usable_executable,
     compiler_usable: Callable[[Path], bool] = _usable_executable,
+    sdk_usable: Callable[[Path], bool] = _usable_sdk,
     environment: Mapping[str, str] | None = None,
 ) -> DeveloperToolchainProbe:
     """Resolve clang only from the non-interactive selected developer directory.
 
     The fixed xcode-select path and fixed compiler-relative paths deliberately
     ignore PATH, /usr/bin/clang shims, and tools that may open an installer.
+    Pair the compiler with the SDK in that same selected developer directory.
     """
 
     effective_environment = os.environ if environment is None else environment
@@ -265,10 +284,13 @@ def resolve_selected_clang(
     developer_dir = Path(lines[0])
     if not developer_dir.is_absolute() or ".." in developer_dir.parts:
         return DeveloperToolchainProbe(None, "developer_directory_invalid", True)
-    for relative in _SELECTED_CLANG_RELATIVE_PATHS:
-        candidate = developer_dir / relative
+    for compiler_relative, sdk_relative in _SELECTED_TOOLCHAIN_RELATIVE_PATHS:
+        candidate = developer_dir / compiler_relative
         if compiler_usable(candidate):
-            return DeveloperToolchainProbe(candidate, "compiler_available", True)
+            sdk = developer_dir / sdk_relative
+            if not sdk_usable(sdk):
+                return DeveloperToolchainProbe(None, "macos_sdk_unavailable", True)
+            return DeveloperToolchainProbe(candidate, "compiler_available", True, sdk)
     return DeveloperToolchainProbe(None, "compiler_required", True)
 
 
