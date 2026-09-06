@@ -183,6 +183,29 @@ jobs:
           --tag-commit "$TAG_COMMIT"
           --main-ref refs/remotes/origin/main
 
+      - name: Independently verify optional Native helper provenance and signed bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_identity.outputs.release_tag }}
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+          TAG_COMMIT: ${{ steps.release_identity.outputs.tag_commit }}
+          TAG_OBJECT: ${{ steps.release_identity.outputs.tag_object }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          sys.path.insert(0, "scripts")
+          from verify_release_assets import GitIdentity, verify_native_helper_provenance
+          identity = GitIdentity(
+              tag=os.environ["RELEASE_TAG"], version=os.environ["RELEASE_VERSION"],
+              tag_commit=os.environ["TAG_COMMIT"], tag_object=os.environ["TAG_OBJECT"],
+          )
+          print(json.dumps(verify_native_helper_provenance(
+              identity, main_ref="refs/remotes/origin/main",
+          ), sort_keys=True))
+          PY
+
       - name: Bind the expanded helper bytes to the manifest
         env:
           MANIFEST_SOURCE_COMMIT: ${{ steps.helper_source.outputs.source_commit }}
@@ -217,8 +240,18 @@ jobs:
               raise SystemExit("native helper root is missing, unsafe, or not a directory")
           if stat.S_IMODE(native.lstat().st_mode) != 0o755:
               raise SystemExit("native helper root mode drift")
+          # The exact Native pair was independently authenticated in the prior step.
+          # Keep this inventory confined to EventKit without accepting other siblings.
+          allowed_siblings = {
+              "AppleRemindersEventKitHelper.app", "eventkit-helper-build.json",
+              "AppleRemindersNativeHelper.app", "native-helper-build.json",
+          }
+          if any(path.name not in allowed_siblings for path in native.iterdir()):
+              raise SystemExit("unexpected native helper root entry")
           for path in sorted(native.rglob("*")):
               relative = path.relative_to(native).as_posix()
+              if relative.split("/", 1)[0] in {"AppleRemindersNativeHelper.app", "native-helper-build.json"}:
+                  continue
               mode = path.lstat().st_mode
               if stat.S_ISLNK(mode):
                   raise SystemExit(f"native helper symlink rejected: {relative}")
