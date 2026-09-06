@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Apple Reminders EventKit Helper</string>
+	<string>Apple Reminders Native Helper</string>
 	<key>CFBundleExecutable</key>
-	<string>apple-reminders-eventkit-helper</string>
+	<string>apple-reminders-image-helper</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.oscar-v4.apple-reminders.eventkit-bridge</string>
+	<string>io.github.oscar-v4.apple-reminders.native-helper</string>
 	<key>CFBundleName</key>
-	<string>Apple Reminders EventKit Helper</string>
+	<string>Apple Reminders Native Helper</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

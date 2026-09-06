@@ -35,6 +35,8 @@ dist/
 *.app/
 !plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/
 !plugins/apple-reminders/native/AppleRemindersEventKitHelper.app/**
+!plugins/apple-reminders/native/AppleRemindersNativeHelper.app/
+!plugins/apple-reminders/native/AppleRemindersNativeHelper.app/**
 
 # Reminders stores and plugin-owned operational data
 *.sqlite
