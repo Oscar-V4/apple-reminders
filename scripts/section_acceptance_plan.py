@@ -147,10 +147,10 @@ def collect_schema(plan: dict, snapshot: Path, *, helper: dict, runtime: dict) -
     validate_plan(plan, helper)
     if runtime != plan["expected_runtime"]:
         raise PlanError("Observed OS/app does not match the expected identity")
-    before = bounded_file(snapshot, MAX_SNAPSHOT_BYTES)
     sidecars = [Path(str(snapshot) + suffix) for suffix in ("-wal", "-shm", "-journal")]
     if any(path.exists() or path.is_symlink() for path in sidecars):
         raise PlanError("Only a standalone schema snapshot without sidecars is supported")
+    before = bounded_file(snapshot, MAX_SNAPSHOT_BYTES)
     tables = set().union(*(item["required_tables"] for item in plan["contracts"].values()))
     schema = {}
     # immutable=1 is appropriate only for the explicit standalone snapshot;
@@ -183,7 +183,7 @@ def collect_schema(plan: dict, snapshot: Path, *, helper: dict, runtime: dict) -
     return {"schema_version": 1, "kind": "section_schema_snapshot_evidence", "plan_sha256": digest(plan),
             "observed_runtime": runtime, "helper_binding": helper, "snapshot_sha256": hashlib.sha256(before).hexdigest(),
             "snapshot_origin_verified": False, "account_ownership_verified": False,
-            "observations": observations, "reminder_rows_read": False, "account_rows_read": False,
+            "observations": observations, "reminder_row_queries": False, "account_row_queries": False,
             "mutation_attempted": False, "runtime_admission": False}
 
 

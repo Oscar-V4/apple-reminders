@@ -119,8 +119,10 @@ class SectionPreparationTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_ROWS", " ".join(queries))
         self.assertNotIn("sensitive reminder content", json.dumps(evidence))
         self.assertTrue(all(item["minimum_fields_present"] for item in evidence["observations"].values()))
-        for key in ("snapshot_origin_verified", "account_ownership_verified", "reminder_rows_read", "account_rows_read", "mutation_attempted", "runtime_admission"):
+        for key in ("snapshot_origin_verified", "account_ownership_verified", "reminder_row_queries", "account_row_queries", "mutation_attempted", "runtime_admission"):
             self.assertIs(evidence[key], False)
+        self.assertNotIn("reminder_rows_read", evidence)
+        self.assertNotIn("account_rows_read", evidence)
         self.assertEqual(snapshot.read_bytes(), before)
         self.assertEqual(set(self.root.iterdir()), {snapshot})
         self.assertEqual(evidence["plan_sha256"], plan.digest(self.plan))
@@ -133,6 +135,23 @@ class SectionPreparationTests(unittest.TestCase):
             Path(str(snapshot) + "-wal").write_bytes(b"snapshot not standalone")
             with self.assertRaises(plan.PlanError):
                 plan.collect_schema(self.plan, snapshot, helper=self.helper, runtime=plan.EXPECTED_RUNTIME)
+
+    def test_sidecars_are_rejected_before_snapshot_bytes_are_read(self):
+        snapshot = self.snapshot()
+        for suffix in ("-wal", "-shm", "-journal"):
+            for symlink in (False, True):
+                with self.subTest(suffix=suffix, symlink=symlink):
+                    sidecar = Path(str(snapshot) + suffix)
+                    if symlink:
+                        sidecar.symlink_to(self.root / "missing-sidecar")
+                    else:
+                        sidecar.write_bytes(b"unsupported sidecar")
+                    with mock.patch.object(plan, "bounded_file", side_effect=AssertionError("snapshot bytes read")) as read, \
+                         mock.patch.object(plan.sqlite3, "connect", side_effect=AssertionError("database opened")):
+                        with self.assertRaisesRegex(plan.PlanError, "without sidecars"):
+                            plan.collect_schema(self.plan, snapshot, helper=self.helper, runtime=plan.EXPECTED_RUNTIME)
+                        read.assert_not_called()
+                    sidecar.unlink()
 
     def test_missing_schema_is_evidence_not_promotion(self):
         snapshot = self.root / "empty.sqlite"
