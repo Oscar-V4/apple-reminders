@@ -27,7 +27,8 @@ EXECUTABLES = {kind: f"apple-reminders-{name}-helper" for kind, name in (
 SOURCES = ("scripts/remkit_attach_image.m", "scripts/remkit_sections.m", "scripts/remkit_recover.m")
 BUILD_INPUTS = tuple("scripts/" + name for name in (
     "build_native_helper_app.py", "verify_native_helper.py",
-    "prepare_signed_native_helper.sh", "native_helper_app_info.plist"))
+    "prepare_signed_native_helper.sh", "native_helper_app_info.plist",
+    "native_helper_artifact.py")) + (".github/workflows/prepare-signed-native-helper-source.yml",)
 SOURCE_BUILD_ENV = "APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD"
 
 

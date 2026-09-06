@@ -128,6 +128,8 @@ PRIVATE_NATIVE_SOURCE_FILES = {"scripts/remkit_attach_image.m", "scripts/remkit_
 PRIVATE_NATIVE_BUILD_INPUT_FILES = {
     "scripts/build_native_helper_app.py", "scripts/verify_native_helper.py",
     "scripts/prepare_signed_native_helper.sh", "scripts/native_helper_app_info.plist",
+    "scripts/native_helper_artifact.py",
+    ".github/workflows/prepare-signed-native-helper-source.yml",
 }
 
 PYTHON_RUNTIME_ARCHIVES = {

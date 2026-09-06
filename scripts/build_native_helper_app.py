@@ -34,11 +34,15 @@ ARCHITECTURES = ("arm64", "x86_64")
 MANIFEST_RELATIVE_PATH = Path(".codex-plugin/plugin.json")
 
 INFO_TEMPLATE_RELATIVE_PATH = Path("scripts/native_helper_app_info.plist")
+# Reviewed local preparation is supporting tooling; the workflow and artifact
+# helper below are the actual CI signing recipe, bound to workflow_commit.
 BUILD_INPUT_RELATIVE_PATHS = (
     INFO_TEMPLATE_RELATIVE_PATH,
     Path("scripts/build_native_helper_app.py"),
     Path("scripts/verify_native_helper.py"),
     Path("scripts/prepare_signed_native_helper.sh"),
+    Path("scripts/native_helper_artifact.py"),
+    Path(".github/workflows/prepare-signed-native-helper-source.yml"),
 )
 
 XCRUN = "/usr/bin/xcrun"
