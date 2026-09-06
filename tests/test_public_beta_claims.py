@@ -202,11 +202,24 @@ class PublicBetaClaimTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("explicit bundled Python runtime", completed.stderr)
 
+    def test_source_candidate_does_not_advance_the_published_launch_packet(self) -> None:
+        source_version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.copy_claim_tree(root)
+            completed = self.run_checker(root)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.replace(root, Path("docs/launch/public-beta-launch-kit.md"),
+                         "v0.7.0", f"v{source_version}")
+            completed = self.run_checker(root)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("current release tag drift", completed.stderr)
+
     def test_versioned_runtime_contracts_cannot_be_conflated(self) -> None:
         version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "This guide describes the **published public beta**", "This guide describes the **general-availability release**", "version identity boundary"),
+             "This guide describes the **Unreleased patch candidate**", "This guide describes the **published public beta**", "version identity boundary"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
              "15 tools", "9 tools", "default tool inventory"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),

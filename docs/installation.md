@@ -1,25 +1,25 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes the **published public beta** for **v0.7.0**.
-The immutable release and canonical verifier passed; see the
-[publication evidence](release-evidence/public-beta-0.7.0.md).
-Use the README's exact v0.7.0 installation commands. Public beta status is
-separate from general availability or completed clean-user acceptance. The
-historical [v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
-has different startup behavior documented at its own tag.
+This guide describes the **Unreleased patch candidate** for **v0.7.1**.
+The latest published public beta remains
+[v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0), with
+[verified immutable evidence](release-evidence/public-beta-0.7.0.md).
+Use the README's v0.7.1 commands only after a matching published release and
+canonical verification. Fresh v0.7.1 helper signing is pending; see the
+[patch signoff](release-evidence/patch-candidate-0.7.1.md).
 
-## Public beta contract
+## Patch candidate contract
 
-| Area | v0.7.0 public beta contract |
+| Area | v0.7.1 Unreleased patch contract |
 |---|---|
 | Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
 | Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
 | Legacy URL mode | `--experimental` is only a legacy hybrid URL opt-in, with the same 15-tool inventory |
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
-| EventKit helper | Bundled signed, notarized helper with its existing permission identity |
-| Native helper | Prebuilt signed universal bundle verified; clean-user acceptance remains pending |
+| EventKit helper | Existing v0.7.0 artifact retained; fresh v0.7.1 signed/notarized bundle pending |
+| Native helper | Existing v0.7.0 artifact retained; fresh v0.7.1 signed universal bundle pending; clean-user acceptance remains pending |
 
 ## Bundled runtime and Finder-launched Codex
 
@@ -67,7 +67,7 @@ profile is not sufficient evidence.
 
 ## Native availability
 
-All six Native Extension and Recovery tools are discoverable in the public beta's
+All six Native Extension and Recovery tools are discoverable in the candidate's
 default session. Listing a tool does not mean the current Mac supports its
 operation. The private implementation tier remains `experimental_internals`.
 

@@ -11,15 +11,18 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes the **published public beta** for **v0.7.0**.
-The [immutable v0.7.0 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0)
-passed its release workflow and independent canonical verification. It remains
-a public beta, not a general-availability release. See the
-[publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md).
+This guide describes the **Unreleased patch candidate** for **v0.7.1**.
+The latest published public beta remains
+[v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0), with
+[immutable publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md).
 
-For the historical stable version, use the
-[v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
-and its tagged documentation. Its startup and dependency behavior differ.
+The v0.7.1 patch is limited to exact image attachment IDs in verified receipts
+and clearer inconclusive-framework diagnostics. Fresh version-matched helper
+signing, final integration/testing, and publication remain pending. See the
+[patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
+Use the commands below only after the
+[v0.7.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+is published and verified; they are not evidence that it exists now.
 
 The plugin includes a signed Python runtime, so there is **no separate Python
 installation**. Ordinary startup offers **15 tools**: eight
@@ -29,13 +32,12 @@ startup exposes **9 Core and diagnostic tools** and rejects Native dispatch.
 exposes 15 tools. Default URL writes store **EventKit URL metadata only**.
 An explicit attachment action adds or changes a native URL card.
 
-The package includes a prebuilt signed universal Native helper bundle for
-image, section, and exact recovery operations, without a user compiler. Both
-helper bundles passed signature, notarization, stapling, and provenance checks;
-the packaged startup smoke also passed. Clean-user acceptance remains pending. Exact OS/app/schema admission still applies, and section/tag
-functionality lacks current acceptance evidence. See the
-[signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md)
-for verified results and remaining gates.
+The candidate retains the prebuilt signed universal helper design, without a
+user compiler. The checked-in v0.7.0 helper artifacts remain historical inputs
+until fresh v0.7.1 bundles are signed; their current version mismatch must fail
+artifact checks. Clean-user acceptance remains pending. Exact OS/app/schema
+admission still applies, and section/tag functionality lacks current acceptance
+evidence. No new private capability admission is part of this patch scope.
 
 ## Get started in three steps
 
@@ -43,13 +45,13 @@ You need a Mac running **macOS 14 or newer**, Apple Reminders, and Codex.
 Ordinary reminder work uses bundled, signed and notarized components. You do not
 need Xcode, Command Line Tools, Homebrew, or an Apple Developer membership.
 
-### 1. Install the pinned public beta
+### 1. Confirm publication, then install the pinned patch
 
-Ask Codex to run these commands, or use a terminal where the `codex` command
-is available:
+After v0.7.1 is published and verified, ask Codex to run these commands or use
+a terminal where the `codex` command is available:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.0
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.1
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -83,7 +85,7 @@ the saved result.
 - “Add this link to the reminder.”
 - “Move the reminders for this project into my Project Archive list.”
 
-In this public beta, Native and recovery tools are discoverable by default. Their
+In the candidate, Native and recovery tools are discoverable by default. Their
 private implementation support tier remains `experimental_internals`, and each
 operation requires exact capability admission. See [Advanced setup and troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md)
 for availability and evidence limits. An unavailable capability needs a precise
