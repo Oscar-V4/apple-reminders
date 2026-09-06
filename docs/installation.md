@@ -92,6 +92,14 @@ diagnosis uses `execution_mode=experimental_toolchain`. If that reports
 install Apple's Command Line Tools separately. Core does not require this step.
 An unsupported build remains unsupported after installing a compiler.
 
+In v0.6.1, Experimental image preflight can incorrectly fail with
+`helper_syntax_check_failed` on a selected Xcode installation because the
+compiler invocation omits its macOS SDK. The same version's attachment
+allowlist compares a whole-diagnostic schema hash with a command-scoped hash,
+which can reject the recorded supported build. These are plugin defects;
+reinstalling Xcode or editing a local allowlist is not a remedy. See the
+[preflight correction evidence](release-evidence/attachment-preflight-fix.md).
+
 ## Opting in to experimental tools
 
 These commands show the two startup modes from a complete release checkout.

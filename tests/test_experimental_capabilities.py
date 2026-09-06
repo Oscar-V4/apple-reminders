@@ -44,6 +44,7 @@ AVAILABLE_COMPILER = experimental_capabilities.DeveloperToolchainProbe(
     Path("/Selected/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"),
     "compiler_available",
     True,
+    Path("/Selected/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"),
 )
 UNAVAILABLE_COMPILER = experimental_capabilities.DeveloperToolchainProbe(
     None,
@@ -137,11 +138,41 @@ class ExperimentalCapabilityModelTests(unittest.TestCase):
             runner=runner,
             selection_tool_usable=lambda _path: True,
             compiler_usable=lambda path: path == expected,
+            sdk_usable=lambda path: path == AVAILABLE_COMPILER.sdk_path,
             environment={},
         )
 
         self.assertTrue(probe.available)
         self.assertEqual(probe.compiler_path, expected)
+        self.assertEqual(probe.sdk_path, AVAILABLE_COMPILER.sdk_path)
+
+    def test_selected_command_line_tools_resolves_its_own_sdk(self) -> None:
+        developer = Path("/Library/Developer/CommandLineTools")
+        probe = experimental_capabilities.resolve_selected_clang(
+            runner=lambda argv, timeout: subprocess.CompletedProcess(argv, 0, str(developer), ""),
+            selection_tool_usable=lambda path: True,
+            compiler_usable=lambda path: path == developer / "usr/bin/clang",
+            sdk_usable=lambda path: path == developer / "SDKs/MacOSX.sdk",
+            environment={},
+        )
+        self.assertEqual(probe.compiler_command, [
+            str(developer / "usr/bin/clang"), "-isysroot", str(developer / "SDKs/MacOSX.sdk"),
+        ])
+
+    def test_missing_selected_sdk_does_not_fall_back_to_another_toolchain(self) -> None:
+        compiler_usable = mock.Mock(return_value=True)
+        probe = experimental_capabilities.resolve_selected_clang(
+            runner=lambda argv, timeout: subprocess.CompletedProcess(argv, 0, "/Selected/Developer", ""),
+            selection_tool_usable=lambda path: True,
+            compiler_usable=compiler_usable,
+            sdk_usable=lambda path: False,
+            environment={},
+        )
+        self.assertFalse(probe.available)
+        self.assertEqual(probe.reason_code, "macos_sdk_unavailable")
+        compiler_usable.assert_called_once()
+        with self.assertRaises(ValueError):
+            _ = probe.compiler_command
 
     def test_developer_environment_override_cannot_grant_compiler_access(self) -> None:
         runner = mock.Mock(
@@ -593,6 +624,9 @@ class AdapterExperimentalPreflightTests(unittest.TestCase):
 
             which.assert_not_called()
             self.assertEqual(Path(run.call_args.args[0][0]), selected)
+            self.assertEqual(run.call_args.args[0][1:3], [
+                "-isysroot", str(AVAILABLE_COMPILER.sdk_path),
+            ])
 
     def test_recovery_guard_mismatch_never_dispatches_helper(self) -> None:
         reminder_id = "11111111-1111-4111-8111-111111111111"

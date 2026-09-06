@@ -76,6 +76,11 @@ The full immutable values live in
 range, compiler success, selector presence, or a similar-looking schema must
 not be substituted for an exact row.
 
+Correction (2026-09-06): the attachment `82761d…d62` above was recorded from
+the whole diagnostic schema, not the command-scoped schema the gate compares.
+The identical recorded schema projects to attachment hash `4536d8…4e1`.
+See the [reproduction, metadata-only fixture, and scope correction](../release-evidence/attachment-preflight-fix.md).
+
 The recovery row is grounded in the exact build, fingerprint, guarded restores,
 and native attachment read-back recorded in
 [ADR 0011](0011-guarded-recently-deleted-recovery.md#local-evidence). The

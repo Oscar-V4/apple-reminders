@@ -86,15 +86,23 @@ jobs:
 
       - name: Check ReminderKit helper syntax without linking
         run: |
-          clang -x objective-c -fobjc-arc \
-            -framework Foundation -framework AppKit -framework ImageIO \
-            -fsyntax-only "$PLUGIN_ROOT/scripts/remkit_attach_image.m"
-          clang -x objective-c -fobjc-arc \
-            -framework Foundation -framework AppKit \
-            -fsyntax-only "$PLUGIN_ROOT/scripts/remkit_sections.m"
-          clang -x objective-c -fobjc-arc \
-            -framework Foundation \
-            -fsyntax-only "$PLUGIN_ROOT/scripts/remkit_recover.m"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          scripts = Path(os.environ["PLUGIN_ROOT"]) / "scripts"
+          sys.path.insert(0, str(scripts))
+          from experimental_capabilities import resolve_selected_clang
+
+          toolchain = resolve_selected_clang()
+          assert toolchain.available, toolchain.reason_code
+          for name in ("remkit_attach_image.m", "remkit_sections.m", "remkit_recover.m"):
+              subprocess.run(toolchain.compiler_command + [
+                  "-x", "objective-c", "-fobjc-arc", "-fsyntax-only", str(scripts / name),
+              ], check=True)
+          PY
 
       - name: Check EventKit helper syntax without linking
         run: >-

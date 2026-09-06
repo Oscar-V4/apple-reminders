@@ -59,6 +59,7 @@ def fake_toolchain_resolver(
         ),
         "compiler_available",
         True,
+        Path("/Selected/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"),
     )
 
 

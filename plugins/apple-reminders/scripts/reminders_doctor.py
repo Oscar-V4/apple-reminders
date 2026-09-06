@@ -702,7 +702,6 @@ def inspect_helper_toolchain(
             details=details,
         )
     toolchain = (toolchain_resolver or resolve_selected_clang)()
-    clang = toolchain.compiler_path
     details["clang"].update(
         {
             "available": toolchain.available,
@@ -724,15 +723,15 @@ def inspect_helper_toolchain(
             ),
         }
     )
-    if clang is None:
+    if not toolchain.available:
         return check_result(
             STATUS_WARNING,
             "helper_build_prerequisites_missing",
-            "The selected developer directory does not provide a usable clang.",
+            "The selected developer directory does not provide both clang and a macOS SDK.",
             details=details,
         )
     argv = [
-        str(clang),
+        *toolchain.compiler_command,
         "-x",
         "objective-c",
         "-fobjc-arc",
