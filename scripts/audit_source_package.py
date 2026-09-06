@@ -106,6 +106,31 @@ NATIVE_HELPER_BUILD_INPUT_FILES = {
     "scripts/prepare_signed_eventkit_helper.sh",
     "scripts/verify_eventkit_helper.py",
 }
+PRIVATE_NATIVE_APP = Path("native/AppleRemindersNativeHelper.app")
+PRIVATE_NATIVE_EXECUTABLES = {
+    "image": "apple-reminders-image-helper",
+    "sections": "apple-reminders-sections-helper",
+    "recovery": "apple-reminders-recovery-helper",
+}
+PRIVATE_NATIVE_BINARIES = {PRIVATE_NATIVE_APP / "Contents/MacOS" / name for name in PRIVATE_NATIVE_EXECUTABLES.values()}
+PRIVATE_NATIVE_MANIFEST = Path("native/native-helper-build.json")
+PRIVATE_NATIVE_FILES = PRIVATE_NATIVE_BINARIES | {
+    PRIVATE_NATIVE_APP / "Contents/Info.plist",
+    PRIVATE_NATIVE_APP / "Contents/_CodeSignature/CodeResources",
+    PRIVATE_NATIVE_APP / "Contents/CodeResources",
+    PRIVATE_NATIVE_MANIFEST,
+}
+PRIVATE_NATIVE_OPAQUE_FILES = PRIVATE_NATIVE_FILES - {
+    PRIVATE_NATIVE_MANIFEST, PRIVATE_NATIVE_APP / "Contents/Info.plist",
+}
+PRIVATE_NATIVE_SOURCE_FILES = {"scripts/remkit_attach_image.m", "scripts/remkit_sections.m", "scripts/remkit_recover.m"}
+PRIVATE_NATIVE_BUILD_INPUT_FILES = {
+    "scripts/build_native_helper_app.py", "scripts/verify_native_helper.py",
+    "scripts/prepare_signed_native_helper.sh", "scripts/native_helper_app_info.plist",
+    "scripts/native_helper_artifact.py",
+    ".github/workflows/prepare-signed-native-helper-source.yml",
+}
+
 PYTHON_RUNTIME_ARCHIVES = {
     Path("runtime/python-runtime-macos-arm64.zip"),
     Path("runtime/python-runtime-macos-x86_64.zip"),
@@ -192,7 +217,7 @@ TEXT_SUFFIXES = {".json", ".m", ".md", ".plist", ".py", ".sh", ".yaml", ".yml"}
 
 
 def package_member_mode(relative: Path) -> int:
-    return 0o100755 if relative == NATIVE_HELPER_EXECUTABLE else 0o100644
+    return 0o100755 if relative in ({NATIVE_HELPER_EXECUTABLE} | PRIVATE_NATIVE_BINARIES) else 0o100644
 
 
 @dataclass(frozen=True)
@@ -261,6 +286,8 @@ def package_files(root: Path) -> tuple[set[Path], list[str]]:
     native_root = root / "native"
     if native_root.exists() or native_root.is_symlink():
         files.update(NATIVE_HELPER_FILES)
+    if any((root / path).exists() or (root / path).is_symlink() for path in (PRIVATE_NATIVE_APP, PRIVATE_NATIVE_MANIFEST)):
+        files.update(PRIVATE_NATIVE_FILES)
     runtime_root = root / "runtime"
     if runtime_root.exists() or runtime_root.is_symlink():
         files.update(PYTHON_RUNTIME_FILES)
@@ -329,8 +356,8 @@ def _validate_file(root: Path, relative: Path, errors: list[str]) -> None:
         return
     if relative in ALLOWED_IMAGE_FILES:
         return
-    if relative in NATIVE_HELPER_OPAQUE_FILES:
-        if relative == NATIVE_HELPER_EXECUTABLE:
+    if relative in NATIVE_HELPER_OPAQUE_FILES | PRIVATE_NATIVE_OPAQUE_FILES:
+        if relative in {NATIVE_HELPER_EXECUTABLE} | PRIVATE_NATIVE_BINARIES:
             if path.read_bytes()[:4] not in {
                 b"\xca\xfe\xba\xbe",
                 b"\xbe\xba\xfe\xca",
@@ -549,6 +576,139 @@ def _validate_native_helper_manifest(root: Path) -> list[str]:
     return errors
 
 
+def _validate_private_native_manifest(root: Path) -> list[str]:
+    """Bind an optional committed helper to its reviewed source and exact bytes."""
+
+    if not any((root / path).exists() or (root / path).is_symlink() for path in (PRIVATE_NATIVE_APP, PRIVATE_NATIVE_MANIFEST)):
+        return []
+    manifest_path = root / PRIVATE_NATIVE_MANIFEST
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return ["private Native helper manifest is missing or unsafe"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"private Native helper manifest is invalid: {exc}"]
+    if not isinstance(manifest, dict):
+        return ["private Native helper manifest root must be an object"]
+
+    errors: list[str] = []
+    expected_top_level_keys = {
+        "app_files",
+        "app_name",
+        "architectures",
+        "binary_sha256",
+        "build_environment",
+        "build_inputs",
+        "bundle_identifier",
+        "executable",
+        "executables",
+        "minimum_macos",
+        "minimum_macos_by_architecture",
+        "notarization_checked",
+        "notarized",
+        "plugin_version",
+        "schema_version",
+        "signature",
+        "source_commit",
+        "source_files",
+        "team_id",
+        "workflow_commit",
+    }
+    if set(manifest) != expected_top_level_keys:
+        errors.append("private Native helper manifest top-level key inventory drift")
+    missing_source_files = [
+        relative
+        for relative in sorted(PRIVATE_NATIVE_SOURCE_FILES)
+        if not (root / Path(relative)).is_file()
+        or (root / Path(relative)).is_symlink()
+    ]
+    if missing_source_files:
+        errors.append("private Native helper manifest source inputs are missing or unsafe")
+    expected_source_files = {
+        relative: _sha256_path(root / Path(relative))
+        for relative in sorted(PRIVATE_NATIVE_SOURCE_FILES)
+        if relative not in missing_source_files
+    }
+    if manifest.get("source_files") != expected_source_files:
+        errors.append("private Native helper manifest source hashes do not match reviewed source")
+    missing_build_inputs = [
+        relative
+        for relative in sorted(PRIVATE_NATIVE_BUILD_INPUT_FILES)
+        if not (REPO_ROOT / relative).is_file()
+        or (REPO_ROOT / relative).is_symlink()
+    ]
+    if missing_build_inputs:
+        errors.append("private Native helper manifest build inputs are missing or unsafe")
+    expected_build_inputs = {
+        relative: _sha256_path(REPO_ROOT / relative)
+        for relative in sorted(PRIVATE_NATIVE_BUILD_INPUT_FILES)
+        if relative not in missing_build_inputs
+    }
+    if manifest.get("build_inputs") != expected_build_inputs:
+        errors.append("private Native helper manifest build-input hashes do not match reviewed tooling")
+    build_environment = manifest.get("build_environment")
+    if (
+        not isinstance(build_environment, dict)
+        or set(build_environment) != {"clang", "linker", "macos_sdk", "macos_sdk_path", "xcode_path"}
+        or any(
+            not isinstance(value, str) or not value.strip()
+            for value in build_environment.values()
+        )
+    ):
+        errors.append("private Native helper manifest build environment provenance is invalid")
+
+    app_members = PRIVATE_NATIVE_FILES - {PRIVATE_NATIVE_MANIFEST}
+    expected_app_files = {
+        relative.relative_to("native").as_posix(): _sha256_path(root / relative)
+        for relative in sorted(app_members, key=lambda item: item.as_posix())
+        if (root / relative).is_file()
+    }
+    if manifest.get("app_files") != expected_app_files:
+        errors.append("private Native helper manifest app hashes do not match bundled bytes")
+    expected_binary_hashes = {
+        kind: _sha256_path(root / PRIVATE_NATIVE_APP / "Contents/MacOS" / name)
+        for kind, name in PRIVATE_NATIVE_EXECUTABLES.items()
+        if (root / PRIVATE_NATIVE_APP / "Contents/MacOS" / name).is_file()
+    }
+    if manifest.get("binary_sha256") != expected_binary_hashes:
+        errors.append("private Native helper manifest binary hash does not match")
+
+    plugin_manifest = root / ".codex-plugin" / "plugin.json"
+    try:
+        plugin_version = json.loads(plugin_manifest.read_text(encoding="utf-8"))["version"]
+    except (OSError, KeyError, json.JSONDecodeError):
+        plugin_version = None
+    expected_metadata = {
+        "schema_version": 1,
+        "app_name": "AppleRemindersNativeHelper.app",
+        "architectures": ["arm64", "x86_64"],
+        "bundle_identifier": "io.github.oscar-v4.apple-reminders.native-helper",
+        "executable": "apple-reminders-image-helper",
+        "executables": PRIVATE_NATIVE_EXECUTABLES,
+        "minimum_macos": "14.0",
+        "minimum_macos_by_architecture": {kind: {"arm64": "14.0", "x86_64": "14.0"} for kind in PRIVATE_NATIVE_EXECUTABLES},
+        "notarization_checked": True,
+        "notarized": True,
+        "plugin_version": plugin_version,
+        "signature": "developer-id",
+        "team_id": "V8347N9346",
+    }
+    for key, expected in expected_metadata.items():
+        if manifest.get(key) != expected:
+            errors.append(f"private Native helper manifest {key} drift")
+    source_commit = manifest.get("source_commit")
+    if not isinstance(source_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit
+    ):
+        errors.append("private Native helper manifest source_commit is not a full commit hash")
+    workflow_commit = manifest.get("workflow_commit")
+    if not isinstance(workflow_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", workflow_commit
+    ):
+        errors.append("private Native helper manifest workflow_commit is not a full commit hash")
+    return errors
+
+
 def validate_document_mirrors(
     repo_root: Path = REPO_ROOT,
     plugin_root: Path = PLUGIN_ROOT,
@@ -629,6 +789,7 @@ def audit_source(root: Path, *, strict_worktree: bool = False) -> AuditResult:
     for relative in sorted(files, key=lambda path: path.as_posix()):
         _validate_file(root, relative, errors)
     errors.extend(_validate_native_helper_manifest(root))
+    errors.extend(_validate_private_native_manifest(root))
     errors.extend(_validate_python_runtime(root))
     findings = scan_worktree_for_forbidden(root)
     if strict_worktree:
