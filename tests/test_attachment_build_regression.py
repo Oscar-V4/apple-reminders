@@ -1,4 +1,5 @@
 """Data-free regression coverage for the v0.6.1 attachment preflight failures."""
+from contextlib import closing
 from pathlib import Path
 import json
 import sqlite3
@@ -55,7 +56,7 @@ class AttachmentBuildRegressionTests(unittest.TestCase):
         self.assertEqual(doctor.schema_fingerprint(schema),
                          '82761d59e465cf4c90ca8c98bb51eab498c6976e81d608023535f3bf0ec63d62')
         identity = capabilities.RuntimeIdentity('26.5.2', '25F84', '7.0', '3976')
-        with sqlite3.connect(':memory:') as con:
+        with closing(sqlite3.connect(':memory:')) as con:
             con.row_factory = sqlite3.Row
             for table, columns in schema.items():
                 con.execute(f'CREATE TABLE "{table}" (' + ','.join(f'"{c}"' for c in sorted(columns)) + ')')
