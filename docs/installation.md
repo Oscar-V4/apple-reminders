@@ -6,7 +6,8 @@ The latest published public beta remains
 [v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0), with
 [verified immutable evidence](release-evidence/public-beta-0.7.0.md).
 Use the README's v0.7.1 commands only after a matching published release and
-canonical verification. Fresh v0.7.1 helper signing is pending; see the
+canonical verification. Matching v0.7.1 helpers and local package checks have
+passed; final CI and publication remain pending. See the
 [patch signoff](release-evidence/patch-candidate-0.7.1.md).
 
 ## Patch candidate contract
@@ -18,8 +19,8 @@ canonical verification. Fresh v0.7.1 helper signing is pending; see the
 | Legacy URL mode | `--experimental` is only a legacy hybrid URL opt-in, with the same 15-tool inventory |
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
-| EventKit helper | Existing v0.7.0 artifact retained; fresh v0.7.1 signed/notarized bundle pending |
-| Native helper | Existing v0.7.0 artifact retained; fresh v0.7.1 signed universal bundle pending; clean-user acceptance remains pending |
+| EventKit helper | Verified v0.7.1 signed, notarized, and stapled bundle |
+| Native helper | Verified v0.7.1 signed universal bundle; packaged image acceptance passed on the admitted maintainer Mac; clean-user acceptance remains pending |
 
 ## Bundled runtime and Finder-launched Codex
 

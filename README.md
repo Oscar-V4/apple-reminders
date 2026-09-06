@@ -17,8 +17,8 @@ The latest published public beta remains
 [immutable publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md).
 
 The v0.7.1 patch is limited to exact image attachment IDs in verified receipts
-and clearer inconclusive-framework diagnostics. Fresh version-matched helper
-signing, final integration/testing, and publication remain pending. See the
+and clearer inconclusive-framework diagnostics. Matching signed helpers and
+local package checks are verified; final CI and publication remain pending. See the
 [patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
 Use the commands below only after the
 [v0.7.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
@@ -32,10 +32,9 @@ startup exposes **9 Core and diagnostic tools** and rejects Native dispatch.
 exposes 15 tools. Default URL writes store **EventKit URL metadata only**.
 An explicit attachment action adds or changes a native URL card.
 
-The candidate retains the prebuilt signed universal helper design, without a
-user compiler. The checked-in v0.7.0 helper artifacts remain historical inputs
-until fresh v0.7.1 bundles are signed; their current version mismatch must fail
-artifact checks. Clean-user acceptance remains pending. Exact OS/app/schema
+The candidate includes verified v0.7.1 signed universal helpers, without a
+user compiler. The packaged image flow passed on the admitted maintainer Mac;
+clean-user acceptance remains pending. Exact OS/app/schema
 admission still applies, and section/tag functionality lacks current acceptance
 evidence. No new private capability admission is part of this patch scope.
 
