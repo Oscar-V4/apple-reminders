@@ -652,6 +652,20 @@ class PurposeSkillLayerTests(unittest.TestCase):
         self.assertLess(skill_text.index(core_instruction), skill_text.index(diagnosis_instruction))
         self.assertNotIn("On first use or after an environment change, run", skill_text)
 
+    def test_native_skills_distinguish_admitted_preflight_from_blocking_reason(self) -> None:
+        for name in ("apple-reminders", "apple-reminders-attachment-maintenance"):
+            with self.subTest(skill=name):
+                text = " ".join((PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text().split())
+                self.assertIn("`runtime_state=runtime_unverified`", text)
+                self.assertIn("`reason_code=runtime_verification_required` is an admitted metadata preflight", text)
+                self.assertIn("Stop on `available=false` or a blocking `reason_code`", text)
+                self.assertIn("`native_helper_unavailable`", text)
+                self.assertIn("after the write" if name.endswith("attachment-maintenance") else "follows the write", text)
+        attachment = " ".join((PLUGIN_ROOT / "skills/apple-reminders-attachment-maintenance/SKILL.md").read_text().split())
+        self.assertIn("warning alone is inconclusive when the exact capability is available", attachment)
+        self.assertIn("do not repeat the original mutation", attachment)
+        self.assertIn("Unresolved or ambiguous state stops the write chain", attachment)
+
 
 if __name__ == "__main__":
     unittest.main()

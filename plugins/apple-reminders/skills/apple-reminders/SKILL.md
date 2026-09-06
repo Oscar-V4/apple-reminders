@@ -55,9 +55,14 @@ Read [references/public-interface.md](references/public-interface.md) only when 
    result says `support_tier=experimental_internals`, `available=true`, and the
    build/schema admission passed. Resolve the exact reminder and use the public
    Native tools: inspect with `inspect_reminder_native`, then pass a fresh opaque
-   Reference to `organize_reminder` or `change_reminder_attachment`. Never weaken
-   `runtime_unverified`, `unsupported_build`, `compiler_required`, or a
-   schema-fingerprint failure.
+   Reference to `organize_reminder` or `change_reminder_attachment`.
+   `runtime_state=runtime_unverified` with
+   `reason_code=runtime_verification_required` is an admitted metadata preflight
+   when `available=true`; runtime prerequisites are checked during the operation
+   and final verification follows the write. Stop on `available=false` or a
+   blocking `reason_code`, including `runtime_unverified`, `unsupported_build`,
+   `native_helper_unavailable`, `compiler_required`, or schema mismatch. Follow
+   any failed runtime Receipt; admission alone never proves write success.
 9. After a write, trust only the returned Receipt. `verified` requires a fresh identifier-based read whose canonical projection matches the requested delta plus every stable user-authored field, including the complete alarm multiset, due, recurrence, completion state, and destination list. Any preserved alarm loss or transformation issues no fresh Reference. `committed_verification_pending` and `partial_success` require another fresh read before any write.
 
 ## Permission and diagnosis

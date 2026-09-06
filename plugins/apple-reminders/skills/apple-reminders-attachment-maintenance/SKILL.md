@@ -19,9 +19,17 @@ require enabling a mode or installing developer tools.
    a text alternative only when it satisfies the request or the user agrees.
 2. For an explicitly requested native attachment, run
    `diagnose_reminders {scope:"attachments"}` first. Continue only when the
-   exact action's Experimental capability is `available=true`; stop on
-   `runtime_unverified`, `unsupported_build`, `compiler_required`, or schema
-   mismatch. Then call `read_reminder` for the exact destination and fresh
+   exact action's Experimental capability is `available=true` and build/schema
+   admission passed. `runtime_state=runtime_unverified` together with
+   `reason_code=runtime_verification_required` is an admitted metadata preflight:
+   continue the requested operation, whose backend checks runtime prerequisites
+   and verifies the result after the write. A static private-framework path
+   warning alone is inconclusive when the exact capability is available.
+   Stop on `available=false` or a blocking `reason_code`, including
+   `runtime_unverified`, `unsupported_build`, `native_helper_unavailable`,
+   `compiler_required`, or schema mismatch. A failed runtime operation is still
+   a failure; follow its Receipt rather than treating preflight admission as
+   success. Then call `read_reminder` for the exact destination and fresh
    opaque reference and inspect the exact native state.
 3. Resolve exactly one local source image, URL, existing destination `attachment_id`, or exact active source Reminder plus image attachment ID. For cross-reminder copy, call `read_reminder` and native attachment inspection for the source immediately before the write. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
 4. Call `change_reminder_attachment` with the fresh reference and exactly one action.
