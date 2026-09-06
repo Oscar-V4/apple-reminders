@@ -145,8 +145,8 @@ class PublicBetaClaimTests(unittest.TestCase):
             (
                 "launch copy",
                 (Path("docs/launch/public-beta-launch-kit.md"),),
-                "release candidate",
-                "public prerelease",
+                "isPrerelease:true",
+                "isPrerelease:false",
             ),
         )
 
@@ -206,7 +206,7 @@ class PublicBetaClaimTests(unittest.TestCase):
         version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "This guide describes the **Unreleased source candidate**", "This guide describes the **published release**", "version identity boundary"),
+             "This guide describes the **published public beta**", "This guide describes the **general-availability release**", "version identity boundary"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
              "15 tools", "9 tools", "default tool inventory"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
@@ -272,7 +272,7 @@ class PublicBetaClaimTests(unittest.TestCase):
 
     def test_native_candidate_keeps_evidence_and_core_availability_boundaries(self) -> None:
         for old, new in (
-            ("publication and clean-user acceptance remain pending", "signed Native release has shipped"),
+            ("clean-user acceptance remains pending", "clean-user acceptance is complete"),
             ("Sections and tags do not yet have\nacceptance evidence", "Sections and tags work on every supported build"),
             ("Missing or unavailable Native support leaves healthy Core usable", "Missing Native support disables all Core operations"),
         ):

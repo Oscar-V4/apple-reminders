@@ -144,7 +144,7 @@ def _require_current_contract(
 ) -> None:
     """Bind reader-facing setup claims to this candidate's actual startup contract."""
     claims = (
-        (r"guide describes (?:the )?Unreleased source candidate", "version identity boundary"),
+        (rf"guide describes (?:the )?published public beta for {re.escape(tag)}\b", "version identity boundary"),
         (r"\b15\s+tools\b", "default tool inventory"),
         (r"--core-only.{0,100}?9 Core and diagnostic tools", "core-only inventory"),
         (r"--experimental.{0,100}?legacy hybrid URL opt-in", "legacy URL opt-in boundary"),
@@ -258,7 +258,9 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
     _require_all(
         launch,
         (
-            "release candidate",
+            "published",
+            "public beta",
+            "isPrerelease:true",
             "does not create a tag or GitHub Release",
             "canonical alarm projection",
             "exact read-back",
@@ -273,8 +275,6 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         LAUNCH_KIT,
         errors,
     )
-    if "public prerelease" in launch:
-        errors.append(f"{LAUNCH_KIT.as_posix()}: stale published-release claim")
 
     readme_path = Path("README.md")
     readme = texts[readme_path]
@@ -323,7 +323,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "Ordinary users need no Xcode or Command Line Tools",
             "Source compilation cannot grant OS/app/schema admission",
             "still need acceptance testing on fresh nondeveloper Macs",
-            "publication and clean-user acceptance remain pending",
+            "clean-user acceptance remains pending",
             "Sections and tags do not yet have acceptance evidence",
             "Missing or unavailable Native support leaves healthy Core usable",
         ),

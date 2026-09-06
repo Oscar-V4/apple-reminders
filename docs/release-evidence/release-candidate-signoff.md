@@ -1,10 +1,15 @@
-# v0.7.0 Unreleased candidate signoff
+# v0.7.0 public beta signoff and candidate history
 
-Status: **signed artifacts and candidate package checks verified; not published**.
-This record separates observed candidate results from pending release and
-acceptance gates. Evidence below was recorded by the coordinating release task
-against the assembled artifact checkpoint `7383736`, before this documentation
-revision. It does not claim that a tag or immutable release already exists.
+Status: **published immutable public beta; release verification passed**.
+The release remains `isPrerelease:true`, not general availability. The
+[versioned publication record](public-beta-0.7.0.md) contains the exact tag,
+asset digests, successful four-job release run, and independent local verifier
+result. Clean-user and capability-specific acceptance remain separate.
+
+The signing and early package evidence below was recorded against assembled
+artifact checkpoint `7383736`. Its 1,031-test count and smoke ZIP hash are
+historical checkpoint evidence; final release validation supersedes them as
+recorded below without changing what those earlier checks tested.
 
 ## Verified signing evidence
 
@@ -39,19 +44,19 @@ Reminders operations ran or passed final read-back.
 - Smoke ZIP SHA-256:
   `d4ddbeb64cf48ace65f0e4bbfde88c8fb0d8dbdfeade6ab7d6be3ba834c94e04`.
   This identifies the tested candidate ZIP only. Documentation/package changes
-  alter deterministic bytes; it is not the eventual published release digest.
+  alter deterministic bytes; it is not the published release digest.
 
 No user Reminder titles, identifiers, attachment contents, or other private
 content are included in this public record. Private read-only observations do
 not replace synthetic Native write acceptance or clean-user testing.
 
-## Remaining release and acceptance gates
+## Final release and remaining acceptance gates
 
 | Gate | Current status | Required next evidence |
 | --- | --- | --- |
-| Final candidate source/package validation | Repeat for final tag inputs | Full suite, source audit, mirrors/claims, deterministic rebuild and exact signed-component inventory after final changes |
-| Bundled Python provenance | Reverify against final candidate tag | Both architecture capsules and trusted source/workflow history |
-| Published release authenticity | Pending publication | Exact tag on canonical main history, immutable two-asset release, shared release SLSA statement, canonical verifier and final read-only job |
+| Final source/package validation | Passed | 1,035 tests with one skip; PR #56 CI four jobs passed; release source audit and deterministic rebuild verified |
+| Bundled Python provenance | Verified | Release workflow and independent local canonical verifier checked both capsules and trusted history |
+| Published release authenticity | Verified public beta | Immutable two-asset release, exact tag, shared SLSA, four successful release jobs, and independent local canonical verification |
 | Clean-user Core permission and CRUD | External acceptance pending | Fresh allow/deny and upgrade identity; real Intel and minimum macOS 14 execution |
 | Native synthetic image acceptance | Passed on admitted arm64 host | [Packaged image flow](v0.7.0-native-image-acceptance.md) with unavailable developer-tool directory; fresh-user and other capability testing remain separate |
 | Sections and tags | No current acceptance evidence | Exact reviewed command-schema and operation evidence before claiming support |
@@ -60,20 +65,19 @@ not replace synthetic Native write acceptance or clean-user testing.
 The release verifier authenticates the Native manifest and expanded app bytes
 without executing Native helper operations. A partial or invalid Native pair
 blocks release. The generic verifier permits older releases with no Native pair;
-this candidate's final inventory must explicitly include both complete signed
-helper pairs. Missing Native availability at runtime still leaves healthy Core
+the published package includes both complete signed helper pairs. Missing Native availability at runtime still leaves healthy Core
 usable.
 
-## Remaining signoff procedure
+## Post-publication boundary
 
-1. Preserve the authenticated source/workflow commits and signed bytes in the
-   final release history. Record any subsequent synthetic acceptance separately.
-2. Rerun final source/package checks after documentation changes. Keep metadata-only
-   Core URL behavior and explicit attachment-card actions distinct.
-3. Publish only the reviewed immutable candidate tag, then run
-   `python3 scripts/verify_release_assets.py v0.7.0` from a clean tag checkout.
-4. Update publication status only after the canonical verifier and final workflow
-   succeed. External testing and social announcements remain separate actions.
+The release workflow and separate local canonical verifier passed. Installed
+package smoke passed in default, core-only, and legacy URL modes. These results
+do not establish that the user's currently running Codex task has reloaded the
+new plugin; installation and a new task are separate steps.
+
+Future source/package edits require fresh tests and produce different ZIP bytes.
+Keep the published asset digests in the versioned record unchanged. External
+acceptance, demo recording, and social announcements remain separate work.
 
 The closed external tester receipt retains the historical
 `clt_only_experimental` scenario. It cannot establish Native operation on a

@@ -2,7 +2,7 @@
 
 This matrix audits the current checked-out public interface as composed user journeys. The live source of truth for tool names and closed actions is `plugins/apple-reminders/schemas/mcp-tools.json`; this document records the safe workflow around that interface.
 
-This is the **v0.7.0 Unreleased source candidate** contract. Default discovery
+This is the **v0.7.0 published public beta** contract. Default discovery
 contains 15 tools: Core 8, diagnosis 1, and Native/Recovery 6. `--core-only`
 exposes nine and rejects Native dispatch. `--experimental` retains 15 tools and
 opts in only to legacy hybrid URL composition. See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md).
@@ -10,9 +10,9 @@ opts in only to legacy hybrid URL composition. See [ADR 0023](decisions/0023-nat
 Default Core `url` writes EventKit metadata and preserves existing native cards.
 Use explicit attachment actions for a native URL card, or a contextual note link
 when visible text is the goal. A metadata receipt does not prove card rendering.
-Signed candidate artifacts and packaged startup smoke are verified; the
+Signed artifacts, packaged startup smoke, and immutable release verification passed; the
 [signoff record](release-evidence/release-candidate-signoff.md) separates those
-results from still-pending publication, clean-user acceptance, and
+results from still-pending clean-user acceptance and
 operation-specific compatibility evidence.
 
 ## Evidence boundary

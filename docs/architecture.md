@@ -7,11 +7,11 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The Unreleased candidate discovers 15 tools by default. Explicit `--core-only`
+The v0.7.0 public beta discovers 15 tools by default. Explicit `--core-only`
 restricts discovery to nine Core/Diagnostics tools and rejects Native calls
 before dispatch. `--experimental` selects legacy hybrid URL behavior only, with
 the same 15-tool catalog. Each session owns its mode and schema copy. This
-supersedes the default-mode decision in ADR 0021 for the candidate, without
+supersedes the default-mode decision in ADR 0021 for v0.7.0, without
 changing historical releases. See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md).
 
 ### Bundled execution environment
@@ -118,7 +118,7 @@ user-facing promise.
      There is no runtime opt-out; sections and tags still lack acceptance evidence.
    - Uses a verified prebuilt signed universal Native helper bundle by default.
      Candidate signatures, notarization/stapling, and provenance are verified;
-     publication and clean-user acceptance remain pending. See the
+     publication verification passed; clean-user acceptance remains pending. See the
      [signoff record](release-evidence/release-candidate-signoff.md).
      Explicit contributor `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1` permits
      source fallback; fixed developer-directory compiler selection never grants
