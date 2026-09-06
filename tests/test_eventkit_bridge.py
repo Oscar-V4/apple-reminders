@@ -2067,7 +2067,7 @@ class EventKitContractTests(unittest.TestCase):
             ):
                 eventkit_bridge._bundled_helper_inventory()
 
-    def test_core_inventory_accepts_only_complete_safe_native_pair(self) -> None:
+    def test_core_inventory_is_independent_of_optional_native_damage(self) -> None:
         import shutil
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2087,28 +2087,23 @@ class EventKitContractTests(unittest.TestCase):
             ):
                 baseline = eventkit_bridge._bundled_helper_inventory()
                 optional_app.mkdir(mode=0o755)
-                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
-                    eventkit_bridge._bundled_helper_inventory()
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_manifest.write_text("{}", encoding="utf-8")
                 optional_manifest.chmod(0o644)
                 self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_manifest.chmod(0o666)
-                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
-                    eventkit_bridge._bundled_helper_inventory()
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_manifest.unlink()
                 optional_manifest.symlink_to(native_root / eventkit_bridge.BUNDLED_HELPER_MANIFEST_NAME)
-                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
-                    eventkit_bridge._bundled_helper_inventory()
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_manifest.unlink()
                 optional_manifest.write_text("{}", encoding="utf-8")
                 optional_manifest.chmod(0o644)
                 optional_app.rmdir()
                 optional_app.symlink_to(app, target_is_directory=True)
-                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
-                    eventkit_bridge._bundled_helper_inventory()
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_app.unlink()
-                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
-                    eventkit_bridge._bundled_helper_inventory()
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
                 optional_manifest.unlink()
                 (native_root / "unexpected").write_text("extra")
                 with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):

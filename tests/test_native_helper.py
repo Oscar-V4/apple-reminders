@@ -33,6 +33,7 @@ class NativeTrustTests(unittest.TestCase):
         info = dict(CFBundleIdentifier=native.BUNDLE_ID, CFBundleExecutable=native.EXECUTABLES['image'], CFBundlePackageType='APPL', CFBundleShortVersionString='0.6.1', CFBundleVersion='0.6.1', LSMinimumSystemVersion='14.0')
         (self.app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
         (self.app / 'Contents/_CodeSignature/CodeResources').write_bytes(b'synthetic signature')
+        (self.app / 'Contents/CodeResources').write_bytes(b'synthetic stapled ticket')
         data = native.trust.BUNDLED_HELPER_PATH.read_bytes()
         for name in native.EXECUTABLES.values():
             path = self.app / 'Contents/MacOS' / name
@@ -54,6 +55,16 @@ class NativeTrustTests(unittest.TestCase):
             for kind, name in native.EXECUTABLES.items():
                 self.assertEqual(native.resolve_helper(kind), self.app/'Contents/MacOS'/name)
         self.assertTrue(all(call.args[0][0] == '/usr/bin/codesign' for call in self.runner.call_args_list))
+
+    def test_stapled_ticket_is_required_and_matches_release_inventory(self):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import verify_native_helper
+        release_files, _ = verify_native_helper._app_inventory(self.app)
+        self.assertEqual(release_files, native._inventory(self.app))
+        (self.app / 'Contents/CodeResources').unlink()
+        with self.assertRaises(native.NativeHelperUnavailable):
+            native.resolve_helper()
+        self.runner.assert_not_called()
 
     def test_tampered_source_or_binary_is_rejected_before_signature(self):
         for path in (self.root/native.SOURCES[0], self.app/'Contents/MacOS'/native.EXECUTABLES['sections']):

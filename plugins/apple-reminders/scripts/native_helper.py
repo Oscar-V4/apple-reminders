@@ -42,7 +42,8 @@ def _directory(path: Path) -> None:
 
 
 def _inventory(app: Path) -> dict[str, str]:
-    expected = {"Contents/Info.plist": 0o644, "Contents/_CodeSignature/CodeResources": 0o644}
+    expected = {"Contents/Info.plist": 0o644, "Contents/_CodeSignature/CodeResources": 0o644,
+                "Contents/CodeResources": 0o644}
     expected.update({f"Contents/MacOS/{name}": 0o755 for name in EXECUTABLES.values()})
     dirs = {"Contents", "Contents/MacOS", "Contents/_CodeSignature"}
     found, found_dirs = {}, set()

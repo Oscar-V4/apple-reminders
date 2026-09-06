@@ -1779,7 +1779,7 @@ def _handle_message(runtime: McpRuntime, message: Any) -> dict[str, Any] | None:
                     + (
                         " Experimental tools are enabled; URL writes also use native attachments. Gates apply."
                         if runtime._enable_experimental else
-                        " Native tools are discoverable by default; capability checks still apply. Core URLs are metadata only."
+                        " Native tools are discoverable by default; capability checks apply. Core URLs are metadata only."
                         if runtime._enable_native_tools else
                         " Core mode: 9 tools; URL metadata only. Native tools are disabled."
                     )
