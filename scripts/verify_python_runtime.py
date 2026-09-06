@@ -356,13 +356,13 @@ print(json.dumps({'architecture':platform.machine(),'python':platform.python_ver
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "runtime-verifier", "version": "1"}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )) + '\n'
-        for experimental in (False, True):
-            argv = [str(executable), str(plugin_root.resolve() / "mcp/server.py"), *(["--experimental"] if experimental else [])]
+        for flags, expected_count in (([], 15), (["--core-only"], 9), (["--experimental"], 15)):
+            argv = [str(executable), str(plugin_root.resolve() / "mcp/server.py"), *flags]
             result = subprocess.run(argv, input=wire, capture_output=True, text=True, env=env, timeout=30, check=False)
             if result.returncode != 0:
                 raise VerificationError("bundled runtime MCP discovery failed")
             responses = [json.loads(line) for line in result.stdout.splitlines()]
-            if len(responses) != 2 or len(responses[1]["result"]["tools"]) != (15 if experimental else 9):
+            if len(responses) != 2 or len(responses[1]["result"]["tools"]) != expected_count:
                 raise VerificationError("bundled runtime MCP tool profile drift")
 
 

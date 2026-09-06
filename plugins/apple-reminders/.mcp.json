@@ -2,7 +2,7 @@
   "mcpServers": {
     "apple-reminders-local": {
       "title": "Apple Reminders",
-      "description": "Local Apple Reminders Core: read, create, update, complete, and delete through public EventKit with verified results. Experimental tools are off by default.",
+      "description": "Local Apple Reminders: 15 typed tools with exact reads and verified changes. Native attachments, organization, and recovery check capability support before use. Core URL fields remain metadata-only.",
       "icons": [
         {
           "src": "./assets/icon.png",

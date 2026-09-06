@@ -116,6 +116,7 @@ def run_server(
     eventkit_bridge_path: Path | None = None,
     doctor_path: Path | None = None,
     enable_experimental: bool = False,
+    core_only: bool = False,
 ) -> list[dict[str, Any]]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -129,7 +130,9 @@ def run_server(
         if path is not None:
             env[TEST_BACKEND_ENVIRONMENTS[name]] = str(path)
     completed = subprocess.run(
-        [sys.executable, str(SERVER_HARNESS), *(["--experimental"] if enable_experimental else [])],
+        [sys.executable, str(SERVER_HARNESS),
+         *(["--experimental"] if enable_experimental else []),
+         *(["--core-only"] if core_only else [])],
         cwd=PLUGIN_ROOT,
         env=env,
         input="".join(json.dumps(message) + "\n" for message in messages),
@@ -990,7 +993,7 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(initialized["serverInfo"]["name"], "apple-reminders-local")
         self.assertEqual(
             {tool["name"] for tool in responses[1]["result"]["tools"]},
-            CORE_TOOLS | DIAGNOSTIC_TOOLS,
+            PUBLIC_TOOLS,
         )
         self.assertTrue(
             all(
