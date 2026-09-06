@@ -1,16 +1,16 @@
-# Apple Reminders 0.7.0 Unreleased candidate launch kit
+# Apple Reminders 0.7.0 public beta launch kit
 
-This is the maintained launch packet for the `v0.7.0` release candidate. This
-documentation change does not create a tag or GitHub Release, change repository settings, record a demo, or post to a
-social channel. Candidate commands and announcement copy become usable only
-after every publication gate below passes for the exact tag.
+This is the maintained launch packet for the published `v0.7.0` public beta.
+The release is immutable with `isPrerelease:true`; it is not a general-availability
+release. The [publication evidence](../release-evidence/public-beta-0.7.0.md)
+records the successful release workflow and independent canonical verification.
+This documentation update does not create a tag or GitHub Release, record a
+demo, or post to a social channel. The announcement drafts remain unposted copy.
 
-## Candidate source of truth
+## Release source of truth
 
-- Version: the plugin manifest declares `0.7.0`; publication requires a matching
-  signed EventKit helper, signed Native helper, and intended immutable ref
-  `v0.7.0`. Both helper bundles and signing attestations are verified;
-  the release itself is not yet published.
+- Version: the plugin manifest declares `0.7.0`, matching the verified signed
+  EventKit/Native bundles and immutable published ref `v0.7.0`.
 - Distribution: independent, open-source community plugin from this GitHub
   repo marketplace.
 - Stable Core: documented EventKit operations targeting macOS 14+, with a
@@ -22,7 +22,7 @@ after every publication gate below passes for the exact tag.
   store EventKit URL metadata only; explicit attachment actions add native cards.
 - Experimental Internals: the private implementation support tier remains
   version-sensitive. Image, section, and exact recovery helper operations use
-  the candidate's verified prebuilt signed universal Native bundle. Ordinary
+  the package's verified prebuilt signed universal Native bundle. Ordinary
   users need no compiler; sections and tags still lack acceptance evidence.
 - Privacy boundary: the plugin-owned stdio MCP and adapters run on the Mac and
   have no plugin-owned remote backend, but tool results return to Codex under
@@ -45,8 +45,8 @@ overrides; compiler presence never grants compatibility admission.
 Publication requires Developer ID signatures, notarization, stapled tickets
 and verified source provenance for the EventKit helper, Native helper, and both
 Python capsules. EventKit/Native signature, notarization/stapling, and signing
-provenance checks passed for the candidate. Publication and clean-user acceptance
-remain pending. Read the exact manifests and
+provenance checks passed. Publication verification also passed; clean-user
+acceptance remains pending. Read the exact manifests and
 [signoff record](../release-evidence/release-candidate-signoff.md) for evidence:
 
 - [EventKit helper manifest](../../plugins/apple-reminders/native/eventkit-helper-build.json)
@@ -65,17 +65,16 @@ return `verified` or a new Reference when absolute, location, writable-relative,
 or read-only alarms are lost or transformed. This is local exact read-back
 evidence, not proof of sync to every device or shared-list participant.
 
-## Publication and candidate install gate
+## Publication verification and pinned installation
 
-The command that will install the candidate pins one exact ref:
+The public beta installation pins one verified immutable ref:
 
 ```bash
 codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
-Do not distribute these commands as a working release until all of the
-following are true:
+The following publication gates passed for v0.7.0; retain them for future releases:
 
 1. `v0.7.0` resolves to the intended merge commit and the manifest, changelog,
    signed-helper manifest, ZIP name, and checksum inventory agree.
@@ -133,7 +132,7 @@ granted, state that on the title card instead of staging a prompt.
 | Time | Screen and action | Narration boundary |
 | --- | --- | --- |
 | 0–8 s | Title card: “Apple Reminders for Codex · community plugin · public beta.” | “Stable Core uses the local MCP and signed EventKit helper; tool results return to Codex.” |
-| 8–18 s | Show the two pinned candidate commands and the successful canonical verifier result, then start a new Codex task. | “The install is pinned to one immutable tag whose release assets were verified again.” |
+| 8–18 s | Show the two pinned installation commands and the successful canonical verifier result, then start a new Codex task. | “The install is pinned to one immutable tag whose release assets were verified again.” |
 | 18–30 s | Ask for one bounded list read. If the clean subject shows the native Reminders prompt, grant access once. | “Stable Core needs Reminders permission and does not need Xcode.” |
 | 30–48 s | Create synthetic Reminders including one due item with a relative alarm, using only `https://example.com/demo` if a URL is shown. | “A successful write requires the canonical alarm projection and a fresh exact read-back.” |
 | 48–61 s | Change one synthetic title and complete/reopen another item, then read the list again. | “Alarm and stable user state must survive unrelated changes before a Receipt can say verified.” |

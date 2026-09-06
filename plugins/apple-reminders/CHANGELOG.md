@@ -4,11 +4,14 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
-The v0.7.0 candidate contains verified signed, notarized, and stapled EventKit
-and Native bundles with authenticated provenance. Publication and clean-user
-acceptance remain pending. See the [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
+## 0.7.0 — Public beta
 
-## 0.7.0 — Unreleased candidate
+Published as an immutable public beta, with `isPrerelease:true`. The release
+workflow and an independent local canonical verifier passed for the exact tag
+and two assets. This is not a general-availability release. See the
+[publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md)
+and [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
+Clean-user and broader capability acceptance remain separate.
 
 ### Changed
 
@@ -17,17 +20,16 @@ acceptance remain pending. See the [signoff record](https://github.com/Oscar-V4/
 - Release verification authenticates an optional complete Native app/manifest
   pair and its exact signed-source provenance; incomplete pairs block release.
 
-- Source candidate: default discovery includes all 15 tools. Explicit
+- Default discovery includes all 15 tools. Explicit
   `--core-only` exposes nine Core/diagnostic tools and rejects Native dispatch.
   `--experimental` is retained only as a legacy hybrid URL opt-in.
 - Default URL create/change remains EventKit metadata only. Use an explicit
   attachment action for a native URL card.
-- Native helper paths target a verified prebuilt signed universal bundle, with
+- Native helper paths use a verified prebuilt signed universal bundle, with
   no ordinary-user Xcode or Command Line Tools dependency. Source fallback is
   contributor-only through `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`.
   Both helper signatures and signing attestations have been verified. Packaged
-  startup smoke passed; this entry does not announce a published release or
-  completed clean-user acceptance.
+  startup smoke and release verification passed; clean-user acceptance remains pending.
 - Skills diagnose exact capability availability instead of asking users to
   enable Experimental mode. Private support remains `experimental_internals`;
   OS/app/schema admission, reference safety, and final read-back remain strict.

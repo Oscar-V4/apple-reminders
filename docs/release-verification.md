@@ -52,11 +52,14 @@ The command does not access Apple Reminders or local Reminder data. It:
    workflow and source commits. The signed/notarized expanded app must match
    the authenticated manifest; Native helper operations are never executed.
 
-For the v0.7.0 Unreleased candidate, both EventKit and Native artifacts passed
-Developer ID, notarization/stapling, and exact signing-attestation verification.
-The [signoff record](release-evidence/release-candidate-signoff.md) records those
-results separately from the still-pending tag, immutable release, canonical
-post-publication verifier, and clean-user acceptance.
+For the v0.7.0 public beta, both EventKit and Native artifacts passed Developer
+ID, notarization/stapling, and exact signing-attestation verification. The
+immutable release workflow and a separate local canonical verifier passed,
+including exact asset digests, source audit, byte-identical deterministic
+rebuild, and EventKit/Native/Python provenance. See the
+[publication evidence](release-evidence/public-beta-0.7.0.md) and
+[signoff record](release-evidence/release-candidate-signoff.md). Public beta
+publication does not establish clean-user or universal capability acceptance.
 Older releases with no Native pair remain verifiable. A partial or invalid pair
 fails release verification, even though runtime Native unavailability leaves
 healthy Core usable. The signing archive and checksum are authenticated sibling

@@ -58,7 +58,7 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("separate Python installation", " ".join(readme.split()))
         self.assertIn("15 tools", readme)
         self.assertIn("--core-only", readme)
-        self.assertIn("Unreleased source candidate", readme)
+        self.assertIn("published public beta", readme)
         self.assertIn("## Upgrade", readme)
         self.assertIn("## Uninstall", readme)
         self.assertIn("vX.Y.Z", readme)
