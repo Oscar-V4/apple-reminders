@@ -14,24 +14,26 @@ private-interface boundary in
 
 ## Start only from a verified release
 
-The checked-in `v0.6.1` commands are release-candidate instructions, not proof
+The checked-in `v0.7.0` commands are release-candidate instructions, not proof
 that the tag or assets already exist. Do not recruit testers until the exact
 tag is published as an immutable two-asset GitHub Release and the canonical
 verifier succeeds from a clean tag checkout:
 
 ```bash
-python3 scripts/verify_release_assets.py v0.6.1
+python3 scripts/verify_release_assets.py v0.7.0
 ```
 
 That command must re-download the deterministic ZIP and `SHA256SUMS`, verify
 the immutable release and shared two-subject SLSA provenance, bind the exact
 tag to canonical GitHub main, rebuild the ZIP twice, audit source, and verify
-the signed EventKit and Python manifests without accessing Apple Reminders data.
+the signed EventKit, Native, and Python manifests without accessing Apple
+Reminders data. Candidate EventKit/Native artifacts and release signoff remain
+pending; see [v0.7.0 signoff](../release-evidence/release-candidate-signoff.md).
 
 Install only the verified exact ref:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 
@@ -44,19 +46,22 @@ entry does not move its pinned ref.
 - Stable Core uses documented EventKit and targets macOS 14+. A bundled Python
   runtime needs no separate Python installation; Reminders permission is still
   required. Core does not need Xcode or Xcode Command Line Tools.
-- Default discovery contains 9 Core and diagnostic tools. The 6 additional
-  experimental tools require `--experimental` startup. Default URL writes store
-  EventKit URL metadata only.
-- Experimental Internals are private and version-sensitive. The
-  compiler-free private paths and CLT-required private paths remain separate.
+- Default discovery contains 15 tools. `--core-only` restricts it to nine and
+  rejects Native dispatch. `--experimental` only opts in to legacy hybrid URLs;
+  default URL writes store EventKit URL metadata only.
+- Experimental Internals are private and version-sensitive. The historical
+  compiler-free private and CLT-required private labels do not make a compiler
+  an ordinary-user prerequisite in v0.7.0. Helper operations use the verified
+  prebuilt signed universal Native bundle.
 - Every private mutation or exact recovery requires the exact macOS
   version/build, Reminders version/build, and command-schema fingerprint in the
   reviewed allowlist. `runtime_unverified`, `unsupported_build`,
   `schema_unverified`, or `schema_fingerprint_mismatch` stops before mutation.
-- CLT-required preflight uses fixed `/usr/bin/xcode-select -p`, rejects
-  developer environment overrides, ignores `PATH` clang and the
-  `/usr/bin/clang` installer shim, and accepts only the fixed compiler under the
-  selected developer directory. Compiler presence is not compatibility proof.
+  Section and tag acceptance evidence remains absent.
+- Source compilation is contributor-only, with explicit
+  `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`; fixed
+  `/usr/bin/xcode-select -p` selection ignores `PATH` overrides. This does not
+  grant OS/app/schema admission or become an external tester setup step.
 - The plugin-owned MCP and adapters run locally and have no plugin-owned remote
   backend, but tool results return to Codex under the tester's Codex product,
   account, and privacy terms.
@@ -164,12 +169,13 @@ Use an actual macOS 14.x subject rather than deployment-target metadata.
 
 ### `upgrade_identity`
 
-The current release-candidate transition is `v0.6.0` to `v0.6.1`.
+The candidate transition is historical `v0.6.1` to unreleased `v0.7.0`.
+Start only after v0.7.0 is published and verified.
 
-- On a disposable subject with Reminders permission granted to the `v0.6.0`
+- On a disposable subject with Reminders permission granted to the `v0.6.1`
   signed helper, create one synthetic Reminder with an alarm and read it back.
-- Verify `v0.6.1`, remove the plugin and repo marketplace entry, add the repo at
-  `v0.6.1`, re-add the plugin, and start a new Codex task.
+- Verify `v0.7.0`, remove the plugin and repo marketplace entry, add the repo at
+  `v0.7.0`, re-add the plugin, and start a new Codex task.
 - Run a bounded read and one unrelated synthetic change, confirming canonical
   alarm state through a fresh exact read-back.
 - Record only `granted_without_prompt` or `granted_after_prompt`; do not submit
@@ -178,8 +184,12 @@ The current release-candidate transition is `v0.6.0` to `v0.6.1`.
 
 ### `clt_only_experimental`
 
-Use a disposable subject with full Xcode absent and Command Line Tools already
-installed intentionally.
+This closed receipt category is retained for historical compiler-backed release
+testing. It is not the v0.7.0 ordinary Native installation path and cannot
+establish no-compiler Native acceptance. For that new acceptance, use the
+maintainer signoff record until a dedicated closed receipt scenario is added.
+For an older pinned version only, use a disposable subject with full Xcode
+absent and Command Line Tools already installed intentionally.
 
 - Verify and install the exact release, then prove Stable Core remains usable.
 - Record only the state classification; do not submit `xcode-select` output or

@@ -1,14 +1,16 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes the **Unreleased source candidate**. The README's pinned
-v0.6.1 install remains a separate published-version path. Use documentation at
-the exact installed tag when diagnosing older behavior. This source update is
-not evidence that a new signed Native bundle or release has shipped.
+This guide describes the **Unreleased source candidate** for **v0.7.0**.
+Install the README's v0.7.0 commands only after the matching release is published
+and its canonical verifier passes. The candidate label is not publication or
+signed-artifact evidence. The historical
+[v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
+has its own tagged documentation and different startup behavior.
 
 ## Candidate contract
 
-| Area | Unreleased contract |
+| Area | v0.7.0 Unreleased contract |
 |---|---|
 | Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
 | Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
@@ -78,7 +80,9 @@ Private operations require the exact reviewed macOS version/build, Reminders
 version/build, and relevant schema evidence, plus final exact read-back. The
 signed bundle does not override those checks. Sections and tags do not yet have
 acceptance evidence; discovery alone must not be presented as functional support.
-See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md).
+See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md), the
+[dependency/capability matrix](workflow-capability-matrix.md), and the
+[candidate signoff record](release-evidence/release-candidate-signoff.md).
 
 Use targeted, content-free `diagnose_reminders` with
 `execution_mode=metadata_only` before a requested private mutation or after a

@@ -11,11 +11,15 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes the **Unreleased source candidate**. The pinned v0.6.1
-[installation below](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
-retains its published behavior; use its tagged documentation
-when working with that version. No new release or signed Native bundle is
-claimed by this source update.
+This guide describes the **Unreleased source candidate** for **v0.7.0**.
+Before using the installation commands below, confirm that the matching
+[v0.7.0 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0)
+is published and its verification gates passed. These commands do not mean
+that the tag, signed artifacts, or release already exist.
+
+For the historical stable version, use the
+[v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
+and its tagged documentation. Its startup and dependency behavior differ.
 
 The plugin includes a signed Python runtime, so there is **no separate Python
 installation**. The candidate's ordinary startup offers **15 tools**: eight
@@ -30,6 +34,7 @@ for image, section, and exact recovery operations, without a user compiler.
 Signing, notarization, packaged-artifact checks, and clean-Mac acceptance must
 be recorded before this becomes a release claim. Exact OS/app/schema admission
 still applies; section and tag functionality lack current acceptance evidence.
+See the [candidate signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md) for pending evidence.
 
 ## Get started in three steps
 
@@ -37,13 +42,13 @@ You need a Mac running **macOS 14 or newer**, Apple Reminders, and Codex.
 Ordinary reminder work uses bundled, signed and notarized components. You do not
 need Xcode, Command Line Tools, Homebrew, or an Apple Developer membership.
 
-### 1. Install the pinned plugin release
+### 1. Confirm publication, then install the pinned release
 
-Ask Codex to run these commands, or run them in a terminal where the `codex`
-command is available:
+After the matching release is published and verified, ask Codex to run these
+commands, or use a terminal where the `codex` command is available:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.6.1
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 

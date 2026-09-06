@@ -2,15 +2,17 @@
 
 This matrix audits the current checked-out public interface as composed user journeys. The live source of truth for tool names and closed actions is `plugins/apple-reminders/schemas/mcp-tools.json`; this document records the safe workflow around that interface.
 
-The default session exposes nine Core/Diagnostics tools. Six Native and
-Recovery tools require an explicit `--experimental` launch before any listed
-Experimental workflow; all existing admission gates still apply. See
-[ADR 0021](decisions/0021-core-default-experience.md).
+This is the **v0.7.0 Unreleased source candidate** contract. Default discovery
+contains 15 tools: Core 8, diagnosis 1, and Native/Recovery 6. `--core-only`
+exposes nine and rejects Native dispatch. `--experimental` retains 15 tools and
+opts in only to legacy hybrid URL composition. See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md).
 
-In default Core mode, `url` writes only public EventKit metadata and preserves
-existing native cards. Use a contextual note link when visible text is the goal.
-Only Experimental mode retains the hybrid URL workflows described below; a
-metadata-only receipt is not proof of a visible native card.
+Default Core `url` writes EventKit metadata and preserves existing native cards.
+Use explicit attachment actions for a native URL card, or a contextual note link
+when visible text is the goal. A metadata receipt does not prove card rendering.
+Signed candidate artifacts and release acceptance remain pending; the
+[signoff record](release-evidence/release-candidate-signoff.md) separates those gates from
+operation-specific compatibility evidence.
 
 ## Evidence boundary
 
@@ -19,7 +21,7 @@ metadata-only receipt is not proof of a visible native card.
 - Stable Core uses documented EventKit and is independent of Experimental
   Internals. Every private mutation/recovery path requires an exact allowlisted
   macOS version/build, Reminders version/build, and command-schema fingerprint;
-  helper-backed paths also require a compiler. Unknown builds fail before
+  helper-backed paths also require the verified signed bundle. Unknown builds fail before
   private mutation.
 - Recently Deleted eligibility is bounded by Apple's 30-day retention window. Expired or already-purged items are not recoverable through this interface.
 
@@ -28,7 +30,7 @@ metadata-only receipt is not proof of a visible native card.
 | Class | Meaning |
 | --- | --- |
 | **Supported** | The public interface has an exact selector, bounded contract, truthful receipt, and regression coverage. |
-| **Experimental, admitted** | The public workflow remains private and runtime-unverified, but its exact build/schema/compiler preflight passed so operation-specific guards/read-back may proceed. |
+| **Experimental, admitted** | The public workflow remains private and runtime-unverified, but its exact build/schema/bundled-helper preflight passed so operation-specific guards/read-back may proceed. |
 | **Experimental, blocked** | Exact compatibility evidence is absent or mismatched; the workflow fails before mutation and must use a Core/manual substitute. |
 | **Unsafe composition** | Individually valid calls become unsafe when ordered or scoped incorrectly. |
 | **Intentional boundary** | The capability is deliberately absent; the workflow must state the limit and fail closed. |
@@ -36,24 +38,28 @@ metadata-only receipt is not proof of a visible native card.
 ## Runtime dependency boundary
 
 All modes use the packaged Python runtime; there is no separate Python
-installation. Compiler requirements below apply only to the selected advanced
-operation. The package targets macOS 14+, while fresh-user TCC and minimum-OS
-end-to-end execution remain separate acceptance evidence.
+installation. The package targets macOS 14+, while fresh-user TCC and minimum-OS
+execution remain separate acceptance evidence.
 
-| Runtime boundary | Paths | Xcode Command Line Tools |
+| Path | Ordinary dependency | Evidence and availability |
 | --- | --- | --- |
-| **Stable Core** | Core reads and changes through the bundled signed EventKit helper | Not required; Core and default diagnosis never invoke `clang`. |
-| **Experimental, compiler-free private** | Tag mutation, URL-only attachment mutation, and read-only native section, tag, or attachment inspection | Not required; no runtime compilation. |
-| **Experimental, CLT-required private** | Section mutation, image-attachment mutation, and exact Recently Deleted inspection or recovery | Required by the requested operation; compiler diagnosis is a separate explicit opt-in. |
+| Stable Core | Bundled signed EventKit helper and Python; Reminders permission | No Xcode or CLT. New v0.7.0 helper artifact still requires release acceptance. |
+| Native metadata, tags, URL-only attachments, deleted inventory | Guarded private-store adapter | Exact OS/app/schema admission; a read is not write evidence. Tags lack current acceptance evidence. |
+| Native images, sections, exact deleted inspection/recovery | Verified prebuilt signed universal Native bundle | No user compiler. New signed artifact acceptance remains pending; sections lack current compatibility evidence. |
+| Packaging diagnosis | Platform and plugin-owned metadata/static source | No Reminders store/schema, permission, Native runtime, or private admission probes. |
+| Contributor source fallback | Explicit `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1` plus selected developer tools | Development only; cannot bypass exact capability admission. |
 
-## Core-first alternatives
+Healthy Core remains usable when Native support is missing or unavailable.
+A release, however, must reject a partial or invalid Native app/manifest pair.
 
-| Experimental goal | Stable or honest default |
+## Alternatives when a Native capability is unavailable
+
+| Native goal | Alternative when it satisfies the request or the user agrees |
 | --- | --- |
 | Sections | Separate exact Reminder Lists, or an agreed text prefix/heading in title or notes. |
 | Native tags | A plain-text label in title or notes, or a [user-authored Shortcut](https://support.apple.com/en-us/106430) using Apple's documented tag-capable Reminders actions. |
 | Native image | A user-provided remote reference in notes, or a text description; never sync a private local path. |
-| Native URL attachment | Use the Core `url` field for EventKit URL metadata, or a contextual link in notes. A visible native card remains experimental. |
+| Native URL attachment | Use the Core `url` field for EventKit URL metadata, or a contextual link in notes. An explicit attachment action is required for a native card when admitted. |
 | Recently Deleted recovery | Move active items to an archive list before deletion; use the Reminders UI manually when private recovery is blocked. |
 
 ## Capability and workflow matrix
@@ -63,19 +69,19 @@ end-to-end execution remain separate acceptance evidence.
 | Reminder create → exact read | **Supported** | `create_reminder` requires an exact `list_id` and idempotency key. A verified result contains final exact state and may issue a fresh `rev1`. | Local verification is not remote-device convergence. |
 | Exact read → change → read | **Supported** | `read_reminder` issues an opaque `rev1`; `change_reminder` supports one `patch`, `set_completion`, or `move_to_list` action. Omitted fields stay unchanged. Native verification fetches the saved Reminder again by identifier, and the public Module performs its own fresh exact read before issuing another `rev1`. | Re-read immediately before each mutation and stop on stale, pending, partial, or manual-repair results. |
 | Exact read → delete | **Supported** | `delete_reminder` requires a fresh `rev1` and verifies local EventKit absence. | Deletion alone does not prove the Reminders UI, retention duration, or later recoverability. |
-| Recently Deleted list → exact item | **Experimental, admitted only** | Build/schema admission precedes the bounded inventory; exact item mode additionally requires the compiler/helper before issuing `del1`. | Prefer moving active items to an archive list before deletion. On any capability block, use the visible Reminders UI manually; do not fallback. |
-| Exact deleted item → recover | **Experimental, admitted only** | `recover_deleted_reminder` consumes one fresh `del1`, exact destination `list_id`, and idempotency key, with same-account/native/final EventKit verification. | No automatic retry. Unknown/new builds, missing CLT, schema drift, or guard mismatch stop before private save. |
+| Recently Deleted list → exact item | **Experimental, admitted only** | Build/schema admission precedes the bounded inventory; exact item mode additionally requires the verified bundled helper before issuing `del1`. | Prefer moving active items to an archive list before deletion. On any capability block, use the visible Reminders UI manually; do not fallback. |
+| Exact deleted item → recover | **Experimental, admitted only** | `recover_deleted_reminder` consumes one fresh `del1`, exact destination `list_id`, and idempotency key, with same-account/native/final EventKit verification. | No automatic retry. Unknown/new builds, missing/invalid bundled helper, schema drift, or guard mismatch stop before private save. |
 | UI-relative selection such as “top four” | **Supported only with an explicit evidence basis** | Literal UI-relative selection requires direct current-UI observation and exact row-to-ID resolution. If unavailable, show the proposed list/filter/status/sort and use an API snapshot only after the user explicitly approves that reinterpretation. | UI order and API order are different evidence. Stop when duplicate display values prevent exact UI-to-ID resolution. Snapshot-safe pagination still does not replace exact item revalidation before a write. |
-| Cross-reminder image copy | **Experimental, admitted only** | `copy_image` takes fresh source/destination references, one exact attachment, idempotency, exact build/schema/compiler admission, and destination read-back. | Prefer a note link or description. This is not image export and is unavailable on unlisted builds. |
+| Cross-reminder image copy | **Experimental, admitted only** | `copy_image` takes fresh source/destination references, one exact attachment, idempotency, exact build/schema/bundled-helper admission, and destination read-back. | Offer a note link or description only when copying is unavailable. This is not image export and is unavailable on unlisted builds. |
 | “Consolidate, then delete sources” | **Unsafe composition unless dependency-first** | Clarify whether the user wants separate copied attachments on one Reminder (supported) or one composited bitmap (unsupported). Inspect exact sources and destination, copy and verify each agreed image, then delete exact sources one at a time only under separate deletion authority. | “Organize” alone does not authorize deletion. Recovery is an exact post-deletion operation, not a planning substitute for preserving dependencies. Stop before deletion when any transfer is unresolved. |
 | Broad cleanup | **Supported with operational bounds** | Discover summaries first, review/authorize the exact scope, then choose 25–40 candidates per chunk. Obtain each `rev1` just in time, write one item, read it back, and discard the reference before the next item. | The final chunk may be smaller. Halt the run on the first ambiguity, stale state, pending/partial/manual-repair receipt, or failure. Refresh summaries between verified chunks. |
 | Completed brief | **Supported** | `fetch_reminders` uses `status=completed` with explicit `completion_start` and `completion_end` no wider than 90 days. The renderer receives the same bounds and renders a separate Completed section. | Completed items are not mixed into active due buckets. |
 | Timed due and priority display | **Supported subset** | Zoned timed input verifies the requested clock and IANA timezone; explicit floating input verifies local wall-clock fields with no fixed instant. Human priority labels map Apple/EventKit 1–4 to high, 5 to medium, and 6–9 to low while retaining the numeric value. | Zone loss is never silently accepted. Repeated zoned DST hours are rejected before writing. `0` means no priority; bare `pN` labels are not user-facing semantics. |
 | Reminder List CRUD | **Supported subset / Intentional boundary** | Read lists and create-or-return one exact-name list in an exact account with `ensure_reminder_list`. Duplicate exact names return `ambiguous_scope` without an arbitrary destination, including on persisted receipt replay. | Choose an exact list ID after resolving ambiguity. Rename, delete, color, and emblem writes are not public. |
 | Complete a recurring occurrence | **Intentional boundary** | Incomplete recurring reminders return `unsupported_recurring_completion` before writing. The app can advance the original ID to the next occurrence and create a separate completed record. | Complete the intended occurrence once in Reminders. Do not retry the original ID or remove recurrence to bypass the boundary. Reopening an exact completed historical item does not rewind the series. |
-| Section CRUD | **Experimental, blocked initially** | Public tools remain closed, but no exact section command-schema evidence is admitted. | Use separate lists or textual title/note grouping. Rename/delete remain absent. |
-| Tag CRUD | **Experimental, blocked initially** | Public tools remain closed, but no exact tag command-schema evidence is admitted. | Use a plain-text title/note label. Global unused-label deletion remains absent. |
-| Attachment CRUD | **Experimental, admitted only** | Image/URL actions require exact attachment build/schema evidence; image helper paths also require CLT. | Use notes for a Core-safe URL/image reference. Raw export and repair remain absent. |
+| Section CRUD | **Experimental, blocked initially** | The tool is discoverable, but no exact section command-schema evidence is admitted. | Use separate lists or textual title/note grouping. Rename/delete remain absent. |
+| Tag CRUD | **Experimental, blocked initially** | The tool is discoverable, but no exact tag command-schema evidence is admitted. | Use a plain-text title/note label. Global unused-label deletion remains absent. |
+| Attachment CRUD | **Experimental, admitted only** | Image/URL actions require exact attachment build/schema evidence; image helper paths also require the verified signed bundle. | Use notes for a Core-safe URL/image reference. Raw export and repair remain absent. |
 | Dates, alarms, recurrence | **Supported subset / Intentional boundary** | Typed all-day/timed due values, explicit absolute, due-anchored relative, or coordinate-backed location alarms, and one validated recurrence rule are public. The writable relative subset is a bare default-display alarm with an integral offset from `-31536000` through `0`: at most 31,536,000 seconds (365 elapsed days) before due. | Due and alarm intent remain distinct. Relative offsets require an existing or same-request due value. Unsupported trigger, offset, or action variants remain readable as `read_only:true` with bounded action metadata; messaging-alarm writes are not public. |
 | Relative-alarm replacement | **Supported with a read-only boundary** | Supplying `alarms` replaces the complete alarm array. Omitting `alarms` preserves the complete existing array whenever alarm intent is unchanged and the resulting due remains non-null; `alarms:null` and `alarms:[]` explicitly clear it. Setting `due:null` while retaining a relative alarm is rejected; jointly clear alarms or provide a complete non-relative replacement. A non-empty replacement is rejected before mutation when an existing alarm is `read_only:true`, because the plugin cannot preserve that alarm's unsupported trigger, offset, or action metadata through reconstruction. | Read the exact Reminder first. Explicit clear removes every alarm, including read-only alarms; use it only when that complete removal is intended. A lossy native trigger projection cannot prove preservation, so the write remains verification-pending. |
 | Due-relative verification | **Supported as one semantic unit** | If the resulting Reminder contains a relative alarm, a `due` or `alarms` change verifies both fields. A list/account move verifies the destination (`calendar_id` natively and `list_id` publicly), `due`, and `alarms`. Native verification uses a fresh identifier lookup after save; the public Module repeats dependency-expanded matching against a fresh exact read. | Unexpected provider transformations cannot produce `verified`. Only an absent initial start becoming the exact observed first-due start is normalized; existing-start and zone loss still fail verification. The app may display a relative trigger as its primary time; this does not configure its separate Early Reminder control. |
@@ -88,8 +94,8 @@ end-to-end execution remain separate acceptance evidence.
 
 ## Representative workflow: top four, recover, and consolidate images
 
-This is an explicitly requested Experimental composition, not a default cleanup
-workflow. Prefer archive-list preservation and note references.
+This workflow requires explicit Native/recovery intent. Archive-list preservation
+and note references are alternatives when they satisfy the user’s request.
 
 1. Diagnose `recovery` and `attachments`. Stop before any private read/write if
    either exact capability is blocked; do not reinterpret a compiler or static

@@ -4,7 +4,18 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+No v0.7.0 publication or completed signing is asserted here. The candidate
+requires matching signed EventKit and Native artifacts and successful release
+verification. See the [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
+
+## 0.7.0 — Unreleased candidate
+
 ### Changed
+
+- Packaging diagnosis collects only platform and plugin artifact metadata/static
+  source, without Reminders store/schema, permission, or Native-runtime probes.
+- Release verification authenticates an optional complete Native app/manifest
+  pair and its exact signed-source provenance; incomplete pairs block release.
 
 - Source candidate: default discovery includes all 15 tools. Explicit
   `--core-only` exposes nine Core/diagnostic tools and rejects Native dispatch.
@@ -23,7 +34,7 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ### Fixed
 
-- Experimental helper compilation now supplies the macOS SDK from the selected
+- Contributor source-build helper compilation now supplies the macOS SDK from the selected
   Xcode or Command Line Tools installation. This fixes missing AppKit headers
   in both diagnosis and image/section/recovery helper builds.
 - Attachment admission now compares the command-scoped fingerprint of the
