@@ -33,6 +33,8 @@ from reminders_contracts import (  # noqa: E402
     command_schema_requirements,
     runtime_boundary_metadata,
 )
+from native_helper import NativeHelperUnavailable, resolve_helper as resolve_native_helper, source_build_enabled
+
 from experimental_capabilities import (  # noqa: E402
     CAPABILITY_SPECS,
     DeveloperToolchainProbe,
@@ -644,6 +646,21 @@ def inspect_helper_toolchain(
     toolchain_resolver: Callable[[], DeveloperToolchainProbe] | None = None,
 ) -> dict[str, Any]:
     del which
+    try:
+        resolve_native_helper("image")
+        return check_result(STATUS_OK, "native_helper_verified",
+                            "The signed Native helper is verified; no compiler or SDK is required.",
+                            details={"runtime_provider": "bundled_signed",
+                                     "runtime_dependency": "native_helper",
+                                     "compiler_requirement": "not_required",
+                                     "syntax_check": {"attempted": False}})
+    except NativeHelperUnavailable:
+        if not source_build_enabled():
+            return check_result(STATUS_WARNING, "native_helper_unavailable",
+                                "The signed Native helper is missing or could not be verified.",
+                                details={"runtime_dependency": "native_helper",
+                                         "compiler_requirement": "not_required",
+                                         "syntax_check": {"attempted": False}})
     home = paths["home"]
     source = paths["helper_source"]
     source_exists = source.is_file()
@@ -1173,6 +1190,8 @@ def _diagnostic_experimental_capabilities(
         for item in databases
         if isinstance(item, dict) and item.get("status") == STATUS_OK
     ]
+    provider = checks.get("helper_toolchain", {}).get("details", {}).get("runtime_provider")
+    bundled = helper_ready and provider == "bundled_signed"
     capabilities: dict[str, Any] = {}
     for capability_id, spec in sorted(CAPABILITY_SPECS.items()):
         decisions = [
@@ -1190,6 +1209,7 @@ def _diagnostic_experimental_capabilities(
                     else None
                 ),
                 compiler_available=helper_ready,
+                native_helper_available=bundled,
             )
             for item in usable_databases
         ] or [
@@ -1198,13 +1218,22 @@ def _diagnostic_experimental_capabilities(
                 identity,
                 schema_fingerprint=None,
                 compiler_available=helper_ready,
+                native_helper_available=bundled,
             )
         ]
         # The adapter may select any usable store after reading private counts,
         # which this content-free doctor intentionally does not inspect. The
         # aggregate therefore fails closed if one candidate is rejected.
         decision = next((item for item in decisions if not item.allowed), decisions[0])
-        capabilities[capability_id] = decision.to_public_dict()
+        public = decision.to_public_dict()
+        if spec.compiler_requirement == "required":
+            public["runtime_dependency"] = "native_helper"
+            public["runtime_provider"] = provider or ("developer_source" if source_build_enabled() else "unavailable")
+            if not source_build_enabled():
+                public["compiler_requirement"] = "not_required"
+                if public["reason_code"] == "compiler_required":
+                    public["reason_code"] = "native_helper_unavailable"
+        capabilities[capability_id] = public
     return capabilities
 
 

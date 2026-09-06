@@ -371,15 +371,17 @@ def evaluate_capability(
     *,
     schema_fingerprint: str | None,
     compiler_available: bool,
+    native_helper_available: bool = False,
 ) -> CapabilityDecision:
     spec = CAPABILITY_SPECS[capability_id]
+    compiler_requirement = "not_required" if native_helper_available else spec.compiler_requirement
     evidence = COMPATIBILITY_ALLOWLIST.get(capability_id, ())
     if not identity.complete:
         return CapabilityDecision(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "unknown",
             "unverified",
             "runtime_unverified",
@@ -390,7 +392,7 @@ def evaluate_capability(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "no_evidence",
             "unverified",
             "runtime_unverified",
@@ -402,18 +404,18 @@ def evaluate_capability(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "unsupported",
             "unverified",
             "runtime_unverified",
             "unsupported_build",
         )
-    if spec.compiler_requirement == "required" and not compiler_available:
+    if spec.compiler_requirement == "required" and not compiler_available and not native_helper_available:
         return CapabilityDecision(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "allowlisted",
             "unverified",
             "runtime_unverified",
@@ -425,7 +427,7 @@ def evaluate_capability(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "allowlisted",
             "unverified",
             "runtime_unverified",
@@ -437,7 +439,7 @@ def evaluate_capability(
             capability_id,
             False,
             "experimental_internals",
-            spec.compiler_requirement,
+            compiler_requirement,
             "allowlisted",
             "mismatch",
             "runtime_unverified",
@@ -448,7 +450,7 @@ def evaluate_capability(
         capability_id,
         True,
         "experimental_internals",
-        spec.compiler_requirement,
+        compiler_requirement,
         "allowlisted",
         "allowlisted",
         "runtime_unverified",
