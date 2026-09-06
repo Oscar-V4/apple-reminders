@@ -53,6 +53,28 @@ class InstalledPackageSmokeTests(unittest.TestCase):
         for names in (smoke.PUBLIC_TOOL_NAMES, smoke.CORE_TOOL_NAMES):
             smoke.validate_responses("\n".join(map(json.dumps, self.fixture(names))), names)
 
+    def test_positive_packaging_probe_rejects_private_access_or_scope_drift(self):
+        wire = [json.loads(line) for line in smoke.probe_wire(True).splitlines()]
+        self.assertEqual(wire[-1]['params']['arguments'], {
+            'scope': 'packaging', 'detail_level': 'summary', 'execution_mode': 'metadata_only'})
+        rows = self.fixture()
+        data = {'scope': 'packaging', 'capabilities': [],
+                'checks': [{'name': name} for name in ('platform', 'local_artifacts', 'redaction')],
+                'privacy': {'content_free': True, 'reminder_content_read': False, 'prompt_triggered': False},
+                'execution': {'mode': 'metadata_only', 'developer_tool_process_attempted': False,
+                              'compiler_process_attempted': False, 'install_request_attempted': False}}
+        rows.append({'jsonrpc': '2.0', 'id': 4, 'result': {'isError': False,
+            'structuredContent': {'ok': True, 'status': 'verified', 'data': data}}})
+        smoke.validate_responses('\n'.join(map(json.dumps, rows)), smoke.PUBLIC_TOOL_NAMES, True)
+        for field in ('reminder_content_read', 'prompt_triggered'):
+            data['privacy'][field] = True
+            with self.assertRaisesRegex(smoke.SmokeError, 'privacy or scope'):
+                smoke.validate_responses('\n'.join(map(json.dumps, rows)), smoke.PUBLIC_TOOL_NAMES, True)
+            data['privacy'][field] = False
+        data['checks'].append({'name': 'store_access'})
+        with self.assertRaisesRegex(smoke.SmokeError, 'privacy or scope'):
+            smoke.validate_responses('\n'.join(map(json.dumps, rows)), smoke.PUBLIC_TOOL_NAMES, True)
+
     def test_rejects_inventory_drift_duplicate_response_or_unexpected_success(self):
         for mutation in (lambda rows: rows[1]["result"]["tools"].append(
                             rows[1]["result"]["tools"][0]),

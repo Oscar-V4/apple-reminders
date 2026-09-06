@@ -104,6 +104,9 @@ jobs:
               ], check=True)
           PY
 
+      - name: Exercise packaged launcher and content-free MCP calls
+        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging
+
       - name: Check EventKit helper syntax without linking
         run: >-
           clang -x objective-c -fobjc-arc
@@ -177,6 +180,9 @@ jobs:
           export APPLE_REMINDERS_TEST_RUNTIME_APP="$RUNNER_TEMP/bundled runtime/AppleRemindersPythonRuntime.app"
           "$APPLE_REMINDERS_TEST_RUNTIME_APP/Contents/MacOS/apple-reminders-python" \
             -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Exercise installed package on its native CPU
+        if: steps.runtime.outputs.present == 'true'
+        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging
       - name: Verify the tested runtime remains pristine
         if: ${{ !cancelled() && steps.runtime.outputs.present == 'true' }}
         run: |

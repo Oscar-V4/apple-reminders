@@ -2,8 +2,9 @@
 """Build and exercise the installed signed MCP launcher without Reminders access.
 
 macOS 14+ only. Uses the normal private runtime cache and signature checks.
-The only tools/call deliberately fails schema validation before backend dispatch;
-it never requests access, runs diagnostics, or reads Reminders content.
+A tools/call fails schema validation before backend dispatch. The optional
+--check-packaging probe also executes the bounded packaging-only diagnosis;
+neither path requests access or reads Reminders content.
 """
 from __future__ import annotations
 
@@ -72,7 +73,7 @@ def profile_modes(default_count: int, experimental_count: int,
     return modes
 
 
-def probe_wire() -> bytes:
+def probe_wire(check_packaging: bool = False) -> bytes:
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-11-25", "capabilities": {},
@@ -82,13 +83,17 @@ def probe_wire() -> bytes:
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
             "name": "diagnose_reminders", "arguments": ["invalid-object-type"]}},
     ]
+    if check_packaging:
+        requests.append({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "diagnose_reminders", "arguments": {
+                "scope": "packaging", "detail_level": "summary", "execution_mode": "metadata_only"}}})
     return ("\n".join(json.dumps(item) for item in requests) + "\n").encode()
 
 
-def validate_responses(stdout: str, expected_names: frozenset[str]) -> None:
+def validate_responses(stdout: str, expected_names: frozenset[str], check_packaging: bool = False) -> None:
     try:
         responses = [json.loads(line) for line in stdout.splitlines()]
-        if [item.get("id") for item in responses] != [1, 2, 3]:
+        if [item.get("id") for item in responses] != ([1, 2, 3, 4] if check_packaging else [1, 2, 3]):
             raise ValueError("unexpected response sequence")
         if any(item.get("jsonrpc") != "2.0" or "error" in item for item in responses):
             raise ValueError("JSON-RPC error")
@@ -109,12 +114,24 @@ def validate_responses(stdout: str, expected_names: frozenset[str]) -> None:
                 or payload["error"]["code"] != "invalid_input"
                 or payload["error"]["reason_code"] != "invalid_arguments"):
             raise ValueError("validation-only call contract")
+        if check_packaging:
+            result = responses[3]["result"]
+            payload = result["structuredContent"]
+            data = payload["data"]
+            if (result["isError"] is not False or payload["ok"] is not True
+                    or payload["status"] != "verified" or data["scope"] != "packaging"
+                    or data["capabilities"] != []
+                    or {check["name"] for check in data["checks"]} != {"platform", "local_artifacts", "redaction"}
+                    or data["privacy"] != {"content_free": True, "reminder_content_read": False, "prompt_triggered": False}
+                    or data["execution"] != {"mode": "metadata_only", "developer_tool_process_attempted": False,
+                                             "compiler_process_attempted": False, "install_request_attempted": False}):
+                raise ValueError("packaging diagnosis privacy or scope contract")
     except (AttributeError, KeyError, TypeError, ValueError, StopIteration) as exc:
         raise SmokeError(f"installed MCP contract failed: {exc}") from exc
 
 
 def smoke(plugin: Path, *, default_count: int, experimental_count: int,
-          core_count: int | None = None) -> dict:
+          core_count: int | None = None, check_packaging: bool = False) -> dict:
     modes = profile_modes(default_count, experimental_count, core_count)
     with tempfile.TemporaryDirectory(prefix="apple reminders installed smoke ") as temporary:
         root = Path(temporary)
@@ -126,14 +143,14 @@ def smoke(plugin: Path, *, default_count: int, experimental_count: int,
         installed_plugin = installed / plugin_name
         for mode, arguments, expected_names in modes:
             result = run(["/bin/sh", str(installed_plugin / "scripts/launch_bundled_mcp.sh"),
-                          *arguments], input=probe_wire(), cwd=installed_plugin,
+                          *arguments], input=probe_wire(check_packaging), cwd=installed_plugin,
                          timeout_s=60, stdout_limit=1024 * 1024, stderr_limit=64 * 1024)
             if result.returncode:
                 raise SmokeError(f"{mode} installed launcher failed (exit {result.returncode})")
-            validate_responses(result.stdout, expected_names)
+            validate_responses(result.stdout, expected_names, check_packaging)
         return {"ok": True, "archive_sha256": sha256(archive),
                 "modes": {mode: len(names) for mode, _, names in modes},
-                "tools_call": "schema-validation-only"}
+                "tools_call": "schema-validation-and-packaging-metadata" if check_packaging else "schema-validation-only"}
 
 
 def main() -> None:
@@ -143,11 +160,13 @@ def main() -> None:
                         help="Expected default profile; 9 supports older Core-default packages")
     parser.add_argument("--experimental-count", type=int, choices=(15,), default=15)
     parser.add_argument("--core-count", type=int, choices=(9,), help="Also probe explicit --core-only")
+    parser.add_argument("--check-packaging", action="store_true",
+                        help="Also call packaging-only diagnosis (requires scope-bounded collector)")
     args = parser.parse_args()
     try:
         print(json.dumps(smoke(args.plugin, default_count=args.default_count,
                                experimental_count=args.experimental_count,
-                               core_count=args.core_count), sort_keys=True))
+                               core_count=args.core_count, check_packaging=args.check_packaging), sort_keys=True))
     except (OSError, RuntimeError) as exc:
         parser.exit(1, f"installed package smoke failed: {exc}\n")
 
