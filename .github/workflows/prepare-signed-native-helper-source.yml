@@ -1,0 +1,346 @@
+name: Prepare signed Native helper from reviewed source
+run-name: Prepare signed Native helper for ${{ inputs.source_commit }} from ${{ inputs.source_ref }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact full source branch ref (refs/heads/...)
+        required: true
+        type: string
+      source_commit:
+        description: Exact lowercase source branch-head Git commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: apple-reminders-release-signing
+  cancel-in-progress: false
+jobs:
+  build-unsigned:
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: macos-15
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
+      context_sha256: ${{ steps.package.outputs.context_sha256 }}
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+      WORKFLOW_COMMIT: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      NATIVE_HELPER_SDK: macosx
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Prove reviewed source and unchanged main-owned tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF_TYPE" == "branch" ]]
+          [[ "$GITHUB_REF_NAME" == "${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$SOURCE_REF" == refs/heads/* ]]
+          git check-ref-format "$SOURCE_REF"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.event.repository.default_branch }}:refs/remotes/origin/signing-workflow-main" \
+            "+$SOURCE_REF:refs/remotes/origin/signed-helper-source"
+          [[ "$(git rev-parse refs/remotes/origin/signing-workflow-main)" == "$WORKFLOW_COMMIT" ]]
+          [[ "$(git rev-parse refs/remotes/origin/signed-helper-source)" == "$SOURCE_COMMIT" ]]
+          git merge-base --is-ancestor "$WORKFLOW_COMMIT" "$SOURCE_COMMIT"
+          git diff --exit-code "$WORKFLOW_COMMIT" "$SOURCE_COMMIT" -- \
+            .github/workflows/prepare-signed-native-helper-source.yml \
+            scripts/native_helper_artifact.py scripts/build_native_helper_app.py \
+            scripts/verify_native_helper.py scripts/native_helper_app_info.plist \
+            scripts/prepare_signed_native_helper.sh
+      - name: Run data-free tests and compile universal unsigned app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_native_helper*.py'
+          python3 -m unittest discover -s tests -p test_runtime_profiles.py
+          python3 -m unittest discover -s tests -p test_native_source_signing_workflow.py
+          python3 scripts/build_native_helper_app.py --sdk "$NATIVE_HELPER_SDK" \
+            --output-app "$RUNNER_TEMP/AppleRemindersNativeHelper.app"
+      - name: Bind unsigned bytes and original build provenance
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/native_helper_artifact.py unsigned \
+            --app "$RUNNER_TEMP/AppleRemindersNativeHelper.app" \
+            --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT" \
+            --output "$RUNNER_TEMP/native-unsigned"
+          printf 'zip_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-unsigned/unsigned.zip" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          printf 'context_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-unsigned/unsigned-build-context.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: native-unsigned-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-unsigned/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  sign-prebuilt:
+    needs: build-unsigned
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment:
+      name: release-signing
+    permissions:
+      contents: read
+    outputs:
+      zip_sha256: ${{ steps.sign.outputs.zip_sha256 }}
+      manifest_sha256: ${{ steps.sign.outputs.manifest_sha256 }}
+      checksums_sha256: ${{ steps.sign.outputs.checksums_sha256 }}
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+      WORKFLOW_COMMIT: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      NATIVE_HELPER_SDK: macosx
+      EXPECTED_ZIP_SHA256: ${{ needs.build-unsigned.outputs.zip_sha256 }}
+      EXPECTED_CONTEXT_SHA256: ${{ needs.build-unsigned.outputs.context_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Prove main-owned signer and read selected source only as data
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Oscar-V4/apple-reminders" ]]
+          [[ "$GITHUB_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "Oscar-V4" ]]
+          [[ "$GITHUB_REF_TYPE" == "branch" ]]
+          [[ "$GITHUB_REF_NAME" == "${{ github.event.repository.default_branch }}" ]]
+          [[ "$GITHUB_SHA" == "$WORKFLOW_COMMIT" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+          [[ "$SOURCE_REF" == refs/heads/* ]]
+          git check-ref-format "$SOURCE_REF"
+          [[ "$(git rev-parse HEAD)" == "$WORKFLOW_COMMIT" ]]
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.event.repository.default_branch }}:refs/remotes/origin/signing-workflow-main" \
+            "+$SOURCE_REF:refs/remotes/origin/signed-helper-source"
+          [[ "$(git rev-parse refs/remotes/origin/signing-workflow-main)" == "$WORKFLOW_COMMIT" ]]
+          [[ "$(git rev-parse refs/remotes/origin/signed-helper-source)" == "$SOURCE_COMMIT" ]]
+          git merge-base --is-ancestor "$WORKFLOW_COMMIT" "$SOURCE_COMMIT"
+          git diff --exit-code "$WORKFLOW_COMMIT" "$SOURCE_COMMIT" -- \
+            .github/workflows/prepare-signed-native-helper-source.yml \
+            scripts/native_helper_artifact.py scripts/build_native_helper_app.py \
+            scripts/verify_native_helper.py scripts/native_helper_app_info.plist \
+            scripts/prepare_signed_native_helper.sh
+          # Never check out or import selected-source Python in this job.
+          mkdir -p "$RUNNER_TEMP/native-source/scripts" "$RUNNER_TEMP/native-source/.codex-plugin"
+          for path in scripts/remkit_attach_image.m scripts/remkit_sections.m scripts/remkit_recover.m .codex-plugin/plugin.json; do
+            git show "$SOURCE_COMMIT:plugins/apple-reminders/$path" > "$RUNNER_TEMP/native-source/$path"
+          done
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: native-unsigned-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-download
+      - name: Validate unsigned artifact before credentials are materialized
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(shasum -a 256 "$RUNNER_TEMP/native-download/unsigned-build-context.json" | awk '{print $1}')" == "$EXPECTED_CONTEXT_SHA256" ]]
+          python3 scripts/native_helper_artifact.py extract \
+            --archive "$RUNNER_TEMP/native-download/unsigned.zip" --sha256 "$EXPECTED_ZIP_SHA256" \
+            --output "$RUNNER_TEMP/native-signing-work"
+          python3 scripts/native_helper_artifact.py verify-unsigned \
+            --plugin-root "$RUNNER_TEMP/native-source" \
+            --app "$RUNNER_TEMP/native-signing-work/AppleRemindersNativeHelper.app" \
+            --context "$RUNNER_TEMP/native-download/unsigned-build-context.json" \
+            --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT"
+      - name: Sign prebuilt app, notarize, and remove all credentials
+        id: sign
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_P12_B64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_B64: ${{ secrets.APPLE_NOTARY_KEY_P8_B64 }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          credentials="$RUNNER_TEMP/native-credentials"
+          keychain="$credentials/signing.keychain-db"
+          app="$RUNNER_TEMP/native-signing-work/AppleRemindersNativeHelper.app"
+          mkdir -m 0700 "$credentials"
+          security list-keychains -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' > "$credentials/keychains"
+          cleanup() {
+            set +e
+            local restored=() item
+            if [[ -f "$credentials/keychains" ]]; then
+              while IFS= read -r item; do [[ -z "$item" ]] || restored+=("$item"); done < "$credentials/keychains"
+              if ((${#restored[@]})); then security list-keychains -d user -s "${restored[@]}" >/dev/null 2>&1; fi
+            fi
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$credentials" "$RUNNER_TEMP/native-signing-work"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          [[ "$APPLE_TEAM_ID" == V8347N9346 ]]
+          [[ "$APPLE_NOTARY_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]
+          [[ "$APPLE_NOTARY_ISSUER_ID" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
+          python3 - "$credentials" <<'PYCODE'
+          import base64, os, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          for name, key in (("identity.p12", "APPLE_DEVELOPER_ID_P12_B64"), ("AuthKey.p8", "APPLE_NOTARY_KEY_P8_B64")):
+              (root / name).write_bytes(base64.b64decode("".join(os.environ[key].split()), validate=True))
+          PYCODE
+          keychain_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')"
+          printf '::add-mask::%s\n' "$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$credentials/identity.p12" -k "$keychain" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/ {print $2}')"
+          [[ "$identity" =~ ^[0-9A-Fa-f]{40}$ ]]
+          unset APPLE_DEVELOPER_ID_P12_B64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_KEY_P8_B64
+          rm -f "$credentials/identity.p12"
+          (
+            umask 022
+            for executable in apple-reminders-image-helper apple-reminders-sections-helper apple-reminders-recovery-helper; do
+              codesign --force --options runtime --timestamp --sign "$identity" \
+            --identifier io.github.oscar-v4.apple-reminders.native-helper "$app/Contents/MacOS/$executable"
+            done
+            codesign --force --options runtime --timestamp --sign "$identity" "$app"
+          )
+          python3 scripts/verify_native_helper.py --plugin-root "$RUNNER_TEMP/native-source" \
+            --app "$app" --expected-team-id "$APPLE_TEAM_ID" --require-developer-id
+          ditto -c -k --keepParent "$app" "$credentials/submission.zip"
+          xcrun notarytool submit "$credentials/submission.zip" --key "$credentials/AuthKey.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --no-progress --output-format json > "$credentials/notary.json"
+          python3 - "$credentials/notary.json" <<'PYCODE'
+          import json, sys
+          with open(sys.argv[1]) as source:
+              if json.load(source).get("status") != "Accepted":
+                  raise SystemExit("Apple notarization was not accepted")
+          PYCODE
+          (umask 022; xcrun stapler staple "$app")
+          # Main-owned verifier only; preserve the original compilation environment.
+          python3 scripts/native_helper_artifact.py finalize --plugin-root "$RUNNER_TEMP/native-source" \
+            --app "$app" --context "$RUNNER_TEMP/native-download/unsigned-build-context.json" \
+            --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT" \
+            --output "$RUNNER_TEMP/native-signed"
+          cleanup
+          set -e
+          trap - EXIT
+          [[ ! -e "$credentials" && ! -e "$RUNNER_TEMP/native-signing-work" ]]
+          printf 'zip_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-signed/AppleRemindersNativeHelper-notarized.zip" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          printf 'manifest_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-signed/native-helper-build.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          printf 'checksums_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-signed/SHA256SUMS" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Confirm cleanup before artifact upload
+        run: |
+          test ! -e "$RUNNER_TEMP/native-credentials"
+          test ! -e "$RUNNER_TEMP/native-signing-work"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: native-signed-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-signed/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  attest-and-publish:
+    needs: sign-prebuilt
+    if: >-
+      github.repository == 'Oscar-V4/apple-reminders' &&
+      github.actor == 'Oscar-V4' &&
+      github.triggering_actor == 'Oscar-V4' &&
+      github.ref_type == 'branch' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      EXPECTED_ZIP_SHA256: ${{ needs.sign-prebuilt.outputs.zip_sha256 }}
+      EXPECTED_MANIFEST_SHA256: ${{ needs.sign-prebuilt.outputs.manifest_sha256 }}
+      EXPECTED_CHECKSUMS_SHA256: ${{ needs.sign-prebuilt.outputs.checksums_sha256 }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      WORKFLOW_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
+        with:
+          name: native-signed-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/native-helper
+      - name: Rehash exact subjects at the attestation boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path("artifacts/native-helper")
+          expected = {"AppleRemindersNativeHelper-notarized.zip": os.environ["EXPECTED_ZIP_SHA256"],
+                      "native-helper-build.json": os.environ["EXPECTED_MANIFEST_SHA256"],
+                      "SHA256SUMS": os.environ["EXPECTED_CHECKSUMS_SHA256"]}
+          if {p.name for p in root.iterdir()} != set(expected):
+              raise SystemExit("attestation subject inventory drift")
+          for name, digest in expected.items():
+              path = root / name
+              if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                  raise SystemExit("attestation subject digest drift")
+          manifest = json.loads((root / "native-helper-build.json").read_text())
+          if manifest["source_commit"] != os.environ["SOURCE_COMMIT"] or manifest["workflow_commit"] != os.environ["WORKFLOW_COMMIT"]:
+              raise SystemExit("attestation provenance drift")
+          PYCODE
+          cd artifacts/native-helper
+          sha256sum --check --strict SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            artifacts/native-helper/AppleRemindersNativeHelper-notarized.zip
+            artifacts/native-helper/native-helper-build.json
+            artifacts/native-helper/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: apple-reminders-native-helper-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/native-helper/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

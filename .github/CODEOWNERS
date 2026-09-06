@@ -24,3 +24,11 @@
 /scripts/verify_python_runtime.py @Oscar-V4
 /scripts/verify_runtime_provenance.py @Oscar-V4
 /scripts/verify_release_assets.py @Oscar-V4
+
+# Native signing uses only main-owned artifact tooling in the protected job.
+/.github/workflows/prepare-signed-native-helper-source.yml @Oscar-V4
+/scripts/native_helper_artifact.py @Oscar-V4
+/scripts/build_native_helper_app.py @Oscar-V4
+/scripts/verify_native_helper.py @Oscar-V4
+/scripts/native_helper_app_info.plist @Oscar-V4
+/scripts/prepare_signed_native_helper.sh @Oscar-V4
