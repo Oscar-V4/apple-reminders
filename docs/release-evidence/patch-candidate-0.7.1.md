@@ -1,7 +1,7 @@
 # v0.7.1 Unreleased patch candidate signoff
 
-Status: **source identity prepared; integration, fresh helper signing, and
-publication pending**. The latest published public beta remains
+Status: **code integration complete; fresh helper signing, final package
+verification, and publication pending**. The latest published public beta remains
 [v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0). Its
 [immutable publication record](public-beta-0.7.0.md), signed artifacts, source
 identities, and asset hashes remain historical evidence for that release only.
@@ -20,16 +20,17 @@ identities, and asset hashes remain historical evidence for that release only.
   preparation. No component identity migration or signing-workflow rewrite is
   included.
 
-Root must finish the intended PR #59/#60 integrations and final tests before
-freezing an exact signing source. This document is not evidence that an
-unmerged diagnostics change already exists in the candidate checkout.
+PRs #57, #59, and #60 are merged. The signing source is frozen at
+`5dd71825aea8174d84f446f2bb2d70bfc44fe5da`, based on main commit
+`0c474fbb9369c3b1f93c7710ae45a6d41115286e`. Final package verification remains
+pending until the matching v0.7.1 signed helper artifacts are assembled.
 
 ## Release gates
 
 | Gate | Current status | Required evidence |
 | --- | --- | --- |
 | Source version | Prepared | plugin.json and MCP SERVER_VERSION are 0.7.1; plugin description unchanged |
-| Final patch integration | Pending | Intended fixes merged, exact scope reviewed, tests on final source |
+| Patch code integration | Complete | PRs #57/#59/#60 merged after their current-head CI; exact signing source frozen as recorded above |
 | EventKit v0.7.1 artifact | Pending | Existing proven source-signing workflow; exact source/workflow history and complete signed/notarized/stapled app+manifest |
 | Native v0.7.1 artifact | Pending | Existing proven source-signing workflow; exact three-subject attestation, six build inputs, complete signed app+manifest |
 | Current artifact drift | Expected failure | Checked-in v0.7.0 helper manifests intentionally disagree with v0.7.1 source until new signing; audit and verifier must keep rejecting this |

@@ -7,7 +7,7 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 ## 0.7.1 — Unreleased patch candidate
 
 The latest published public beta remains v0.7.0. Fresh v0.7.1 EventKit and Native
-signing, final integration/tests, and publication are pending. Existing v0.7.0
+signing, final package tests, and publication are pending. Existing v0.7.0
 signed artifacts and immutable release evidence remain unchanged; their version
 mismatch with this source candidate is intentional until signing completes.
 See the [patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
@@ -17,14 +17,15 @@ See the [patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/do
 - Verified image attachment receipts retain the backend's exact attachment ID
   only after final matching. Pending, missing, duplicate, mismatched, and
   out-of-page targets stay unknown; replay uses the same verification gate.
-- Planned diagnostics integration distinguishes an absent framework filesystem
+- Diagnostics distinguish an absent framework filesystem
   path from an access or metadata error. A sole inconclusive static-path warning
   gets a fixed explanation only when every selected capability is admitted and
   the signed helper is verified. The result remains degraded and requires
   attention, without recommending repeated identical metadata-only diagnosis.
 
 The scope adds no private capability admission or Native helper source behavior.
-The diagnostics changes must be integrated before freezing the signing source.
+The patch code is integrated and the signing source is frozen; final package
+verification remains pending until matching signed artifacts are assembled.
 
 ## 0.7.0 — Public beta
 
