@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import errno
 import importlib.util
+import json
 import os
 import signal
 import sys
@@ -147,28 +148,124 @@ class BoundedProcessTests(unittest.TestCase):
         self.assert_process_group_gone(raised.exception.pid)
 
     def test_timeout_kills_child_and_grandchild_process_group(self) -> None:
+        self.assert_timeout_contains_ready_process_group(startup_delay=0.0)
+
+    def test_timeout_containment_waits_for_slow_fixture_startup(self) -> None:
+        # Each interpreter starts more slowly than the containment timeout.
+        self.assert_timeout_contains_ready_process_group(startup_delay=0.9)
+
+    def test_fixture_readiness_timeout_fails_and_cleans_up(self) -> None:
+        with self.assertRaisesRegex(self.failureException, "fixture did not become ready"):
+            self.assert_timeout_contains_ready_process_group(
+                startup_delay=0.9, startup_timeout_s=0.05
+            )
+
+    def test_ordinary_timeout_does_not_wait_for_child_readiness(self) -> None:
+        with self.assertRaises(bounded_process.ProcessTimeoutError) as raised:
+            self.run_python("import time; time.sleep(30)", timeout_s=0.1)
+        self.assertEqual(raised.exception.timeout_s, 0.1)
+        self.assertIsNotNone(raised.exception.returncode)
+        self.assert_process_group_gone(raised.exception.pid)
+
+    def assert_timeout_contains_ready_process_group(
+        self, *, startup_delay: float, startup_timeout_s: float = 20.0
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             child_pid = root / "child.pid"
             grandchild_pid = root / "grandchild.pid"
-            child_source = f"""
-import os, signal, subprocess, sys, time
+            grandchild_ready = root / "grandchild-ready.json"
+            ready_path = root / "ready.json"
+            grandchild_source = f"""
+import time
+time.sleep({startup_delay!r})
+import json, os, signal
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-open({str(child_pid)!r}, 'w').write(str(os.getpid()))
-grandchild = subprocess.Popen([sys.executable, '-c', "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(grandchild_pid)!r}, 'w').write(str(os.getpid())); time.sleep(30)"])
-while not os.path.exists({str(grandchild_pid)!r}): time.sleep(0.01)
-print('ready', flush=True)
+with open({str(grandchild_pid)!r}, 'w') as handle:
+    handle.write(str(os.getpid()))
+with open({str(grandchild_ready) + '.tmp'!r}, 'w') as handle:
+    json.dump({{'pid': os.getpid(), 'pgid': os.getpgrp(),
+               'ignores_sigterm': signal.getsignal(signal.SIGTERM) == signal.SIG_IGN}}, handle)
+os.replace({str(grandchild_ready) + '.tmp'!r}, {str(grandchild_ready)!r})
 time.sleep(30)
 """
+            child_source = f"""
+import time
+time.sleep({startup_delay!r})
+import json, os, signal, subprocess, sys
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open({str(child_pid)!r}, 'w') as handle:
+    handle.write(str(os.getpid()))
+grandchild = subprocess.Popen([sys.executable, '-c', {grandchild_source!r}])
+startup_deadline = time.monotonic() + 15.0
+while not os.path.exists({str(grandchild_ready)!r}):
+    if grandchild.poll() is not None or time.monotonic() >= startup_deadline:
+        raise SystemExit('grandchild readiness failed')
+    time.sleep(0.01)
+with open({str(grandchild_ready)!r}) as handle:
+    descendant = json.load(handle)
+with open({str(ready_path) + '.tmp'!r}, 'w') as handle:
+    json.dump({{'child_pid': os.getpid(), 'child_pgid': os.getpgrp(),
+               'child_ignores_sigterm': signal.getsignal(signal.SIGTERM) == signal.SIG_IGN,
+               'grandchild': descendant}}, handle)
+print('ready', flush=True)
+os.replace({str(ready_path) + '.tmp'!r}, {str(ready_path)!r})
+time.sleep(30)
+"""
+            real_popen = bounded_process.subprocess.Popen
+            process = None
 
-            with self.assertRaises(bounded_process.ProcessTimeoutError) as raised:
-                self.run_python(child_source, timeout_s=0.6)
+            def launch_ready_fixture(*args, **kwargs):
+                nonlocal process
+                process = real_popen(*args, **kwargs)
+                startup_deadline = time.monotonic() + startup_timeout_s
+                while not ready_path.exists():
+                    if process.poll() is not None or time.monotonic() >= startup_deadline:
+                        self.fail(
+                            f"child/grandchild fixture did not become ready within {startup_timeout_s} seconds"
+                        )
+                    time.sleep(0.01)
+                ready = json.loads(ready_path.read_text())
+                self.assertEqual(ready["child_pid"], process.pid)
+                self.assertEqual(ready["child_pgid"], process.pid)
+                self.assertIs(ready["child_ignores_sigterm"], True)
+                self.assertIs(ready["grandchild"]["ignores_sigterm"], True)
+                self.assertNotEqual(ready["grandchild"]["pid"], process.pid)
+                self.assertEqual(ready["grandchild"]["pgid"], process.pid)
+                self.assertEqual(os.getpgid(process.pid), process.pid)
+                self.assertEqual(os.getpgid(ready["grandchild"]["pid"]), process.pid)
+                return process
 
-            self.assertEqual(raised.exception.timeout_s, 0.6)
-            self.assertTrue(child_pid.exists())
-            self.assertTrue(grandchild_pid.exists())
-            self.assertIsNotNone(raised.exception.returncode)
-            self.assert_process_group_gone(raised.exception.pid)
+            try:
+                # This real launch wrapper isolates fixture startup from the
+                # containment assertion. It does not test a startup-time bound.
+                # The production monotonic clock and 0.6-second deadline remain real.
+                with mock.patch.object(bounded_process.subprocess, "Popen", side_effect=launch_ready_fixture):
+                    with self.assertRaises(bounded_process.ProcessTimeoutError) as raised:
+                        self.run_python(child_source, timeout_s=0.6)
+
+                self.assertEqual(raised.exception.timeout_s, 0.6)
+                self.assertTrue(child_pid.exists())
+                self.assertTrue(grandchild_pid.exists())
+                self.assertEqual(int(child_pid.read_text()), raised.exception.pid)
+                self.assertIsNotNone(raised.exception.returncode)
+                self.assertIn(b'ready', raised.exception.stdout)
+                self.assert_process_group_gone(raised.exception.pid)
+            finally:
+                # Also contain/reap a fixture if readiness or any assertion fails
+                # before bounded_process.run takes ownership of its lifecycle.
+                if process is not None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=5.0)
+                        self.assert_process_group_gone(process.pid)
+                    finally:
+                        for pipe in (process.stdout, process.stderr):
+                            if pipe is not None:
+                                pipe.close()
 
     def test_output_cap_kills_the_whole_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

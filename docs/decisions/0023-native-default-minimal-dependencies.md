@@ -1,7 +1,11 @@
 # ADR 0023: Native discovery with minimal user dependencies
 
-Status: accepted source-candidate direction; signed distribution and acceptance pending.
-Supersedes ADR 0021's default discovery decision for Unreleased only. Historical
+Status: accepted and implemented in the published v0.7.1 public beta, with
+verified signed distribution. Fresh-user and capability-specific acceptance
+remain separate.
+
+This decision was recorded during source-candidate development and supersedes
+ADR 0021's default discovery behavior for Native-default versions. Historical
 release contracts and ADR 0020's exact admission protections remain applicable.
 
 ## Decision
@@ -33,13 +37,24 @@ where useful, rather than instructing ordinary users to enable flags or install
 a compiler. Existing alarm preservation, due semantics, recovery snapshot
 guards, one-use references, and stop-on-unknown-outcome rules are unchanged.
 
-## Evidence required before release
+## Verified distribution and remaining acceptance
 
-The source candidate does not claim a shipped signed Native artifact. Record
-universal architecture and minimum-OS validation, verified signing identity,
-notarization/stapling, immutable build provenance, packaged-helper integrity,
-and fresh nondeveloper Mac permission and execution acceptance. Keep exact
-capability evidence separate from package validity and device observation.
+The [v0.7.1 publication record](../release-evidence/public-beta-0.7.1.md)
+documents the shipped immutable public beta and successful canonical release
+verification, including signed Native distribution and provenance. Its default
+15-tool inventory and explicit nine-tool core-only mode implement this decision;
+the release does not depend on users compiling a helper.
+
+The [local synthetic image test](../release-evidence/native-image-acceptance-0.7.1.md)
+records a successful packaged image workflow on an admitted arm64 maintainer
+Mac with existing Reminders permission. It does not establish a fresh-user
+installation, absence of installed developer tools, or direct iPhone visibility.
+
+Fresh-user no-CLT acceptance, section/tag acceptance, broader host coverage, and
+device observation remain pending. Keep these separate from verified package
+signatures, provenance, and the bounded local image result. The proposed offline
+forward tests below retain their original design intent and are not claims that
+those evaluations were executed.
 
 ## Proposed independent forward tests
 
