@@ -145,10 +145,11 @@ def _require_claim(
 def _require_current_contract(
     text: str, tag: str, relative: Path, errors: list[str]
 ) -> None:
-    """Bind reader-facing setup claims to this candidate's actual startup contract."""
-    phase = "published public beta" if tag == PUBLISHED_TAG else "Unreleased patch candidate"
+    """Bind version and behavior without freezing publication status in a package."""
     claims = (
-        (rf"guide describes (?:the )?{phase} for {re.escape(tag)}\b", "version identity boundary"),
+        (rf"guide describes {re.escape(tag)}\b", "version identity boundary"),
+        (r"Before installing, verify", "versioned release verification prerequisite"),
+        (rf"https://github\.com/Oscar-V4/apple-reminders/releases/tag/{re.escape(tag)}\b", "versioned release evidence link"),
         (r"\b15\s+tools\b", "default tool inventory"),
         (r"--core-only.{0,100}?9 Core and diagnostic tools", "core-only inventory"),
         (r"--experimental.{0,100}?legacy hybrid URL opt-in", "legacy URL opt-in boundary"),
@@ -329,7 +330,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "Ordinary users need no Xcode or Command Line Tools",
             "Source compilation cannot grant OS/app/schema admission",
             "still need acceptance testing on fresh nondeveloper Macs",
-            "clean-user acceptance remains pending",
+            "clean-user acceptance is not established by these checks",
             "Sections and tags do not yet have acceptance evidence",
             "Missing or unavailable Native support leaves healthy Core usable",
         ),

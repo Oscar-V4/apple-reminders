@@ -1,18 +1,17 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes the **Unreleased patch candidate** for **v0.7.1**.
-The latest published public beta remains
-[v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0), with
-[verified immutable evidence](release-evidence/public-beta-0.7.0.md).
-Use the README's v0.7.1 commands only after a matching published release and
-canonical verification. Matching v0.7.1 helpers and local package checks have
-passed; final CI and publication remain pending. See the
-[patch signoff](release-evidence/patch-candidate-0.7.1.md).
+This guide describes **v0.7.1**. Before installing, verify the
+[v0.7.1 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+and its versioned verification results, then use the README's exact commands.
+Publication status and release checks belong in the
+[signoff](release-evidence/patch-candidate-0.7.1.md).
+The [historical v0.7.0 evidence](release-evidence/public-beta-0.7.0.md) applies
+only to that earlier version.
 
-## Patch candidate contract
+## Version contract
 
-| Area | v0.7.1 Unreleased patch contract |
+| Area | v0.7.1 contract |
 |---|---|
 | Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
 | Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
@@ -20,7 +19,7 @@ passed; final CI and publication remain pending. See the
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
 | EventKit helper | Verified v0.7.1 signed, notarized, and stapled bundle |
-| Native helper | Verified v0.7.1 signed universal bundle; packaged image acceptance passed on the admitted maintainer Mac; clean-user acceptance remains pending |
+| Native helper | Signed universal bundle; maintainer-host image checks are bounded evidence; clean-user acceptance is not established by these checks |
 
 ## Bundled runtime and Finder-launched Codex
 
@@ -68,7 +67,7 @@ profile is not sufficient evidence.
 
 ## Native availability
 
-All six Native Extension and Recovery tools are discoverable in the candidate's
+All six Native Extension and Recovery tools are discoverable in this version's
 default session. Listing a tool does not mean the current Mac supports its
 operation. The private implementation tier remains `experimental_internals`.
 

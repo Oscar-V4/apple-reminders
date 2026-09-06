@@ -2,16 +2,13 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## Unreleased
+## 0.7.1 — Patch contents
 
-## 0.7.1 — Unreleased patch candidate
-
-The latest published public beta remains v0.7.0. Fresh v0.7.1 EventKit and Native
-artifacts are signed and verified; local suite, package smoke, and synthetic
-image acceptance passed. Final CI and immutable publication remain pending.
-The prior artifact/version drift is resolved. See the
-[patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md)
-for exact signing runs, checkpoint hashes, and remaining acceptance boundaries.
+This version preserves exact attachment identity in successful image receipts
+and clarifies inconclusive-framework diagnostics. For publication status,
+signing runs, and verification evidence, consult the
+[versioned release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+and [signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
 
 ### Fixed
 
@@ -28,10 +25,8 @@ for exact signing runs, checkpoint hashes, and remaining acceptance boundaries.
   refs and a reviewed digest before explicit dispatch to the existing workflows.
   This does not add an installed user tool or change signing workflow inputs.
 
-The scope adds no private capability admission or Native helper source behavior.
-The patch code is integrated and the signing source is frozen. Local package
-verification passed at the recorded checkpoint; final CI/publication and broader
-host/capability acceptance remain separate.
+The patch adds no private capability admission or Native helper source behavior.
+Signing and maintainer-host checks do not establish broader host/capability acceptance.
 
 ## 0.7.0 — Public beta
 

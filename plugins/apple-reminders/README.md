@@ -11,18 +11,16 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes the **Unreleased patch candidate** for **v0.7.1**.
-The latest published public beta remains
-[v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0), with
-[immutable publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md).
+This guide describes **v0.7.1**. Before installing, verify the
+[v0.7.1 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+and its versioned verification results. The installation commands select that
+exact version; publication status and release checks are recorded in the
+[signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
 
-The v0.7.1 patch is limited to exact image attachment IDs in verified receipts
-and clearer inconclusive-framework diagnostics. Matching signed helpers and
-local package checks are verified; final CI and publication remain pending. See the
-[patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
-Use the commands below only after the
-[v0.7.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
-is published and verified; they are not evidence that it exists now.
+This patch preserves exact image attachment IDs in verified receipts and
+clarifies inconclusive-framework diagnostics. The
+[historical v0.7.0 publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md)
+applies only to that earlier version.
 
 The plugin includes a signed Python runtime, so there is **no separate Python
 installation**. Ordinary startup offers **15 tools**: eight
@@ -32,11 +30,10 @@ startup exposes **9 Core and diagnostic tools** and rejects Native dispatch.
 exposes 15 tools. Default URL writes store **EventKit URL metadata only**.
 An explicit attachment action adds or changes a native URL card.
 
-The candidate includes verified v0.7.1 signed universal helpers, without a
-user compiler. The packaged image flow passed on the admitted maintainer Mac;
-clean-user acceptance remains pending. Exact OS/app/schema
-admission still applies, and section/tag functionality lacks current acceptance
-evidence. No new private capability admission is part of this patch scope.
+The package uses signed universal helpers without a user compiler. The
+maintainer-host image test does not establish clean-user acceptance or support
+on other builds. Exact OS/app/schema admission applies to every private
+operation; this patch adds no new section/tag or other private capability admission.
 
 ## Get started in three steps
 
@@ -44,10 +41,10 @@ You need a Mac running **macOS 14 or newer**, Apple Reminders, and Codex.
 Ordinary reminder work uses bundled, signed and notarized components. You do not
 need Xcode, Command Line Tools, Homebrew, or an Apple Developer membership.
 
-### 1. Confirm publication, then install the pinned patch
+### 1. Verify the versioned release, then install
 
-After v0.7.1 is published and verified, ask Codex to run these commands or use
-a terminal where the `codex` command is available:
+Verify the linked v0.7.1 public beta release before using these commands. Ask
+Codex to run them, or use a terminal where the `codex` command is available:
 
 ```bash
 codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.1
@@ -84,7 +81,7 @@ the saved result.
 - “Add this link to the reminder.”
 - “Move the reminders for this project into my Project Archive list.”
 
-In the candidate, Native and recovery tools are discoverable by default. Their
+In this version, Native and recovery tools are discoverable by default. Their
 private implementation support tier remains `experimental_internals`, and each
 operation requires exact capability admission. See [Advanced setup and troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md)
 for availability and evidence limits. An unavailable capability needs a precise
