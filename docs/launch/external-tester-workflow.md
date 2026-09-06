@@ -14,10 +14,10 @@ private-interface boundary in
 
 ## Start only from a verified release
 
-The checked-in `v0.7.0` commands are release-candidate instructions, not proof
-that the tag or assets already exist. Do not recruit testers until the exact
-tag is published as an immutable two-asset GitHub Release and the canonical
-verifier succeeds from a clean tag checkout:
+The `v0.7.0` public beta is published as an immutable two-asset GitHub Release.
+Its release workflow and an independent local canonical verifier passed. It is
+not a general-availability release. Before testing, verify that exact package
+from a clean tag checkout:
 
 ```bash
 python3 scripts/verify_release_assets.py v0.7.0
@@ -28,7 +28,7 @@ the immutable release and shared two-subject SLSA provenance, bind the exact
 tag to canonical GitHub main, rebuild the ZIP twice, audit source, and verify
 the signed EventKit, Native, and Python manifests without accessing Apple
 Reminders data. Candidate EventKit/Native signing and provenance verification
-passed; publication and clean-user acceptance remain pending. See
+passed, including immutable release verification; clean-user acceptance remains pending. See
 [v0.7.0 signoff](../release-evidence/release-candidate-signoff.md).
 
 Install only the verified exact ref:
@@ -170,8 +170,8 @@ Use an actual macOS 14.x subject rather than deployment-target metadata.
 
 ### `upgrade_identity`
 
-The candidate transition is historical `v0.6.1` to unreleased `v0.7.0`.
-Start only after v0.7.0 is published and verified.
+The upgrade scenario is historical `v0.6.1` to the published `v0.7.0` public beta.
+Verify the exact release before starting.
 
 - On a disposable subject with Reminders permission granted to the `v0.6.1`
   signed helper, create one synthetic Reminder with an alarm and read it back.
