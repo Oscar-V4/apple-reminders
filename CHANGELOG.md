@@ -7,10 +7,11 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 ## 0.7.1 — Unreleased patch candidate
 
 The latest published public beta remains v0.7.0. Fresh v0.7.1 EventKit and Native
-signing, final package tests, and publication are pending. Existing v0.7.0
-signed artifacts and immutable release evidence remain unchanged; their version
-mismatch with this source candidate is intentional until signing completes.
-See the [patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
+artifacts are signed and verified; local suite, package smoke, and synthetic
+image acceptance passed. Final CI and immutable publication remain pending.
+The prior artifact/version drift is resolved. See the
+[patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md)
+for exact signing runs, checkpoint hashes, and remaining acceptance boundaries.
 
 ### Fixed
 
@@ -23,9 +24,14 @@ See the [patch signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/do
   the signed helper is verified. The result remains degraded and requires
   attention, without recommending repeated identical metadata-only diagnosis.
 
+- Added repository-only helper-signing preflight for maintainers: exact canonical
+  refs and a reviewed digest before explicit dispatch to the existing workflows.
+  This does not add an installed user tool or change signing workflow inputs.
+
 The scope adds no private capability admission or Native helper source behavior.
-The patch code is integrated and the signing source is frozen; final package
-verification remains pending until matching signed artifacts are assembled.
+The patch code is integrated and the signing source is frozen. Local package
+verification passed at the recorded checkpoint; final CI/publication and broader
+host/capability acceptance remain separate.
 
 ## 0.7.0 — Public beta
 
