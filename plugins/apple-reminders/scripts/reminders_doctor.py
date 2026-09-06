@@ -5,6 +5,7 @@ The doctor deliberately avoids reminder rows, list/section/tag names, cached
 payloads, journal contents, EventKit, and private-framework loads.
 It only inspects application metadata, directory/file metadata, SQLite schema,
 anonymous account counts, toolchain availability, and static framework paths.
+Packaging scope only inspects platform and plugin artifact metadata/static source.
 """
 
 from __future__ import annotations
@@ -1325,40 +1326,56 @@ def collect_report(
     *,
     system_info: dict[str, Any] | None = None,
     syntax_check: bool = False,
+    scope: str = "full",
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., ProcessResult] = run_static_command,
     connector: Callable[..., sqlite3.Connection] = sqlite3.connect,
     toolchain_resolver: Callable[[], DeveloperToolchainProbe] | None = None,
 ) -> dict[str, Any]:
+    if scope not in {"full", "packaging"}:
+        raise ValueError("Unsupported Doctor collection scope.")
+    if scope == "packaging" and syntax_check:
+        raise ValueError("Packaging diagnosis is metadata-only.")
     configured = paths or default_paths()
     platform_check = inspect_platform(system_info)
-    app_check = inspect_reminders_app(configured["reminders_app_candidates"])
-    store_check = inspect_store_access(configured, connector=connector)
-    command_check = aggregate_command_schema(store_check)
-    helper_check = inspect_helper_toolchain(
-        configured,
-        syntax_check=syntax_check,
-        which=which,
-        runner=runner,
-        toolchain_resolver=toolchain_resolver,
-    )
-    framework_check = inspect_private_frameworks(configured)
-    permission_check = inspect_permission_symptoms(store_check)
-    account_check = inspect_account_visibility(configured, store_check)
-    artifacts_check = inspect_local_artifacts(configured)
-    redaction_check = inspect_redaction_contract(configured)
-    checks = {
-        "platform": platform_check,
-        "reminders_app": app_check,
-        "store_access": store_check,
-        "command_schema": command_check,
-        "helper_toolchain": helper_check,
-        "private_frameworks": framework_check,
-        "permissions": permission_check,
-        "account_visibility": account_check,
-        "local_artifacts": artifacts_check,
-        "redaction": redaction_check,
-    }
+    if scope == "packaging":
+        # Packaging must not discover stores or evaluate private capabilities.
+        # Artifact inspection reads plugin-owned filesystem metadata only.
+        checks = {
+            "platform": platform_check,
+            "local_artifacts": inspect_local_artifacts(configured),
+            "redaction": inspect_redaction_contract(configured),
+        }
+        capabilities = {"runtime_boundaries": runtime_boundary_metadata()}
+    else:
+        app_check = inspect_reminders_app(configured["reminders_app_candidates"])
+        store_check = inspect_store_access(configured, connector=connector)
+        command_check = aggregate_command_schema(store_check)
+        helper_check = inspect_helper_toolchain(
+            configured,
+            syntax_check=syntax_check,
+            which=which,
+            runner=runner,
+            toolchain_resolver=toolchain_resolver,
+        )
+        framework_check = inspect_private_frameworks(configured)
+        permission_check = inspect_permission_symptoms(store_check)
+        account_check = inspect_account_visibility(configured, store_check)
+        artifacts_check = inspect_local_artifacts(configured)
+        redaction_check = inspect_redaction_contract(configured)
+        checks = {
+            "platform": platform_check,
+            "reminders_app": app_check,
+            "store_access": store_check,
+            "command_schema": command_check,
+            "helper_toolchain": helper_check,
+            "private_frameworks": framework_check,
+            "permissions": permission_check,
+            "account_visibility": account_check,
+            "local_artifacts": artifacts_check,
+            "redaction": redaction_check,
+        }
+        capabilities = derive_capabilities(checks)
     blocking_checks = {
         "platform",
         "reminders_app",
@@ -1367,13 +1384,14 @@ def collect_report(
         "permissions",
     }
     blocked = any(
-        checks[name]["status"] == STATUS_BLOCKED for name in blocking_checks
+        checks[name]["status"] == STATUS_BLOCKED
+        for name in blocking_checks & checks.keys()
     )
     degraded = any(
         result["status"] == STATUS_WARNING for result in checks.values()
     )
     overall_status = "blocked" if blocked else "degraded" if degraded else "ready"
-    helper_details = helper_check.get("details", {})
+    helper_details = checks.get("helper_toolchain", {}).get("details", {})
     developer_tools = helper_details.get("developer_tools", {})
     syntax_details = helper_details.get("syntax_check", {})
     return {
@@ -1406,7 +1424,7 @@ def collect_report(
             "private_framework_loaded": False,
         },
         "checks": checks,
-        "capabilities": derive_capabilities(checks),
+        "capabilities": capabilities,
         "errors": _top_level_errors(checks),
     }
 
@@ -1482,6 +1500,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--scope",
+        choices=("full", "packaging"),
+        default="full",
+        help="Collect only platform and plugin artifact metadata for packaging.",
+    )
+    parser.add_argument(
         "--compact", action="store_true", help="Emit compact JSON instead of pretty JSON."
     )
     parser.add_argument(
@@ -1494,9 +1518,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.scope == "packaging" and args.run_experimental_toolchain_check:
+        parser.error("packaging diagnosis is metadata-only")
+    collection_options = {"scope": "packaging"} if args.scope == "packaging" else {}
     full_report = collect_report(
-        syntax_check=args.run_experimental_toolchain_check
+        syntax_check=args.run_experimental_toolchain_check, **collection_options
     )
     report = (
         summarize_report(full_report)

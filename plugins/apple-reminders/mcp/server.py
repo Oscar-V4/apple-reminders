@@ -691,6 +691,8 @@ def invoke_doctor(
         "--detail-level",
         str(arguments.get("detail_level", "summary")),
     ]
+    if arguments.get("scope") == "packaging":
+        argv.extend(["--scope", "packaging"])
     if arguments.get("execution_mode") == "experimental_toolchain":
         argv.append("--run-experimental-toolchain-check")
     try:
