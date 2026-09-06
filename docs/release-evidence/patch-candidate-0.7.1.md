@@ -1,10 +1,12 @@
-# v0.7.1 Unreleased patch candidate signoff
+# v0.7.1 public beta signoff and candidate history
 
-Status: **code integration, fresh signed artifacts, and local package acceptance
-complete; final CI and immutable publication pending**. The latest published
-public beta remains [v0.7.0](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.0).
-Its [immutable publication record](public-beta-0.7.0.md) and asset hashes remain
-historical evidence for that release only.
+Status: **published immutable public beta; final CI and canonical release
+verification passed**. See the [versioned publication record](public-beta-0.7.1.md)
+for exact tag/asset identities, the four-job release run, and independent local
+verification. The [v0.7.0 publication record](public-beta-0.7.0.md) and hashes remain
+historical evidence for that earlier release. The candidate checkpoints below
+retain their original test scope and hashes; they are not rewritten as release
+asset measurements.
 
 ## Bounded patch scope
 
@@ -65,14 +67,19 @@ Results recorded by the coordinating release task after artifact assembly:
 | --- | --- | --- |
 | Source identity and code integration | Complete | Preserve the reviewed source/workflow ancestry and unchanged signed inputs |
 | Both v0.7.1 signed helper pairs | Verified | Preserve exact app/manifest bytes in the final package |
-| Local suite, audit, and package smoke | Passed at the recorded checkpoint | Final checks after documentation changes and current-head CI |
+| Local suite, audit, and package smoke | Passed at the recorded checkpoint | Historical test scope and ZIP hash retained above; final release source audit/rebuild also verified |
 | Synthetic Native image flow | Passed on one admitted arm64 host | Other hosts/capabilities and fresh-user acceptance remain separate |
-| Final CI | Pending | Successful jobs for the exact final PR/merge inputs |
-| Immutable publication | Pending | Exact reviewed tag, immutable public beta release, canonical redownload verifier and final read-only job |
+| Final CI | Passed | PR #61 CI run 34064845781 passed all four jobs at the recorded final head |
+| Immutable publication | Verified public beta | Release run 34065545655 passed all four jobs; an independent local canonical verifier also passed |
 | External acceptance | Still separate | Clean-user permission/CRUD, real Intel/minimum macOS coverage, other Native capabilities, sections/tags, and direct iPhone observation |
 
-Installation examples for v0.7.1 remain conditional on verified publication.
-The v0.7.0 launch/tester packet and receipt example continue to describe the
-latest published public beta. Update that boundary and new versioned evidence
-only after publication. Neither these local results nor signing success claims
-that v0.7.1 is already released or generally available.
+The versioned v0.7.1 public beta release and its canonical verification are
+complete. Shipped installation guides describe exact version behavior and
+require verification of the linked release without freezing a temporal status.
+The v0.7.0 launch/tester packet remains historical; it is not the latest-release
+status record.
+
+The additive `fresh_native_image_no_clt` receipt scenario and its hypothetical
+example provide no new acceptance evidence. Fresh-user no-CLT testing has not
+passed merely because the format validates. User installation/reload and any
+social announcements remain separate from this publication record.

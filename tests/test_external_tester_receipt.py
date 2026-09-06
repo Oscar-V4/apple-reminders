@@ -332,6 +332,7 @@ class ExternalTesterReceiptTests(unittest.TestCase):
                 "macos_version",
                 "python",
                 "external_python",
+                "native_test_context",
                 "xcode",
                 "command_line_tools",
                 "scenario",

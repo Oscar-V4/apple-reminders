@@ -113,9 +113,90 @@ def _validate_outcomes(receipt: dict[str, Any]) -> None:
         raise ReceiptError("scenario_error")
 
 
+FRESH_NATIVE_CHECKS = (
+    "release_verification",
+    "install",
+    "permission_allow",
+    "core_bounded_read",
+    "bundled_native_runtime",
+    "experimental_capability",
+    "synthetic_fixture_create",
+    "experimental_synthetic_mutation",
+    "core_canonical_alarm",
+    "exact_cleanup",
+)
+
+
+def _validate_fresh_native_image(receipt: dict[str, Any]) -> None:
+    context = receipt.get("native_test_context")
+    tag = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", receipt["plugin_ref"])
+    if (
+        not isinstance(context, dict)
+        or tag is None
+        or tuple(map(int, tag.groups())) < (0, 7, 1)
+        or receipt["python"]["source"] != "bundled"
+        or receipt["xcode"] != "absent"
+        or receipt["command_line_tools"] != "absent"
+        or receipt["tcc_precondition"] != "not_determined"
+        or context["subject"] not in {"fresh_macos_user", "fresh_vm"}
+        or context["dependency_evidence"] != "installation_inventory"
+        or context["source_build"] != "disabled"
+    ):
+        raise ReceiptError("scenario_error")
+    _require_checks(receipt, set(FRESH_NATIVE_CHECKS))
+    checks = {check["id"]: check for check in receipt["checks"]}
+    if set(checks) != set(FRESH_NATIVE_CHECKS):
+        raise ReceiptError("scenario_error")
+    # A failed, blocked, unknown-outcome, or deliberately unrun prerequisite
+    # stops later acceptance stages. Cleanup is independently evidenced below.
+    stopped = False
+    for check_id in FRESH_NATIVE_CHECKS[:-1]:
+        outcome = checks[check_id]["outcome"]
+        if stopped and outcome != "not_run":
+            raise ReceiptError("scenario_error")
+        stopped = stopped or outcome != "passed"
+
+    permission = checks["permission_allow"]
+    tcc_result = receipt["tcc_result"]
+    if permission["outcome"] == "passed":
+        if tcc_result != "granted_after_prompt":
+            raise ReceiptError("scenario_error")
+    elif permission["outcome"] == "not_run":
+        if tcc_result not in {"not_checked", "unchanged"}:
+            raise ReceiptError("scenario_error")
+    elif tcc_result not in {"denied", "not_checked", "unchanged"}:
+        raise ReceiptError("scenario_error")
+    if tcc_result == "denied" and permission["error_category"] != "permission_denied":
+        raise ReceiptError("scenario_error")
+
+    creation = checks["synthetic_fixture_create"]
+    state = context["fixture_state"]
+    cleanup = checks["exact_cleanup"]["outcome"]
+    if creation["outcome"] == "not_run":
+        if state != "not_created" or cleanup != "not_run":
+            raise ReceiptError("scenario_error")
+    elif creation["outcome"] == "passed" and state == "not_created":
+        raise ReceiptError("scenario_error")
+    elif creation["error_category"] in {"verification_pending", "partial_success"} and state == "not_created":
+        raise ReceiptError("scenario_error")
+    if state == "verified_absent":
+        if cleanup != "passed":
+            raise ReceiptError("scenario_error")
+    elif cleanup == "passed":
+        raise ReceiptError("scenario_error")
+    elif state == "not_created" and cleanup != "not_run":
+        raise ReceiptError("scenario_error")
+    # Known-retained and unknown fixtures may have a failed cleanup attempt or
+    # no attempt. Both are valid incomplete reports, never successful cleanup.
+
+
 def _validate_scenario(receipt: dict[str, Any]) -> None:
     scenario = receipt["scenario"]
-    if scenario == "fresh_core_allow":
+    if scenario == "fresh_native_image_no_clt":
+        _validate_fresh_native_image(receipt)
+    elif "native_test_context" in receipt:
+        raise ReceiptError("scenario_error")
+    elif scenario == "fresh_core_allow":
         if (
             receipt["xcode"] != "absent"
             or receipt["command_line_tools"] != "absent"

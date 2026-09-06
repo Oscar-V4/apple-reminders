@@ -283,6 +283,16 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn("docs/installation.md: missing", completed.stderr)
 
+    def test_fresh_native_receipt_contract_cannot_lose_its_closed_context(self) -> None:
+        for field in ("native_test_context", "bundled_native_runtime", "synthetic_fixture_create"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                self.copy_claim_tree(root)
+                self.replace(root, Path("docs/launch/external-tester-receipt.schema.json"), field, "missing_native_contract")
+                completed = self.run_checker(root)
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn("fresh Native", completed.stderr)
+
     def test_version_neutral_guides_keep_the_release_verification_prerequisite(self) -> None:
         for paths in ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
                       (Path("docs/installation.md"),)):

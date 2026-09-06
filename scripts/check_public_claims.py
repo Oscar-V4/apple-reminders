@@ -539,6 +539,14 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         else:
             if not {"release_verification", "core_canonical_alarm"}.issubset(check_ids):
                 errors.append(f"{RECEIPT_SCHEMA.as_posix()}: evidence check drift")
+            if not {"bundled_native_runtime", "synthetic_fixture_create"}.issubset(check_ids):
+                errors.append(f"{RECEIPT_SCHEMA.as_posix()}: fresh Native evidence checks missing")
+            scenarios = schema.get("properties", {}).get("scenario", {}).get("enum", [])
+            context = schema.get("properties", {}).get("native_test_context", {})
+            if ("fresh_native_image_no_clt" not in scenarios
+                    or context.get("additionalProperties") is not False
+                    or set(context.get("required", [])) != {"subject", "dependency_evidence", "source_build", "fixture_state"}):
+                errors.append(f"{RECEIPT_SCHEMA.as_posix()}: fresh Native context boundary missing")
             required_categories = {
                 "runtime_unverified",
                 "unsupported_build",

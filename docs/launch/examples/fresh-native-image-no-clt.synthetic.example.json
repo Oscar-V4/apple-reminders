@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "plugin_ref": "v0.7.1",
+  "codex_version": "0.1.0",
+  "hardware": "apple_silicon",
+  "macos_version": "26.5.2",
+  "python": {
+    "version": "3.13.15",
+    "source": "bundled"
+  },
+  "xcode": "absent",
+  "command_line_tools": "absent",
+  "scenario": "fresh_native_image_no_clt",
+  "tcc_precondition": "not_determined",
+  "tcc_result": "granted_after_prompt",
+  "checks": [
+    {
+      "id": "release_verification",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "install",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "permission_allow",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "core_bounded_read",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "bundled_native_runtime",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "experimental_capability",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "synthetic_fixture_create",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "experimental_synthetic_mutation",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "core_canonical_alarm",
+      "outcome": "passed",
+      "error_category": "none"
+    },
+    {
+      "id": "exact_cleanup",
+      "outcome": "passed",
+      "error_category": "none"
+    }
+  ],
+  "synthetic_data_only": true,
+  "exact_cleanup": "passed",
+  "external_python": "absent",
+  "native_test_context": {
+    "subject": "fresh_vm",
+    "dependency_evidence": "installation_inventory",
+    "source_build": "disabled",
+    "fixture_state": "verified_absent"
+  }
+}

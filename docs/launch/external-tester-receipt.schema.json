@@ -98,7 +98,8 @@
         "intel_core",
         "minimum_macos_core",
         "upgrade_identity",
-        "clt_only_experimental"
+        "clt_only_experimental",
+        "fresh_native_image_no_clt"
       ]
     },
     "tcc_precondition": {
@@ -148,7 +149,9 @@
               "upgrade_identity",
               "experimental_capability",
               "experimental_synthetic_mutation",
-              "exact_cleanup"
+              "exact_cleanup",
+              "bundled_native_runtime",
+              "synthetic_fixture_create"
             ]
           },
           "outcome": {
@@ -208,6 +211,53 @@
         "not_checked"
       ],
       "description": "Optional external Python presence; bundled runtime use alone does not prove absence."
+    },
+    "native_test_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tester-reported context for fresh_native_image_no_clt; format validation is not independent evidence that these observations occurred.",
+      "required": [
+        "subject",
+        "dependency_evidence",
+        "source_build",
+        "fixture_state"
+      ],
+      "properties": {
+        "subject": {
+          "type": "string",
+          "enum": [
+            "fresh_macos_user",
+            "fresh_vm",
+            "existing_user"
+          ]
+        },
+        "dependency_evidence": {
+          "type": "string",
+          "enum": [
+            "installation_inventory",
+            "environment_override_only",
+            "not_checked"
+          ]
+        },
+        "source_build": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "enabled",
+            "not_checked"
+          ]
+        },
+        "fixture_state": {
+          "type": "string",
+          "enum": [
+            "not_created",
+            "verified_absent",
+            "known_retained",
+            "unknown"
+          ],
+          "description": "Final knowledge about this scenario’s synthetic fixture; a failed write alone does not establish non-creation or cleanup."
+        }
+      }
     }
   }
 }
