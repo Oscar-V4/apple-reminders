@@ -92,7 +92,7 @@ jobs:
             --output "$RUNNER_TEMP/native-unsigned"
           printf 'zip_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-unsigned/unsigned.zip" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           printf 'context_sha256=%s\n' "$(shasum -a 256 "$RUNNER_TEMP/native-unsigned/unsigned-build-context.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
         with:
           name: native-unsigned-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-unsigned/*
@@ -166,7 +166,7 @@ jobs:
           for path in scripts/remkit_attach_image.m scripts/remkit_sections.m scripts/remkit_recover.m .codex-plugin/plugin.json; do
             git show "$SOURCE_COMMIT:plugins/apple-reminders/$path" > "$RUNNER_TEMP/native-source/$path"
           done
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
         with:
           name: native-unsigned-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-download
@@ -274,7 +274,7 @@ jobs:
         run: |
           test ! -e "$RUNNER_TEMP/native-credentials"
           test ! -e "$RUNNER_TEMP/native-signing-work"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
         with:
           name: native-signed-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-signed/*
@@ -304,7 +304,7 @@ jobs:
       SOURCE_COMMIT: ${{ inputs.source_commit }}
       WORKFLOW_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node 24)
         with:
           name: native-signed-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/native-helper
@@ -337,7 +337,7 @@ jobs:
             artifacts/native-helper/AppleRemindersNativeHelper-notarized.zip
             artifacts/native-helper/native-helper-build.json
             artifacts/native-helper/SHA256SUMS
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
         with:
           name: apple-reminders-native-helper-${{ inputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/native-helper/*
