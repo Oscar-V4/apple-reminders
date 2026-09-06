@@ -53,7 +53,7 @@ not replace synthetic Native write acceptance or clean-user testing.
 | Bundled Python provenance | Reverify against final candidate tag | Both architecture capsules and trusted source/workflow history |
 | Published release authenticity | Pending publication | Exact tag on canonical main history, immutable two-asset release, shared release SLSA statement, canonical verifier and final read-only job |
 | Clean-user Core permission and CRUD | External acceptance pending | Fresh allow/deny and upgrade identity; real Intel and minimum macOS 14 execution |
-| Native synthetic operation acceptance | Separate acceptance pending | Exact admitted OS/app/schema, synthetic action, and final native/EventKit read-back without compiler installation |
+| Native synthetic image acceptance | Passed on admitted arm64 host | [Packaged image flow](v0.7.0-native-image-acceptance.md) with unavailable developer-tool directory; fresh-user and other capability testing remain separate |
 | Sections and tags | No current acceptance evidence | Exact reviewed command-schema and operation evidence before claiming support |
 | iCloud/iPhone visibility | Separate observation required | Local/native/CloudKit evidence must not be relabeled direct device confirmation |
 
