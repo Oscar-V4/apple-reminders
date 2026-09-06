@@ -1,6 +1,8 @@
 # v0.7.1 local synthetic image acceptance
 
-Status: **passed for the recorded local candidate; publication remains pending**.
+Status at the recorded candidate checkpoint: **local test passed; publication
+was pending**. The later [publication record](public-beta-0.7.1.md) documents
+release verification without changing this earlier test's scope.
 The coordinating release task exercised the actual extracted v0.7.1 ZIP through
 its default MCP session on an arm64 Mac running macOS 26.5.2. Reminders permission
 was already granted. This was not a clean-user test or direct iPhone observation.
