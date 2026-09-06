@@ -11,16 +11,25 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes **v0.6.1**. Confirm the matching
-[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1) is
-published before installing this version; it records the package and
-verification results.
+This guide describes the **Unreleased source candidate**. The pinned v0.6.1
+[installation below](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
+retains its published behavior; use its tagged documentation
+when working with that version. No new release or signed Native bundle is
+claimed by this source update.
 
 The plugin includes a signed Python runtime, so there is **no separate Python
-installation**. Ordinary startup offers **9 Core and diagnostic tools**.
-The **6 additional experimental tools** require explicit `--experimental`
-startup and their existing compatibility checks. Default URL writes store
-**EventKit URL metadata only**; they do not promise a visible URL card.
+installation**. The candidate's ordinary startup offers **15 tools**: eight
+Core tools, diagnosis, and six Native/Recovery tools. Explicit `--core-only`
+startup exposes **9 Core and diagnostic tools** and rejects Native dispatch.
+`--experimental` is retained only as a **legacy hybrid URL opt-in**; it also
+exposes 15 tools. Default URL writes store **EventKit URL metadata only**.
+An explicit attachment action adds or changes a native URL card.
+
+The candidate requires a verified prebuilt signed universal Native helper bundle
+for image, section, and exact recovery operations, without a user compiler.
+Signing, notarization, packaged-artifact checks, and clean-Mac acceptance must
+be recorded before this becomes a release claim. Exact OS/app/schema admission
+still applies; section and tag functionality lack current acceptance evidence.
 
 ## Get started in three steps
 
@@ -68,9 +77,11 @@ the saved result.
 - “Add this link to the reminder.”
 - “Move the reminders for this project into my Project Archive list.”
 
-Sections, native tags, image attachments, and Recently Deleted recovery are
-experimental and off by default. See [Advanced setup and troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md)
-for opting in and understanding their limits.
+In the candidate, Native and recovery tools are discoverable by default. Their
+private implementation support tier remains `experimental_internals`, and each
+operation requires exact capability admission. See [Advanced setup and troubleshooting](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md)
+for availability and evidence limits. An unavailable capability needs a precise
+explanation, not an instruction to enable a flag or install a compiler.
 
 If Codex reports partial success or pending verification, ask it to check the
 exact reminder before retrying. A verified local change does not prove it has

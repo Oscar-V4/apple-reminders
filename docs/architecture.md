@@ -7,12 +7,12 @@ or treating any reference plugin as proof of quality.
 
 ## Public shape
 
-The v0.6.0 candidate runtime has a fixed nine-tool Core/Diagnostics default.
-An explicit `--experimental` launch exposes the full 15-tool catalog below.
-Disabled Native/Recovery calls and Experimental diagnosis are rejected before
-dispatch, even if a caller remembers the hidden tool names. Each session owns
-its mode and schema copy. Earlier 0.5.x releases have a different startup contract.
-See [ADR 0021](decisions/0021-core-default-experience.md).
+The Unreleased candidate discovers 15 tools by default. Explicit `--core-only`
+restricts discovery to nine Core/Diagnostics tools and rejects Native calls
+before dispatch. `--experimental` selects legacy hybrid URL behavior only, with
+the same 15-tool catalog. Each session owns its mode and schema copy. This
+supersedes the default-mode decision in ADR 0021 for the candidate, without
+changing historical releases. See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md).
 
 ### Bundled execution environment
 
@@ -99,7 +99,7 @@ user-facing promise.
    - Preserves omitted fields and keeps due dates, alarms, and recurrence typed
      separately.
    - Default URL writes use EventKit metadata only and perform final exact
-     reads without any private adapter dependency. Experimental mode retains
+     reads without any private adapter dependency. Legacy `--experimental` retains
      the legacy visible URL composition. URL-create idempotency fingerprints
      bind the selected mode and reject incompatible or legacy key replay
      before dispatch; they never use a fresh key to duplicate an uncertain item.
@@ -110,13 +110,17 @@ user-facing promise.
      implementation language: tag and URL-attachment paths stay in guarded
      Python/SQLite, while section and image writes invoke compiled ReminderKit
      helpers.
-   - Keeps Core usable when a private capability is unavailable.
+   - Keeps healthy Core usable when the Native bundle is missing, invalid, or
+     a private capability is unavailable.
    - Admits a private command only when the exact macOS version/build,
-     Reminders version/build, command-schema fingerprint, and any required
-     compiler match immutable repository evidence. There is no runtime opt-out.
-   - Resolves helper compilers only from fixed `/usr/bin/xcode-select -p` and a
-     fixed path under its selected developer directory; `PATH` and compiler
-     environment overrides cannot grant admission.
+     Reminders version/build and command-schema fingerprint match immutable
+     repository evidence, with verified bundled-helper execution where required.
+     There is no runtime opt-out; sections and tags still lack acceptance evidence.
+   - Uses a verified prebuilt signed universal Native helper bundle by default.
+     Bundle signing and release acceptance remain pending for this source candidate.
+     Explicit contributor `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1` permits
+     source fallback; fixed developer-directory compiler selection never grants
+     capability admission or becomes ordinary-user setup.
 5. **Recovery Module**
    - Lists Recently Deleted items without write authority and issues a
      short-lived `del1` only after an exact deleted-item read.
@@ -163,11 +167,10 @@ user-facing promise.
    - Retain only the 16 implementation commands required by the public Modules.
      The obsolete 0.2-era direct Core write, maintenance, cache, backup, and
      repair CLI has been physically removed rather than hidden behind aliases.
-   - Keep exactly three locally compiled private helpers: image-attachment
-     writes, section writes, and exact Recently Deleted inspection or recovery.
-     Tag assignments and native URL attachment changes stay in the guarded
-     Python/SQLite adapter and do not invoke `clang`. Only the helper-backed
-     paths require Xcode Command Line Tools.
+   - Bundle the image-attachment, section, and exact Recently Deleted helper
+     paths as verified prebuilt native code. Tag assignments and native URL
+     attachment changes stay in the guarded Python/SQLite adapter. Ordinary
+     execution does not require Xcode Command Line Tools.
    - Are not a second public API and are not a fallback for skills.
    - Run the shared Experimental preflight after pure input validation and
      before store resolution or mutation dispatch. Mutating functions repeat
@@ -242,7 +245,7 @@ Diagnosis is content-free. Its default `metadata_only` execution mode reads
 only bounded filesystem, application, SQLite schema, and capability metadata;
 it does not start `xcode-select`, `clang`, EventKit, Reminders, or a permission
 prompt. The explicit `experimental_toolchain` mode is accepted only for a
-related Native Extension or Recovery scope. It runs
+related Native Extension or Recovery scope. For explicit contributor source-build diagnosis, it runs
 `xcode-select -p` first and never invokes the `/usr/bin/clang` shim when no
 developer directory is selected. Neither mode runs `xcode-select --install`.
 Diagnosis never reads reminder titles, notes, list/section/tag names,
@@ -269,7 +272,8 @@ share initialization, rate-limit history, or lazy Facade instances.
 - EventKit reads and primary-field mutations with exact identity and bounds.
 - Create idempotency and guarded update/complete/reopen/move/delete.
 - EventKit-only URL metadata by default; visible URL composition and final
-  exact read only in Experimental mode. Clearing URL metadata preserves cards.
+  exact read through explicit attachment actions or legacy hybrid URL mode.
+  Clearing URL metadata preserves cards.
 - ReminderKit image and section writes with native sync evidence.
 - Exact-list section scope and fresh-revision tag assignment.
 - Stale-write rejection, one-use References, and unknown-outcome safety.

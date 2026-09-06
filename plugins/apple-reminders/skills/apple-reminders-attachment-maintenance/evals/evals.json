@@ -25,10 +25,10 @@
       "id": 3,
       "category": "direct",
       "prompt": "취업캠프 준비 미리알림의 기존 참고 링크를 새 URL로 바꿔줘.",
-      "expected_output": "For a Reminder URL field, resolves the exact target and routes to a fresh Core patch.url; default mode changes EventKit metadata only and preserves existing native cards. For an explicitly selected card, uses the native attachment workflow only when Experimental tools are already enabled and compatibility is admitted.",
+      "expected_output": "For a Reminder URL field, resolves the exact target and routes to a fresh Core patch.url; default mode changes EventKit metadata only and preserves existing native cards. For an explicitly selected card, uses the native attachment workflow when the exact capability is admitted in the default session.",
       "assertions": [
         "Does not conflate the URL field with an existing native card.",
-        "Does not enable Experimental mode or install developer tools automatically."
+        "Explains blocked capability availability without requesting mode changes or compiler installation."
       ]
     },
     {

@@ -144,9 +144,10 @@ def _require_current_contract(
 ) -> None:
     """Bind reader-facing setup claims to this candidate's actual startup contract."""
     claims = (
-        (rf"(?:guide describes|Area \|)\s+{re.escape(tag)}\b", "version identity boundary"),
-        (r"\b9\s+Core and diagnostic tools\b", "default tool inventory"),
-        (r"\b6\s+additional experimental tools\b.{0,160}?--experimental", "experimental opt-in inventory"),
+        (r"guide describes (?:the )?Unreleased source candidate", "version identity boundary"),
+        (r"\b15\s+tools\b", "default tool inventory"),
+        (r"--core-only.{0,100}?9 Core and diagnostic tools", "core-only inventory"),
+        (r"--experimental.{0,100}?legacy hybrid URL opt-in", "legacy URL opt-in boundary"),
         (r"\bEventKit(?: URL)? metadata only\b", "default URL behavior"),
         (r"\bno separate Python installation\b", "bundled Python setup boundary"),
     )
@@ -314,14 +315,17 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         installation,
         (
             "exact reviewed macOS version/build, Reminders version/build, and relevant schema evidence",
-            "does not bypass admission",
-            "Disabled tools are rejected unless the runtime started with `--experimental`",
+            "The signed bundle does not override those checks",
+            "Native calls are rejected before dispatch",
             "/bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh --experimental",
             "`execution_mode=metadata_only`",
             "`execution_mode=experimental_toolchain`",
-            "Core does not require this step",
-            "An unsupported build remains unsupported after installing a compiler",
+            "Ordinary users need no Xcode or Command Line Tools",
+            "Source compilation cannot grant OS/app/schema admission",
             "still need acceptance testing on fresh nondeveloper Macs",
+            "signing and packaged-release evidence remain pending",
+            "Sections and tags do not yet have acceptance evidence",
+            "Missing or unavailable Native support leaves healthy Core usable",
         ),
         INSTALLATION_GUIDE,
         errors,
@@ -331,8 +335,8 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         "Core runs locally on macOS 14+ without Xcode or a separate Python installation",
         "bundled signed runtime",
         "exact read-backs",
-        "Experimental features are off by default",
-        "additional compatibility and developer-tool requirements",
+        "Native tools are discoverable by default",
+        "exact OS/app/schema admission",
         "no plugin-owned remote backend",
     ):
         if needle not in card:

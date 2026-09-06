@@ -4,6 +4,23 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+### Changed
+
+- Source candidate: default discovery includes all 15 tools. Explicit
+  `--core-only` exposes nine Core/diagnostic tools and rejects Native dispatch.
+  `--experimental` is retained only as a legacy hybrid URL opt-in.
+- Default URL create/change remains EventKit metadata only. Use an explicit
+  attachment action for a native URL card.
+- Native helper paths target a verified prebuilt signed universal bundle, with
+  no ordinary-user Xcode or Command Line Tools dependency. Source fallback is
+  contributor-only through `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`.
+  Bundle signing, notarization, and packaged release acceptance remain pending;
+  this entry does not announce a released artifact.
+- Skills diagnose exact capability availability instead of asking users to
+  enable Experimental mode. Private support remains `experimental_internals`;
+  OS/app/schema admission, reference safety, and final read-back remain strict.
+  Sections and tags still need acceptance evidence.
+
 ### Fixed
 
 - Experimental helper compilation now supplies the macOS SDK from the selected

@@ -7,12 +7,12 @@ description: Plan and safely apply bounded Apple Reminders organization. Use for
 
 Start with a bounded proposal that names exact candidates. Do not infer deletion or a global scope from “clean this up.”
 
-Default to Stable Core organization: exact Reminder Lists, title/note grouping,
-completion, and archive-list moves. Sections, native tags, and exact recovery are
-Experimental and require an already enabled `--experimental` session, explicit
-intent, and an admitted capability. If those tools are absent, keep to an agreed
-Core action or explain the manual Reminders option; leave configuration and
-developer-tool installation unchanged.
+For general organization, use exact Reminder Lists, title/note grouping,
+completion, and archive-list moves. Honor explicit section, native tag, or
+recovery intent through the default Native tools when the exact capability is
+admitted. If unavailable, explain that result and offer an agreed alternative.
+Sections and tags lack current acceptance evidence; never infer support from
+tool discovery or request compiler installation to remedy missing evidence.
 
 ## Workflow
 
@@ -60,7 +60,7 @@ Native organization actions:
 Before deletion, offer a Core move to an exact archive list; this preserves the
 active Reminder without relying on private undelete. If an item is already
 deleted and the user explicitly requests recovery, diagnose `scope=recovery`
-first. Continue only on an admitted exact build/schema/compiler result. Then use
+first. Continue only on an admitted exact build/schema/bundled-helper result. Then use
 `inspect_recently_deleted {kind:"list"}` for bounded discovery and exact item
 mode immediately before one-item recovery. A `del1` is short-lived, one-use, and
 cannot substitute for an active `rev1`. Halt on the first non-verified receipt.
