@@ -25,7 +25,7 @@ require enabling a mode or installing developer tools.
    opaque reference and inspect the exact native state.
 3. Resolve exactly one local source image, URL, existing destination `attachment_id`, or exact active source Reminder plus image attachment ID. For cross-reminder copy, call `read_reminder` and native attachment inspection for the source immediately before the write. Do not guess what “this screenshot” means when no unique conversation attachment or local file is available.
 4. Call `change_reminder_attachment` with the fresh reference and exactly one action.
-5. Treat only `verified` or `unchanged` as completed after exact destination read-back. On pending or partial status, surface recovery guidance and perform no automatic second write.
+5. Treat only `verified` or `unchanged` as completed after exact destination read-back. On pending or partial status, follow the indicated read-only recovery; do not repeat the original mutation. Once fresh Core and native reads confirm the requested attachment and preserved fields, continue remaining authorized images with the newly returned reference. Unresolved or ambiguous state stops the write chain.
 
 Actions:
 
