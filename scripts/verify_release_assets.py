@@ -603,6 +603,7 @@ def verify_helper_manifest_ancestry_and_attestation(identity: GitIdentity) -> No
 
 NATIVE_WORKFLOW = ".github/workflows/prepare-signed-native-helper-source.yml"
 NATIVE_TEAM_ID = "V8347N9346"
+NATIVE_REQUIRED_FROM_VERSION = (0, 7, 0)
 NATIVE_SUBJECTS = frozenset({
     "AppleRemindersNativeHelper-notarized.zip", "native-helper-build.json", "SHA256SUMS",
 })
@@ -670,7 +671,15 @@ def verify_native_manifest_attestation(
 def verify_native_helper_provenance(
     identity: GitIdentity, *, main_ref: str = CANONICAL_MAIN_REF,
 ) -> dict[str, Any]:
-    """Verify an optional complete Native pair; never execute the Native app."""
+    """Require bundled Native from 0.7.0 and authenticate any legacy pair.
+
+    This is a release policy, independent of runtime Core availability when a
+    Native installation is absent or damaged. Native code is never executed.
+    """
+    version_match = TAG_RE.fullmatch(f"v{identity.version}")
+    if version_match is None:
+        raise VerificationError("Native release version is not strict semantic versioning")
+    native_required = tuple(map(int, version_match.groups())) >= NATIVE_REQUIRED_FROM_VERSION
     native = PLUGIN_ROOT / "native"
     app = native / "AppleRemindersNativeHelper.app"
     manifest_path = native / "native-helper-build.json"
@@ -678,6 +687,8 @@ def verify_native_helper_provenance(
     if native.is_symlink():
         raise VerificationError("Native release directory must be regular")
     if not any(present):
+        if native_required:
+            raise VerificationError("Native app and manifest are required for releases 0.7.0 onward")
         return {"present": False}
     if not all(present) or app.is_symlink() or manifest_path.is_symlink():
         raise VerificationError("Native release app and manifest must be a complete regular pair")

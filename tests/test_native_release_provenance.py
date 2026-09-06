@@ -124,9 +124,27 @@ class NativeReleasePairTests(unittest.TestCase):
         return manifest
 
     def test_absent_pair_preserves_historical_release_without_probes(self) -> None:
-        self.assertEqual(release.verify_native_helper_provenance(IDENTITY), {"present": False})
+        for version in ("0.5.0", "0.6.1", "0.6.99"):
+            with self.subTest(version=version):
+                identity = release.GitIdentity(f"v{version}", version, TAG_COMMIT, "e" * 40)
+                self.assertEqual(release.verify_native_helper_provenance(identity), {"present": False})
         for probe in (self.run, self.ancestor, self.historical, self.attest, self.verify_app):
             probe.assert_not_called()
+
+    def test_modern_release_requires_both_assets_before_any_probe(self) -> None:
+        for version in ("0.7.0", "0.7.1", "0.10.0", "1.0.0", "10.0.0"):
+            with self.subTest(version=version):
+                identity = release.GitIdentity(f"v{version}", version, TAG_COMMIT, "e" * 40)
+                with self.assertRaisesRegex(release.VerificationError, "required for releases 0.7.0 onward"):
+                    release.verify_native_helper_provenance(identity)
+        for probe in (self.run, self.ancestor, self.historical, self.attest, self.verify_app):
+            probe.assert_not_called()
+
+    def test_invalid_version_cannot_select_the_legacy_optional_policy(self) -> None:
+        for version in ("0.07.0", "0.7", "0.7.0-beta", ""):
+            identity = release.GitIdentity(f"v{version}", version, TAG_COMMIT, "e" * 40)
+            with self.subTest(version=version), self.assertRaisesRegex(release.VerificationError, "semantic versioning"):
+                release.verify_native_helper_provenance(identity)
 
     def test_partial_pair_and_symlinks_are_rejected_before_network(self) -> None:
         for kind in ("app_only", "manifest_only", "symlink"):
@@ -138,9 +156,14 @@ class NativeReleasePairTests(unittest.TestCase):
                 else:
                     self.app.symlink_to(self.root / "missing")
                     self.manifest_path.write_text("{}")
-                with self.assertRaises(release.VerificationError):
-                    release.verify_native_helper_provenance(IDENTITY)
+                for version in ("0.6.1", "0.7.0"):
+                    identity = release.GitIdentity(f"v{version}", version, TAG_COMMIT, "e" * 40)
+                    with self.subTest(version=version), self.assertRaisesRegex(
+                        release.VerificationError, "complete regular pair"
+                    ):
+                        release.verify_native_helper_provenance(identity)
                 self.attest.assert_not_called()
+                self.run.assert_not_called()
                 if self.app.is_symlink():
                     self.app.unlink()
                 elif self.app.exists():
@@ -168,6 +191,19 @@ class NativeReleasePairTests(unittest.TestCase):
         self.assertIn("--deny-self-hosted-runners", argv)
         self.verify_app.assert_called_once_with(self.plugin, self.app, expected_team_id="V8347N9346", require_developer_id=True, require_notarized=True)
         self.verify_manifest.assert_called_once_with(self.plugin, self.manifest_path, self.verify_app.return_value, expected_source_commit=SOURCE, expected_workflow_commit=WORKFLOW)
+
+    def test_release_workflow_main_ref_keeps_all_ancestry_gates(self) -> None:
+        self.make_pair()
+        main_ref = "refs/remotes/origin/main"
+        release.verify_native_helper_provenance(IDENTITY, main_ref=main_ref)
+        self.assertEqual(self.ancestor.call_args_list, [
+            mock.call(SOURCE, TAG_COMMIT, "Native source commit"),
+            mock.call(SOURCE, main_ref, "Native source commit"),
+            mock.call(WORKFLOW, TAG_COMMIT, "Native workflow commit"),
+            mock.call(WORKFLOW, main_ref, "Native workflow commit"),
+            mock.call(TAG_COMMIT, main_ref, "Native release commit"),
+            mock.call(WORKFLOW, SOURCE, "Native workflow commit"),
+        ])
 
     def test_version_source_build_input_and_history_drift_fail_closed(self) -> None:
         manifest = self.make_pair()
