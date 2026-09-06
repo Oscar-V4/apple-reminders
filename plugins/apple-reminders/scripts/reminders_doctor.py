@@ -822,14 +822,19 @@ def inspect_helper_toolchain(
 
 
 def inspect_private_frameworks(paths: dict[str, Any]) -> dict[str, Any]:
-    frameworks = {
-        name: {
-            "path": str(path),
-            "exists": path.exists(),
-            "readable": path.exists() and os.access(path, os.R_OK),
-        }
-        for name, path in sorted(paths["private_frameworks"].items())
-    }
+    frameworks = {}
+    for name, path in sorted(paths["private_frameworks"].items()):
+        # Path.exists() can suppress access errors on newer Python versions.
+        # Unknown accessibility must not become evidence of canonical absence.
+        try:
+            path.stat()
+        except FileNotFoundError:
+            exists, readable = False, False
+        except OSError:
+            exists, readable = None, False
+        else:
+            exists, readable = True, os.access(path, os.R_OK)
+        frameworks[name] = {"path": str(path), "exists": exists, "readable": readable}
     available = [
         name for name, item in frameworks.items() if item["exists"] and item["readable"]
     ]
@@ -841,7 +846,7 @@ def inspect_private_frameworks(paths: dict[str, Any]) -> dict[str, Any]:
         "frameworks": frameworks,
     }
     if not available:
-        paths_absent = bool(frameworks) and all(not item["exists"] for item in frameworks.values())
+        paths_absent = bool(frameworks) and all(item["exists"] is False for item in frameworks.values())
         return check_result(
             STATUS_WARNING,
             "private_framework_static_check_inconclusive" if paths_absent else "private_framework_path_unreadable",

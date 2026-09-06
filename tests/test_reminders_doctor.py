@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
 import plistlib
@@ -482,6 +483,24 @@ class StaticDependencyTests(unittest.TestCase):
         self.assertEqual(unreadable["code"], "private_framework_path_unreadable")
         for result in (absent, unreadable):
             self.assertEqual(result["status"], "warning")
+            self.assertFalse(result["details"]["dlopen_attempted"])
+            self.assertFalse(result["details"]["classes_instantiated"])
+
+    def test_framework_stat_access_errors_never_become_absence(self) -> None:
+        configured = {"private_frameworks": {"ReminderKit": Path("/synthetic/private/ReminderKit")}}
+        for failure in (PermissionError(errno.EACCES, "synthetic inaccessible parent"),
+                        OSError(errno.EIO, "synthetic metadata error")):
+            with self.subTest(error=type(failure).__name__), \
+                 mock.patch.object(Path, "stat", side_effect=failure), \
+                 mock.patch.object(Path, "exists", side_effect=AssertionError("exists masks access errors")), \
+                 mock.patch.object(reminders_doctor.os, "access", side_effect=AssertionError("stat already failed")), \
+                 mock.patch.object(reminders_doctor, "run_bounded_process", side_effect=AssertionError("process launched")), \
+                 mock.patch.object(reminders_doctor.sqlite3, "connect", side_effect=AssertionError("store opened")):
+                result = reminders_doctor.inspect_private_frameworks(configured)
+            self.assertEqual(result["status"], "warning")
+            self.assertEqual(result["code"], "private_framework_path_unreadable")
+            self.assertIsNone(result["details"]["frameworks"]["ReminderKit"]["exists"])
+            self.assertFalse(result["details"]["frameworks"]["ReminderKit"]["readable"])
             self.assertFalse(result["details"]["dlopen_attempted"])
             self.assertFalse(result["details"]["classes_instantiated"])
 
