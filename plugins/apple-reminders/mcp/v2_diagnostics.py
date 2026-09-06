@@ -86,6 +86,54 @@ CONTENT_FREE_FALSE_FIELDS = (
 )
 
 
+FRAMEWORK_INCONCLUSIVE_CODE = "private_framework_static_check_inconclusive"
+FRAMEWORK_INCONCLUSIVE_EXPLANATION = (
+    "Framework availability remains runtime-unverified; static path absence does "
+    "not establish an installation failure. Repeating the same metadata-only "
+    "diagnosis will not resolve this uncertainty."
+)
+
+
+def framework_runtime_verification_deferred(data: Mapping[str, Any]) -> bool:
+    """Recognize only the complete, otherwise admitted metadata-only case."""
+    if data.get("overall") != "degraded" or data.get("execution_mode") != "metadata_only":
+        return False
+    scope = data.get("scope")
+    if not isinstance(scope, str):
+        return False
+    checks = data.get("checks")
+    if not isinstance(checks, list) or any(not isinstance(check, Mapping) or not isinstance(check.get("name"), str) for check in checks):
+        return False
+    expected_checks = DIAGNOSIS_CHECKS.get(scope, frozenset())
+    if len(checks) != len(expected_checks) or {check.get("name") for check in checks} != expected_checks:
+        return False
+    non_ok = [check for check in checks if check.get("status") != "ok"]
+    if len(non_ok) != 1 or any(non_ok[0].get(key) != value for key, value in {
+        "name": "private_frameworks", "status": "warning", "code": FRAMEWORK_INCONCLUSIVE_CODE,
+    }.items()):
+        return False
+    if not any(check.get("name") == "helper_toolchain"
+               and check.get("status") == "ok" and check.get("code") == "native_helper_verified"
+               for check in checks):
+        return False
+    capabilities = data.get("capabilities")
+    expected_capabilities = set(DIAGNOSIS_CAPABILITIES.get(scope, ()))
+    if (not isinstance(capabilities, list) or not expected_capabilities
+            or len(capabilities) != len(expected_capabilities)
+            or any(not isinstance(capability, Mapping) or not isinstance(capability.get("capability"), str) for capability in capabilities)):
+        return False
+    if {capability.get("capability") for capability in capabilities} != expected_capabilities:
+        return False
+    return all(
+        capability.get("available") is True
+        and capability.get("runtime_verification_required") is True
+        and capability.get("build_compatibility") == "allowlisted"
+        and capability.get("schema_compatibility") == "allowlisted"
+        and capability.get("runtime_state") == "runtime_unverified"
+        for capability in capabilities
+    )
+
+
 class DiagnosticsError(ValueError):
     def __init__(
         self,
@@ -402,7 +450,7 @@ class DiagnosticsFacade:
         summary = ", ".join(
             f"{status}={count}" for status, count in counts.items() if count
         ) or "No checks were available for the requested diagnostic area."
-        return {
+        result = {
             "schema_version": 2,
             "ok": True,
             "status": "verified",
@@ -430,6 +478,9 @@ class DiagnosticsFacade:
                 },
             },
         }
+        if framework_runtime_verification_deferred(result["data"]):
+            result["data"]["summary"] += "; " + FRAMEWORK_INCONCLUSIVE_EXPLANATION
+        return result
 
     def _fingerprint(self) -> str:
         value = self._environment_fingerprint()

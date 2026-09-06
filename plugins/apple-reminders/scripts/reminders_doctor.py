@@ -841,10 +841,18 @@ def inspect_private_frameworks(paths: dict[str, Any]) -> dict[str, Any]:
         "frameworks": frameworks,
     }
     if not available:
+        paths_absent = bool(frameworks) and all(not item["exists"] for item in frameworks.values())
         return check_result(
             STATUS_WARNING,
-            "private_framework_unavailable",
-            "No readable ReminderKit private-framework binary was found by static path checks.",
+            "private_framework_static_check_inconclusive" if paths_absent else "private_framework_path_unreadable",
+            (
+                "No framework binary is visible at the checked filesystem paths. "
+                "This metadata-only check cannot determine shared-cache availability; "
+                "runtime loading was not attempted."
+                if paths_absent else
+                "No configured private-framework binary is readable. Static path access "
+                "failed; runtime loading was not attempted."
+            ),
             details=details,
         )
     return check_result(

@@ -1231,6 +1231,22 @@ def _tool_result_summary(payload: Mapping[str, Any]) -> str:
         isinstance(data, Mapping)
         and data.get("overall") in {"blocked", "degraded"}
     )
+    deferred_framework = False
+    if (payload.get("operation") == "diagnose_reminders" and status == "verified"
+            and payload.get("ok") is True and isinstance(data, Mapping)
+            and "error" not in payload and "next_action" not in payload):
+        # Import only while summarizing diagnostics; discovery stays lazy.
+        if __package__:
+            from .v2_diagnostics import (  # noqa: PLC0415
+                FRAMEWORK_INCONCLUSIVE_CODE, FRAMEWORK_INCONCLUSIVE_EXPLANATION,
+                framework_runtime_verification_deferred,
+            )
+        else:  # pragma: no cover - script entry point
+            from v2_diagnostics import (  # noqa: PLC0415
+                FRAMEWORK_INCONCLUSIVE_CODE, FRAMEWORK_INCONCLUSIVE_EXPLANATION,
+                framework_runtime_verification_deferred,
+            )
+        deferred_framework = framework_runtime_verification_deferred(data)
     needs_attention = (
         status not in {"verified", "unchanged"}
         or payload.get("ok") is not True
@@ -1254,10 +1270,13 @@ def _tool_result_summary(payload: Mapping[str, Any]) -> str:
         "evidence_scope": _summary_evidence_scope(verification),
         "next_read_only_action": (
             _summary_next_read_only_action(payload, target)
-            if needs_attention
+            if needs_attention and not deferred_framework
             else None
         ),
     }
+    if deferred_framework:
+        summary["diagnostic_reason_code"] = FRAMEWORK_INCONCLUSIVE_CODE
+        summary["diagnostic_explanation"] = FRAMEWORK_INCONCLUSIVE_EXPLANATION
     if target:
         summary["target"] = target
     if verification is not None:

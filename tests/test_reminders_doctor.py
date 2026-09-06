@@ -468,6 +468,24 @@ class StaticDependencyTests(unittest.TestCase):
         self.assertFalse(result["details"]["dlopen_attempted"])
         self.assertFalse(result["details"]["classes_instantiated"])
 
+    def test_framework_absence_and_unreadable_paths_are_distinct_without_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ReminderKit"
+            configured = {"private_frameworks": {"ReminderKit": path}}
+            with mock.patch.object(reminders_doctor, "run_bounded_process", side_effect=AssertionError("process launched")), \
+                 mock.patch.object(reminders_doctor.sqlite3, "connect", side_effect=AssertionError("store opened")):
+                absent = reminders_doctor.inspect_private_frameworks(configured)
+                path.write_bytes(b"fixture")
+                with mock.patch.object(reminders_doctor.os, "access", return_value=False):
+                    unreadable = reminders_doctor.inspect_private_frameworks(configured)
+        self.assertEqual(absent["code"], "private_framework_static_check_inconclusive")
+        self.assertEqual(unreadable["code"], "private_framework_path_unreadable")
+        for result in (absent, unreadable):
+            self.assertEqual(result["status"], "warning")
+            self.assertFalse(result["details"]["dlopen_attempted"])
+            self.assertFalse(result["details"]["classes_instantiated"])
+
+
 
 class PermissionAndAccountTests(unittest.TestCase):
     def test_eventkit_and_reminders_are_not_invoked(self) -> None:
@@ -760,8 +778,9 @@ class ReportContractTests(unittest.TestCase):
         capability = report["capabilities"]["reminderkit_image_attachments"]
         self.assertEqual(
             report["checks"]["private_frameworks"]["code"],
-            "private_framework_unavailable",
+            "private_framework_static_check_inconclusive",
         )
+        self.assertEqual(report["checks"]["private_frameworks"]["status"], "warning")
         self.assertEqual(capability["status"], "unknown")
         self.assertEqual(
             capability["basis"],
