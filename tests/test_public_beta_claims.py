@@ -202,11 +202,24 @@ class PublicBetaClaimTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("explicit bundled Python runtime", completed.stderr)
 
+    def test_source_candidate_does_not_advance_the_published_launch_packet(self) -> None:
+        source_version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.copy_claim_tree(root)
+            completed = self.run_checker(root)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.replace(root, Path("docs/launch/public-beta-launch-kit.md"),
+                         "v0.7.0", f"v{source_version}")
+            completed = self.run_checker(root)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("current release tag drift", completed.stderr)
+
     def test_versioned_runtime_contracts_cannot_be_conflated(self) -> None:
         version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "This guide describes the **published public beta**", "This guide describes the **general-availability release**", "version identity boundary"),
+             f"This guide describes **v{version}**", "This guide describes **v0.0.1**", "version identity boundary"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
              "15 tools", "9 tools", "default tool inventory"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
@@ -270,9 +283,21 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn("docs/installation.md: missing", completed.stderr)
 
+    def test_version_neutral_guides_keep_the_release_verification_prerequisite(self) -> None:
+        for paths in ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+                      (Path("docs/installation.md"),)):
+            with self.subTest(surface=paths[0]), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                self.copy_claim_tree(root)
+                for path in paths:
+                    self.replace(root, path, "Before installing, verify", "Install without verifying")
+                completed = self.run_checker(root)
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn("versioned release verification prerequisite", completed.stderr)
+
     def test_native_candidate_keeps_evidence_and_core_availability_boundaries(self) -> None:
         for old, new in (
-            ("clean-user acceptance remains pending", "clean-user acceptance is complete"),
+            ("clean-user acceptance is not established by these checks", "clean-user acceptance is established by these checks"),
             ("Sections and tags do not yet have\nacceptance evidence", "Sections and tags work on every supported build"),
             ("Missing or unavailable Native support leaves healthy Core usable", "Missing Native support disables all Core operations"),
         ):

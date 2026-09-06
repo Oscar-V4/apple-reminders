@@ -25,6 +25,9 @@ RECEIPT_EXAMPLE = Path("docs/launch/examples/external-tester-receipt.example.jso
 RELEASE_VERIFICATION = Path("docs/release-verification.md")
 RELEASE_VERIFIER = Path("scripts/verify_release_assets.py")
 RELEASE_WORKFLOW = Path(".github/workflows/release.yml")
+# Advance only after independently verified publication. A source patch version
+# does not turn the existing launch/tester packet into a published new release.
+PUBLISHED_TAG = "v0.7.0"
 INSTALLATION_GUIDE = Path("docs/installation.md")
 EXPERIMENTAL_DECISION = Path(
     "docs/decisions/0020-fail-closed-experimental-runtime-gate.md"
@@ -142,9 +145,11 @@ def _require_claim(
 def _require_current_contract(
     text: str, tag: str, relative: Path, errors: list[str]
 ) -> None:
-    """Bind reader-facing setup claims to this candidate's actual startup contract."""
+    """Bind version and behavior without freezing publication status in a package."""
     claims = (
-        (rf"guide describes (?:the )?published public beta for {re.escape(tag)}\b", "version identity boundary"),
+        (rf"guide describes {re.escape(tag)}\b", "version identity boundary"),
+        (r"Before installing, verify", "versioned release verification prerequisite"),
+        (rf"https://github\.com/Oscar-V4/apple-reminders/releases/tag/{re.escape(tag)}\b", "versioned release evidence link"),
         (r"\b15\s+tools\b", "default tool inventory"),
         (r"--core-only.{0,100}?9 Core and diagnostic tools", "core-only inventory"),
         (r"--experimental.{0,100}?legacy hybrid URL opt-in", "legacy URL opt-in boundary"),
@@ -214,20 +219,22 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
                 f"{relative.as_posix()}: unsupported universal Mac compatibility claim"
             )
         if relative in (Path("README.md"), PLUGIN_ROOT / "README.md", INSTALLATION_GUIDE, LAUNCH_KIT):
-            if re.search(r"\b(?:latest|current) published release is\s+" + re.escape(tag) + r"\b", _claim_text(texts[relative]), re.IGNORECASE):
+            if tag != PUBLISHED_TAG and re.search(r"\b(?:latest|current) published release is\s+" + re.escape(tag) + r"\b", _claim_text(texts[relative]), re.IGNORECASE):
                 errors.append(f"{relative.as_posix()}: candidate described as published without release evidence")
             if re.search(r"(?:still needs|still requires|install) Python 3\.11", _claim_text(texts[relative]), re.IGNORECASE):
                 errors.append(f"{relative.as_posix()}: obsolete external Python setup instruction")
 
+    published_install_command = install_command.replace(tag, PUBLISHED_TAG)
+    published_verify_command = release_verify_command.replace(tag, PUBLISHED_TAG)
     for relative in (LAUNCH_KIT, TESTER_WORKFLOW):
         text = texts[relative]
         if PLACEHOLDER_RE.search(text):
             errors.append(f"{relative.as_posix()}: unresolved angle-bracket placeholder")
         if "v0.4" in text:
             errors.append(f"{relative.as_posix()}: stale v0.4 launch value")
-        _require(text, install_command, relative, errors, label="candidate install command")
+        _require(text, published_install_command, relative, errors, label="published install command")
         _require(text, add_command, relative, errors, label="plugin add command")
-        _require(text, release_verify_command, relative, errors, label="release verifier command")
+        _require(text, published_verify_command, relative, errors, label="release verifier command")
         _require_all(
             text,
             (
@@ -253,7 +260,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
 
     launch = texts[LAUNCH_KIT]
     launch_tags = set(RELEASE_TAG_RE.findall(launch))
-    if launch_tags != {tag}:
+    if launch_tags != {PUBLISHED_TAG}:
         errors.append(f"{LAUNCH_KIT.as_posix()}: current release tag drift")
     _require_all(
         launch,
@@ -323,7 +330,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "Ordinary users need no Xcode or Command Line Tools",
             "Source compilation cannot grant OS/app/schema admission",
             "still need acceptance testing on fresh nondeveloper Macs",
-            "clean-user acceptance remains pending",
+            "clean-user acceptance is not established by these checks",
             "Sections and tags do not yet have acceptance evidence",
             "Missing or unavailable Native support leaves healthy Core usable",
         ),
@@ -520,7 +527,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
 
     schema = _load_json(root, RECEIPT_SCHEMA, errors)
     example = _load_json(root, RECEIPT_EXAMPLE, errors)
-    if example is not None and example.get("plugin_ref") != tag:
+    if example is not None and example.get("plugin_ref") != PUBLISHED_TAG:
         errors.append(f"{RECEIPT_EXAMPLE.as_posix()}: current release tag drift")
     if schema is not None:
         try:

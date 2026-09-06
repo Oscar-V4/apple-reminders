@@ -2,7 +2,31 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
-## Unreleased
+## 0.7.1 — Patch contents
+
+This version preserves exact attachment identity in successful image receipts
+and clarifies inconclusive-framework diagnostics. For publication status,
+signing runs, and verification evidence, consult the
+[versioned release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+and [signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
+
+### Fixed
+
+- Verified image attachment receipts retain the backend's exact attachment ID
+  only after final matching. Pending, missing, duplicate, mismatched, and
+  out-of-page targets stay unknown; replay uses the same verification gate.
+- Diagnostics distinguish an absent framework filesystem
+  path from an access or metadata error. A sole inconclusive static-path warning
+  gets a fixed explanation only when every selected capability is admitted and
+  the signed helper is verified. The result remains degraded and requires
+  attention, without recommending repeated identical metadata-only diagnosis.
+
+- Added repository-only helper-signing preflight for maintainers: exact canonical
+  refs and a reviewed digest before explicit dispatch to the existing workflows.
+  This does not add an installed user tool or change signing workflow inputs.
+
+The patch adds no private capability admission or Native helper source behavior.
+Signing and maintainer-host checks do not establish broader host/capability acceptance.
 
 ## 0.7.0 — Public beta
 

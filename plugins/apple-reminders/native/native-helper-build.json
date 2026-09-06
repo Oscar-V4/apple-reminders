@@ -1,11 +1,11 @@
 {
   "app_files": {
-    "AppleRemindersNativeHelper.app/Contents/CodeResources": "8aac8ac35a0411bfae85320048a9738fe248b2291637bd5cb63688a6beef37ab",
-    "AppleRemindersNativeHelper.app/Contents/Info.plist": "478634103a788d51666914b3209267a9a16ec7b127d404486a3bdcc64413b281",
-    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-image-helper": "92ac7d3ad9d4d70fce433a1f1f8c173b9cfc47c55c48c2e1e8a3ef69f02c53cd",
-    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-recovery-helper": "9ff205672efefe98d9c8fc463047926dd9d26a7f6ff8ee6dab8558f4ac2c013f",
-    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-sections-helper": "58e8499e0463d3e6d6adef99fdefe431e659443ac11533cddc2e5c0fe8077ce8",
-    "AppleRemindersNativeHelper.app/Contents/_CodeSignature/CodeResources": "3419ec32f26146b7d588a6f42056ec56de83f4c753d29b608f7512e3a4182b6e"
+    "AppleRemindersNativeHelper.app/Contents/CodeResources": "3661f606a63c4fa3d204ee89181c42ecc3652f4fdbf980fbe143420f52f4ec7d",
+    "AppleRemindersNativeHelper.app/Contents/Info.plist": "3f958e9f0c700354ff06b61c252e6ede9d6339d258993720460bfb90c005bb0b",
+    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-image-helper": "30eed7ad944fbee13d738d32c71419980d27bd586fe6c609bcbd0ce79d841f8e",
+    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-recovery-helper": "f701644e507de95d98bd295a6e5aca6a9a50af0163ffccfd11f85f6c9589f911",
+    "AppleRemindersNativeHelper.app/Contents/MacOS/apple-reminders-sections-helper": "409c3f1bdc901bce26e67fa5a0129a88b17627049e2e55309beb4713b01a68ef",
+    "AppleRemindersNativeHelper.app/Contents/_CodeSignature/CodeResources": "a12b3dfe8541fe07ea378c809cce042a1500f7759bc355acf99a876cc424b09a"
   },
   "app_name": "AppleRemindersNativeHelper.app",
   "architectures": [
@@ -13,9 +13,9 @@
     "x86_64"
   ],
   "binary_sha256": {
-    "image": "92ac7d3ad9d4d70fce433a1f1f8c173b9cfc47c55c48c2e1e8a3ef69f02c53cd",
-    "recovery": "9ff205672efefe98d9c8fc463047926dd9d26a7f6ff8ee6dab8558f4ac2c013f",
-    "sections": "58e8499e0463d3e6d6adef99fdefe431e659443ac11533cddc2e5c0fe8077ce8"
+    "image": "30eed7ad944fbee13d738d32c71419980d27bd586fe6c609bcbd0ce79d841f8e",
+    "recovery": "f701644e507de95d98bd295a6e5aca6a9a50af0163ffccfd11f85f6c9589f911",
+    "sections": "409c3f1bdc901bce26e67fa5a0129a88b17627049e2e55309beb4713b01a68ef"
   },
   "build_environment": {
     "clang": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
@@ -56,15 +56,15 @@
   },
   "notarization_checked": true,
   "notarized": true,
-  "plugin_version": "0.7.0",
+  "plugin_version": "0.7.1",
   "schema_version": 1,
   "signature": "developer-id",
-  "source_commit": "e9dfe50bb191421837a1dd52e2a6bc75d4ee2dc0",
+  "source_commit": "5dd71825aea8174d84f446f2bb2d70bfc44fe5da",
   "source_files": {
     "scripts/remkit_attach_image.m": "c236002f6e3c071325becd3a4307cd4fc308d263f8c44fc65b4ff8e379418c7f",
     "scripts/remkit_recover.m": "d3dac46569e41d193ac8bb2523e1dec1ff0d6b15dcaf36c84cf0f2d40412ad89",
     "scripts/remkit_sections.m": "a30290a94f33f4e3a062ae00470c7ae97008d7c86c9049787ed3da8053a158fe"
   },
   "team_id": "V8347N9346",
-  "workflow_commit": "fce05cbf98bb99dd532d38babbaf484311f72486"
+  "workflow_commit": "0c474fbb9369c3b1f93c7710ae45a6d41115286e"
 }
