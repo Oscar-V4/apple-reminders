@@ -1278,11 +1278,24 @@ def _bundled_helper_inventory() -> dict[str, str]:
         raise BundledHelperUnavailable(
             "native helper directory could not be inspected"
         ) from exc
-    if set(native_entries) != {
-        BUNDLED_HELPER_APP_NAME,
-        BUNDLED_HELPER_MANIFEST_NAME,
-    }:
+    core_entries = {BUNDLED_HELPER_APP_NAME, BUNDLED_HELPER_MANIFEST_NAME}
+    optional_native_entries = {
+        "AppleRemindersNativeHelper.app": (stat.S_ISDIR, 0o755),
+        "native-helper-build.json": (stat.S_ISREG, 0o644),
+    }
+    # Native is optional, but its two top-level artifacts must arrive together.
+    # Its own resolver validates its contents before any Native executable runs.
+    if set(native_entries) not in (core_entries, core_entries | set(optional_native_entries)):
         raise BundledHelperUnavailable("native helper inventory is invalid")
+    for name, (expected_type, expected_mode) in optional_native_entries.items():
+        if name in native_entries:
+            metadata = native_entries[name]
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not expected_type(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != expected_mode
+            ):
+                raise BundledHelperUnavailable("optional Native helper artifact is unsafe")
     manifest_metadata = native_entries[BUNDLED_HELPER_MANIFEST_NAME]
     if (
         stat.S_ISLNK(manifest_metadata.st_mode)

@@ -2067,6 +2067,53 @@ class EventKitContractTests(unittest.TestCase):
             ):
                 eventkit_bridge._bundled_helper_inventory()
 
+    def test_core_inventory_accepts_only_complete_safe_native_pair(self) -> None:
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            native_root = Path(directory) / "native"
+            native_root.mkdir(mode=0o755)
+            app = native_root / eventkit_bridge.BUNDLED_HELPER_APP_NAME
+            shutil.copytree(eventkit_bridge.BUNDLED_HELPER_APP, app)
+            shutil.copyfile(
+                eventkit_bridge.BUNDLED_HELPER_MANIFEST_PATH,
+                native_root / eventkit_bridge.BUNDLED_HELPER_MANIFEST_NAME,
+            )
+            optional_app = native_root / "AppleRemindersNativeHelper.app"
+            optional_manifest = native_root / "native-helper-build.json"
+            with (
+                mock.patch.object(eventkit_bridge, "BUNDLED_HELPER_NATIVE_DIR", native_root),
+                mock.patch.object(eventkit_bridge, "BUNDLED_HELPER_APP", app),
+            ):
+                baseline = eventkit_bridge._bundled_helper_inventory()
+                optional_app.mkdir(mode=0o755)
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+                optional_manifest.write_text("{}", encoding="utf-8")
+                optional_manifest.chmod(0o644)
+                self.assertEqual(baseline, eventkit_bridge._bundled_helper_inventory())
+                optional_manifest.chmod(0o666)
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+                optional_manifest.unlink()
+                optional_manifest.symlink_to(native_root / eventkit_bridge.BUNDLED_HELPER_MANIFEST_NAME)
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+                optional_manifest.unlink()
+                optional_manifest.write_text("{}", encoding="utf-8")
+                optional_manifest.chmod(0o644)
+                optional_app.rmdir()
+                optional_app.symlink_to(app, target_is_directory=True)
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+                optional_app.unlink()
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+                optional_manifest.unlink()
+                (native_root / "unexpected").write_text("extra")
+                with self.assertRaises(eventkit_bridge.BundledHelperUnavailable):
+                    eventkit_bridge._bundled_helper_inventory()
+
     def test_bundled_manifest_rejects_identity_metadata_drift(self) -> None:
         app_files = eventkit_bridge._bundled_helper_inventory()
         manifest = json.loads(
