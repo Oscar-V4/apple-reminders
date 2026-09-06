@@ -187,8 +187,8 @@ Verify the exact release before starting.
 
 This closed receipt category is retained for historical compiler-backed release
 testing. It is not the v0.7.0 ordinary Native installation path and cannot
-establish no-compiler Native acceptance. For that new acceptance, use the
-maintainer signoff record until a dedicated closed receipt scenario is added.
+establish no-compiler Native acceptance. Use the fresh Native scenario below
+for its distinct environment and operation evidence.
 For an older pinned version only, use a disposable subject with full Xcode
 absent and Command Line Tools already installed intentionally.
 
@@ -207,6 +207,98 @@ absent and Command Line Tools already installed intentionally.
 - If an admitted mutation runs, perform its exact read-back and delete the
   synthetic Reminder, generated image, and disposable list. Never test a
   person's real sections, attachments, or Recently Deleted content.
+
+### `fresh_native_image_no_clt`
+
+This additive scenario is for an exact verified public beta tag v0.7.1 or later.
+Use only after that tag is published and the canonical release verifier succeeds.
+The separate [synthetic example](examples/fresh-native-image-no-clt.synthetic.example.json)
+is a hypothetical formatting fixture, **not a real receipt or acceptance result**.
+The existing v0.7.0 example and historical scenarios remain unchanged.
+
+Use a fresh macOS user or fresh VM with a not-yet-decided Reminders permission.
+Record actual installation-inventory observations for both Xcode and Command
+Line Tools as `absent`. A developer Mac using an invalid `DEVELOPER_DIR`, hidden
+compiler `PATH`, or another environment override is not evidence of software
+absence or a fresh subject. Do not uninstall tools, reset TCC, or change a
+person's ordinary environment to manufacture this scenario.
+
+The required closed `native_test_context` records tester reports:
+
+- `subject`: `fresh_macos_user` or `fresh_vm`.
+- `dependency_evidence`: `installation_inventory`.
+- `source_build`: `disabled`; no contributor source fallback is enabled.
+- `fixture_state`: final knowledge described below, without names, IDs, or paths.
+
+`existing_user`, `environment_override_only`, and `not_checked` context values
+cannot satisfy this scenario. Context is valid only on this scenario, so it
+cannot reclassify a historical receipt. `python.source` must be `bundled`;
+`external_python` remains optional and independently reported. Bundled use does
+not prove that a separate Python installation is absent.
+
+Record exactly these ten checks in the following dependency order. A check that
+failed, blocked, or was not run stops later acceptance checks; mark them
+`not_run`. An uncertain operation uses `failed` with an existing bounded category
+such as `verification_pending`, `partial_success`, or `unexpected_failure`.
+The receipt is still a valid incomplete report; do not retry the operation to
+obtain an all-passed receipt.
+
+| Check | Evidence needed for `passed` |
+| --- | --- |
+| `release_verification` | Canonical verification of the exact immutable public beta package, source history, and signed helper/runtime provenance |
+| `install` | Exact-tag installation and a new Codex task; no installed-cache modification |
+| `permission_allow` | Observed first permission grant; `tcc_precondition:not_determined`, `tcc_result:granted_after_prompt` |
+| `core_bounded_read` | Successful bounded Core read on that subject |
+| `bundled_native_runtime` | Default MCP session and verified signed Native helper provider with source fallback disabled; use content-free targeted metadata diagnosis |
+| `experimental_capability` | Exact image capability is available under admitted OS/app/schema evidence; the same targeted diagnosis can supply this check |
+| `synthetic_fixture_create` | One synthetic Reminder created and exactly read back, with synthetic due/alarm fields selected for preservation checks |
+| `experimental_synthetic_mutation` | One synthetic image attach verified; target ID equals final attachment ID and compact-summary target ID; compare locally without submitting identifiers |
+| `core_canonical_alarm` | Exact read-back proves the synthetic alarm and unrelated Core fields survived the attachment |
+| `exact_cleanup` | Independent verification that the exact scenario fixture is absent |
+
+An otherwise admitted capability may have an inconclusive framework-path
+warning and retain `attention_required`. That alone is not failed admission or
+a reason to repeat identical metadata-only diagnosis. A blocked helper, unknown
+OS/build, schema mismatch, or other blocker prevents the mutation. Record sync
+evidence locally, but never turn CloudKit evidence into direct iPhone confirmation.
+
+The exact tag identifies public code and artifact provenance through the
+canonical verifier; Python version/source and the runtime check identify the
+selected runtime. Do not add hashes, build strings, raw Doctor output, URLs,
+identifiers, paths, or personal content to the receipt. Before runtime checks
+actually run, package/runtime fields describe the intended package, not proof
+that execution succeeded. The validator is offline and cannot prove a tag is
+published or that the tester's observations occurred.
+
+#### Fixture state and incomplete reports
+
+Cleanup is independent of mutation success. A failed write alone proves neither
+that a fixture was created nor that nothing remains. Set final `fixture_state`:
+
+| State | Required meaning | Cleanup outcome |
+| --- | --- | --- |
+| `not_created` | Fixture creation never ran, or affirmative no-creation evidence exists | `not_run` |
+| `verified_absent` | Exact read-back proves the scenario fixture is absent, including after an uncertain create or cleanup | `passed` |
+| `known_retained` | Exact observation confirms the fixture remains | `failed` if cleanup failed; otherwise `not_run` |
+| `unknown` | Creation or final presence is unresolved | `failed` if cleanup failed; otherwise `not_run` |
+
+If creation passed, `not_created` is invalid. A pending/partial create cannot be
+reported as `not_created`; resolve it with an exact read or retain `unknown`.
+If creation never ran, report `not_created` and cleanup `not_run`, rather than
+inventing a successful cleanup. Failed/unknown attachment outcomes can validly
+retain a known or unresolved fixture. The top-level `exact_cleanup` must agree
+with the cleanup check. No all-passed result is implied by the scenario name.
+
+If permission is denied or its result is unconfirmed, stop and leave downstream
+checks unrun. Record `denied` only with the bounded `permission_denied` category;
+use `not_checked` or `unchanged` for unobserved outcomes. No repeated prompt or
+mutation is part of that failure path.
+
+All fields are self-reported unless separately reviewed against public artifact
+and execution evidence. A valid receipt establishes only closed format and
+internal consistency. Our earlier existing-permission developer-Mac test with
+an invalid developer directory remains maintainer evidence, not this fresh-user
+no-CLT scenario.
 
 ## Sharing a receipt or failure
 
