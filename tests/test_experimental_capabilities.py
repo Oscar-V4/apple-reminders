@@ -305,6 +305,15 @@ class ExperimentalCapabilityModelTests(unittest.TestCase):
 
 
 class AdapterExperimentalPreflightTests(unittest.TestCase):
+    def setUp(self):
+        # These existing cases explicitly exercise the contributor source-build path.
+        env = mock.patch.dict("os.environ", {"APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        bundled = mock.patch.object(adapter, "resolve_native_helper", side_effect=adapter.NativeHelperUnavailable("test fixture"))
+        bundled.start()
+        self.addCleanup(bundled.stop)
+
     def _args(self, command: str, **overrides: object) -> argparse.Namespace:
         values: dict[str, object] = {
             "command": command,

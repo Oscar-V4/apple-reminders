@@ -7,14 +7,18 @@ attachments, and Recently Deleted are Experimental Internals. Before an
 Experimental mutation, targeted diagnosis must report the exact capability as
 available; blocked build/schema/compiler results are terminal no-write outcomes.
 
-Default discovery contains eight Core tools plus `diagnose_reminders`. Native
-Extension and Recovery tools below require an explicitly configured
-`--experimental` launch; direct calls remain blocked when hidden. This opt-in
-never bypasses runtime build, schema, compiler, or permission checks.
+Default discovery contains 15 tools: eight Core tools, diagnosis, and six
+Native/Recovery tools. Explicit `--core-only` exposes nine tools and rejects
+Native dispatch. `--experimental` retains the same 15 tools and opts in only to
+legacy hybrid URL composition. Discovery never bypasses OS/app/schema,
+bundled-helper, or permission checks. Ordinary helper operations require a
+verified prebuilt signed universal bundle, without a user compiler. Missing
+bundle or capability evidence is an availability result, not an installation
+request. Section and tag acceptance evidence remains incomplete.
 
 Default Core `url` writes only EventKit metadata. Use notes for a visible text
-link while preserving existing text. Experimental mode additionally composes a
-native URL card on string URL writes. In both modes, `url:null` clears metadata
+link while preserving existing text. Explicit attachment actions add native URL cards. Only legacy
+`--experimental` mode additionally composes a native URL card on string URL writes. In both modes, `url:null` clears metadata
 and preserves existing attachment objects. A verified Core metadata write does
 not verify any existing card, iCloud convergence, or iPhone visibility.
 
@@ -87,7 +91,7 @@ The deleted item's `account_id` and a destination Reminder List's `source.id` id
 
 This recovery surface is bounded by the local 30-day Recently Deleted retention
 window and depends on an exact allowlisted macOS/Reminders build, recovery schema
-fingerprint, Command Line Tools for exact inspection/recovery, and compatible
+fingerprint, a verified bundled helper for exact inspection/recovery, and compatible
 private frameworks. A successful run is evidence for that exact environment and
 moment, not a generic platform, account, iCloud, or iPhone guarantee.
 
@@ -128,7 +132,7 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 ## Diagnostics
 
-`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area, support tier, compiler requirement, build/schema compatibility, runtime state, and precise block reason. Use it before an explicitly requested Experimental mutation or after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only explicit `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; it never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
+`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area, support tier, compiler requirement, build/schema compatibility, runtime state, and precise block reason. Use it before an explicitly requested Experimental mutation or after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only contributor-requested `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; source fallback requires `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`. Diagnosis never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
 
 ## Receipt rules
 

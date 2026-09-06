@@ -69,7 +69,7 @@ else:  # pragma: no cover - exercised by the stdio entry point
 
 SERVER_NAME = "apple-reminders-local"
 SERVER_TITLE = "Apple Reminders"
-SERVER_VERSION = "0.6.1"
+SERVER_VERSION = "0.7.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     LATEST_PROTOCOL_VERSION,
@@ -691,6 +691,8 @@ def invoke_doctor(
         "--detail-level",
         str(arguments.get("detail_level", "summary")),
     ]
+    if arguments.get("scope") == "packaging":
+        argv.extend(["--scope", "packaging"])
     if arguments.get("execution_mode") == "experimental_toolchain":
         argv.append("--run-experimental-toolchain-check")
     try:
@@ -1524,16 +1526,20 @@ class McpRuntime:
         clock: Callable[[], float] = time.monotonic,
         max_calls_per_minute: int = MAX_CALLS_PER_MINUTE,
         enable_experimental: bool = False,
+        core_only: bool = False,
     ) -> None:
         if max_calls_per_minute <= 0:
             raise ValueError("max_calls_per_minute must be positive")
+        if core_only and enable_experimental:
+            raise ValueError("Core-only and legacy experimental modes are mutually exclusive")
         self._enable_experimental = enable_experimental
+        self._enable_native_tools = not core_only
         self._tools = [
             copy.deepcopy(tool) for tool in TOOLS
-            if enable_experimental or tool["name"] in _V2_CORE_TOOLS | _V2_DIAGNOSTIC_TOOLS
+            if self._enable_native_tools or tool["name"] in _V2_CORE_TOOLS | _V2_DIAGNOSTIC_TOOLS
         ]
         for tool in self._tools:
-            if tool["name"] == "diagnose_reminders" and not enable_experimental:
+            if tool["name"] == "diagnose_reminders" and not self._enable_native_tools:
                 properties = tool["inputSchema"]["properties"]
                 properties["scope"]["enum"] = ["core", "access", "packaging"]
                 properties["scope"]["description"] = "Diagnose the affected Core, permission, or installation area."
@@ -1567,6 +1573,7 @@ class McpRuntime:
             dispatch=self._dispatch,
             rate_limit_allows_call=self._rate_limit_allows_call,
             enable_experimental=self._enable_experimental,
+            enable_native_tools=self._enable_native_tools,
         )
 
     def handle(self, message: Any) -> dict[str, Any] | None:
@@ -1589,6 +1596,7 @@ def _call_tool(
     dispatch: Callable[[str, Mapping[str, Any]], ToolOutcome],
     rate_limit_allows_call: Callable[[], bool],
     enable_experimental: bool = False,
+    enable_native_tools: bool = True,
 ) -> dict[str, Any]:
     tool = TOOLS_BY_NAME[name]
     supplied_for_error = raw_arguments if isinstance(raw_arguments, dict) else {}
@@ -1612,16 +1620,16 @@ def _call_tool(
                 or arguments.get("execution_mode") == "experimental_toolchain"
             )
         )
-        if experimental_request and not enable_experimental:
+        if experimental_request and not enable_native_tools:
             payload, mutation_state = _v2_pre_dispatch_failure(
                 name,
                 arguments,
                 code="unsupported_capability",
-                reason_code="experimental_disabled",
+                reason_code="native_tools_disabled",
                 message=(
-                    "Experimental features are disabled in this session. Core remains "
-                    "available. Only an explicit launch with --experimental enables "
-                    "these tools; it does not override compatibility or permission checks."
+                    "Native tools are disabled by this session's --core-only profile. "
+                    "Restart without --core-only to discover these tools. Capability "
+                    "compatibility, permissions, and verification still apply."
                 ),
                 retryable=False,
                 enable_experimental=enable_experimental,
@@ -1773,7 +1781,9 @@ def _handle_message(runtime: McpRuntime, message: Any) -> dict[str, Any] | None:
                     + (
                         " Experimental tools are enabled; URL writes also use native attachments. Gates apply."
                         if runtime._enable_experimental else
-                        " Core mode: 9 tools; URL metadata only. Experimental tools are disabled."
+                        " Native tools are discoverable by default; capability checks apply. Core URLs are metadata only."
+                        if runtime._enable_native_tools else
+                        " Core mode: 9 tools; URL metadata only. Native tools are disabled."
                     )
                 ),
             },
@@ -1851,14 +1861,20 @@ def main(
     argv: list[str] | None = None, *, backend_paths: BackendPaths | None = None
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--experimental", action="store_true",
-        help="Enable private Native Extension/Recovery tools and hybrid URL writes; compatibility gates still apply.",
+        help="Retain legacy hybrid URL writes. Native tools are already discoverable by default; capability gates still apply.",
+    )
+    modes.add_argument(
+        "--core-only", action="store_true",
+        help="Expose only the nine Core and diagnostic tools, with no Native/Recovery dispatch.",
     )
     args = parser.parse_args(argv)
     runtime = McpRuntime(
         backend_paths or DEFAULT_BACKEND_PATHS,
         enable_experimental=args.experimental,
+        core_only=args.core_only,
     )
     return serve_stdio(runtime)
 

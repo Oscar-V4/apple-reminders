@@ -109,7 +109,7 @@ class PublicBetaClaimTests(unittest.TestCase):
             (
                 "installation",
                 (Path("docs/installation.md"),),
-                "does not bypass admission",
+                "signed bundle does not override those checks",
                 "bypasses admission",
             ),
             (
@@ -172,7 +172,7 @@ class PublicBetaClaimTests(unittest.TestCase):
                 # to the surrounding release paragraph or Markdown wrapping.
                 for old, new in (
                     (r"You do not\s+need Xcode", "You do not require Xcode"),
-                    (r"verification\s+results", "verification evidence"),
+                    (r"Ordinary reminder work", "Ordinary Core reminder work"),
                 ):
                     text, replacements = re.subn(old, new, text, count=1)
                     self.assertEqual(replacements, 1)
@@ -206,15 +206,15 @@ class PublicBetaClaimTests(unittest.TestCase):
         version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             f"This guide describes **v{version}**", "This guide describes **v0.0.1**", "version identity boundary"),
+             "This guide describes the **Unreleased source candidate**", "This guide describes the **published release**", "version identity boundary"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "9 Core and diagnostic tools", "15 Core and diagnostic tools", "default tool inventory"),
+             "15 tools", "9 tools", "default tool inventory"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "6 additional experimental tools", "6 automatically enabled experimental tools", "experimental opt-in inventory"),
+             "legacy hybrid URL opt-in", "Native enabling flag", "legacy URL opt-in boundary"),
             ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
              "EventKit URL metadata only", "EventKit storage plus native URL attachment work", "default URL behavior"),
             ((Path("docs/installation.md"),),
-             "9 Core and diagnostic tools", "15 Core and diagnostic tools", "default tool inventory"),
+             "15 tools", "9 tools", "default tool inventory"),
             ((Path("docs/installation.md"),),
              "no separate Python installation", "a separate Python installation is required", "bundled Python setup boundary"),
         )
@@ -249,10 +249,10 @@ class PublicBetaClaimTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("native/eventkit-helper-build.json", completed.stderr)
 
-    def test_installation_guide_keeps_opt_in_and_clean_mac_limits(self) -> None:
+    def test_installation_guide_keeps_core_only_and_clean_mac_limits(self) -> None:
         for old, new in (
             (
-                "Disabled tools are rejected unless the runtime started with `--experimental`",
+                "Native calls are rejected before dispatch",
                 "Disabled tools can be called directly by name",
             ),
             (
@@ -267,6 +267,20 @@ class PublicBetaClaimTests(unittest.TestCase):
 
                 completed = self.run_checker(root)
 
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn("docs/installation.md: missing", completed.stderr)
+
+    def test_native_candidate_keeps_evidence_and_core_availability_boundaries(self) -> None:
+        for old, new in (
+            ("publication and clean-user acceptance remain pending", "signed Native release has shipped"),
+            ("Sections and tags do not yet have\nacceptance evidence", "Sections and tags work on every supported build"),
+            ("Missing or unavailable Native support leaves healthy Core usable", "Missing Native support disables all Core operations"),
+        ):
+            with self.subTest(claim=old), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                self.copy_claim_tree(root)
+                self.replace(root, Path("docs/installation.md"), old, new)
+                completed = self.run_checker(root)
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn("docs/installation.md: missing", completed.stderr)
 

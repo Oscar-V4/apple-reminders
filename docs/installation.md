@@ -1,23 +1,24 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes v0.6.1. Confirm the matching
-[release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1) is
-published before installing; its page records the package and verification
-results.
+This guide describes the **Unreleased source candidate** for **v0.7.0**.
+Install the README's v0.7.0 commands only after the matching release is published
+and its canonical verifier passes. The candidate label is not publication or
+signed-artifact evidence. The historical
+[v0.6.1 release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.6.1)
+has its own tagged documentation and different startup behavior.
 
-## This version's contract
+## Candidate contract
 
-| Area | v0.6.1 contract |
+| Area | v0.7.0 Unreleased contract |
 |---|---|
-| Tool discovery | 9 Core and diagnostic tools by default; 6 additional experimental tools require `--experimental` startup |
-| Experimental dispatch | Disabled tools are rejected unless the runtime started with `--experimental`; existing operation gates still apply |
-| Core `url` create/change | EventKit URL metadata only by default; native visible-card composition is an experimental operation |
+| Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
+| Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
+| Legacy URL mode | `--experimental` is only a legacy hybrid URL opt-in, with the same 15-tool inventory |
+| Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
 | EventKit helper | Bundled signed, notarized helper with its existing permission identity |
-
-Older releases have different startup and URL behavior. Use the documentation
-at the exact installed tag when diagnosing an older installation.
+| Native helper | Prebuilt signed universal bundle verified; publication and clean-user acceptance remain pending |
 
 ## Bundled runtime and Finder-launched Codex
 
@@ -63,72 +64,68 @@ First grant, denial, revocation, and permission continuity across update paths
 still need acceptance testing on fresh nondeveloper Macs; an existing developer
 profile is not sufficient evidence.
 
-## Experimental capabilities
+## Native availability
 
-The following paths are outside ordinary EventKit Core. All six Native
-Extension and Recovery tools require explicit experimental startup. Listing a
-tool does not mean the current Mac supports the requested operation.
+All six Native Extension and Recovery tools are discoverable in the candidate's
+default session. Listing a tool does not mean the current Mac supports its
+operation. The private implementation tier remains `experimental_internals`.
 
-| Capability | Local compiler requirement |
-|---|---|
-| Section creation or moves | Required |
-| Image attachment changes | Required |
-| Exact Recently Deleted inspection or recovery | Required |
-| Native tag assignment and URL-only attachment changes | No compiler; still guarded private-store operations |
-| Bounded native metadata inspection | No compiler; a successful read does not establish write compatibility |
-| Recently Deleted inventory | No compiler; requires the admitted recovery build/schema |
+Image, section, and exact Recently Deleted operations use a verified prebuilt
+signed universal Native bundle in the intended distribution. Ordinary users
+need no Xcode or Command Line Tools. Tag assignment, URL-only attachment
+changes, bounded metadata inspection, and deleted-item inventory remain guarded
+private-store operations. A successful read does not establish write support.
 
 Private operations require the exact reviewed macOS version/build, Reminders
-version/build, and relevant schema evidence. A successful compiler check,
-matching selector, or experimental launch flag does not bypass admission. See
-the [capability matrix](workflow-capability-matrix.md) and
-[runtime-gate decision](decisions/0020-fail-closed-experimental-runtime-gate.md).
+version/build, and relevant schema evidence, plus final exact read-back. The
+signed bundle does not override those checks. Sections and tags do not yet have
+acceptance evidence; discovery alone must not be presented as functional support.
+See [ADR 0023](decisions/0023-native-default-minimal-dependencies.md), the
+[dependency/capability matrix](workflow-capability-matrix.md), and the
+[candidate signoff record](release-evidence/release-candidate-signoff.md).
 
-After a relevant failure, start with targeted, content-free
-`diagnose_reminders` using `execution_mode=metadata_only`. It does not run
-`xcode-select` or `clang`. Only an explicitly requested Experimental toolchain
-diagnosis uses `execution_mode=experimental_toolchain`. If that reports
-`compiler_required` and you choose to develop or test a compiler-backed feature,
-install Apple's Command Line Tools separately. Core does not require this step.
-An unsupported build remains unsupported after installing a compiler.
+Use targeted, content-free `diagnose_reminders` with
+`execution_mode=metadata_only` before a requested private mutation or after a
+relevant failure. Explain the returned availability and precise block reason.
+Missing or unavailable Native support leaves healthy Core usable.
+A missing or invalid bundle needs a reviewed package repair; an unadmitted build
+needs new compatibility evidence. Neither is repaired by asking an ordinary
+user to install a compiler, change flags, or weaken an allowlist.
 
-In v0.6.1, Experimental image preflight can incorrectly fail with
-`helper_syntax_check_failed` on a selected Xcode installation because the
-compiler invocation omits its macOS SDK. The same version's attachment
-allowlist compares a whole-diagnostic schema hash with a command-scoped hash,
-which can reject the recorded supported build. These are plugin defects;
-reinstalling Xcode or editing a local allowlist is not a remedy. See the
-[preflight correction evidence](release-evidence/attachment-preflight-fix.md).
+For contributors only, explicit `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`
+permits the source-build fallback. Developer toolchain diagnosis uses
+`execution_mode=experimental_toolchain`; ordinary metadata diagnosis does not
+run `xcode-select` or `clang`. Source compilation cannot grant OS/app/schema
+admission. This is a development facility, not an installation prerequisite.
 
-## Opting in to experimental tools
+The prior v0.6.1 SDK/compiler and attachment fingerprint defects are described
+in the [preflight correction evidence](release-evidence/attachment-preflight-fix.md).
+They are plugin defects, not a reason to reinstall Xcode.
 
-These commands show the two startup modes from a complete release checkout.
-They are for an isolated MCP client; the packaged Codex configuration uses the
-default mode:
+## Startup choices for contributors
+
+These commands run an MCP server from a complete checkout and expect protocol
+messages on standard input. The packaged `.mcp.json` uses the default command.
 
 ```bash
-# Default Core and diagnostic MCP server: 9 tools.
+# Default: 15 tools, exact private-operation admission remains required.
 /bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh
 
-# Opt-in MCP server: 15 tools, with existing private-operation gates.
+# Explicit restricted runtime: 9 tools; Native dispatch is rejected.
+/bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh --core-only
+
+# Legacy hybrid URL opt-in only: 15 tools.
 /bin/sh plugins/apple-reminders/scripts/launch_bundled_mcp.sh --experimental
 ```
 
-Each starts an MCP server that expects protocol messages on standard input;
-it is not an interactive Reminders command line. Use the chosen launch command
-in an isolated MCP test client. Tool exposure is fixed for that runtime's
-lifetime; changing the selection requires a new process and fresh discovery.
+Tool exposure is fixed for the process lifetime. Use an isolated test client;
+installed cache files and global settings are not development deployment paths.
 
-The packaged `.mcp.json` uses the default launch command. There is no automatic
-switch to experimental mode after a failure. Do not edit installed cache files
-or global Codex settings to make a release appear to contain development code.
-Changes should be tested from the checkout, reviewed, and distributed through a
-new release when ready.
-
-Default Core URL writes verify only the EventKit URL field. Experimental startup
-retains native URL attachment composition; pending or partial outcomes need an
-exact read before another write. An opt-in is not a promise of a visible card,
-successful private mutation, or iCloud convergence.
+Default Core URL writes verify only the EventKit URL field. Use explicit
+`change_reminder_attachment` actions for native cards. Only legacy
+`--experimental` startup retains automatic hybrid composition on string URLs.
+Clearing URL metadata preserves cards. Pending or partial outcomes need an
+exact read before another write; neither startup mode proves iCloud convergence.
 
 ## Understanding an uncertain result
 

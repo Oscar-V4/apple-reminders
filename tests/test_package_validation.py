@@ -56,7 +56,9 @@ class PluginValidationTests(unittest.TestCase):
         self.assertNotIn("diagnose_reminders", setup)
         self.assertIn("bundled", readme.lower())
         self.assertIn("separate Python installation", " ".join(readme.split()))
-        self.assertIn("9 Core and diagnostic tools", readme)
+        self.assertIn("15 tools", readme)
+        self.assertIn("--core-only", readme)
+        self.assertIn("Unreleased source candidate", readme)
         self.assertIn("## Upgrade", readme)
         self.assertIn("## Uninstall", readme)
         self.assertIn("vX.Y.Z", readme)
@@ -144,8 +146,8 @@ class PluginValidationTests(unittest.TestCase):
         self.assertIn("without Xcode", interface["longDescription"])
         self.assertIn("without Xcode or a separate Python installation", interface["longDescription"])
         self.assertIn("bundled signed runtime", interface["longDescription"])
-        self.assertIn("Experimental features are off by default", interface["longDescription"])
-        self.assertIn("additional compatibility and developer-tool requirements", interface["longDescription"])
+        self.assertIn("Native tools are discoverable by default", interface["longDescription"])
+        self.assertIn("exact OS/app/schema admission", interface["longDescription"])
         for prompt in interface["defaultPrompt"]:
             normalized = prompt.casefold()
             for advanced_term in (

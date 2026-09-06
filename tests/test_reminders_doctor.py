@@ -295,6 +295,15 @@ class ContentFreeSchemaTests(unittest.TestCase):
 
 
 class StaticDependencyTests(unittest.TestCase):
+    def setUp(self):
+        # These existing cases explicitly exercise the contributor source-build path.
+        env = mock.patch.dict("os.environ", {"APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        bundled = mock.patch.object(reminders_doctor, "resolve_native_helper", side_effect=reminders_doctor.NativeHelperUnavailable("test fixture"))
+        bundled.start()
+        self.addCleanup(bundled.stop)
+
     def test_unselected_developer_directory_never_invokes_clang(self) -> None:
         runner = mock.Mock(
             side_effect=AssertionError("clang syntax check must not run")
@@ -556,6 +565,15 @@ class LocalArtifactTests(unittest.TestCase):
 
 
 class ReportContractTests(unittest.TestCase):
+    def setUp(self):
+        # These existing cases explicitly exercise the contributor source-build path.
+        env = mock.patch.dict("os.environ", {"APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        bundled = mock.patch.object(reminders_doctor, "resolve_native_helper", side_effect=reminders_doctor.NativeHelperUnavailable("test fixture"))
+        bundled.start()
+        self.addCleanup(bundled.stop)
+
     def test_default_report_declares_runtime_boundaries_without_processes(self) -> None:
         commands: list[list[str]] = []
         resolver_calls: list[bool] = []
@@ -614,15 +632,15 @@ class ReportContractTests(unittest.TestCase):
             boundaries["compiler_free_private"]["requires_command_line_tools"]
         )
         self.assertEqual(
-            boundaries["compiler_required_private"]["paths"],
+            boundaries["bundled_native"]["paths"],
             [
                 "section_mutation",
                 "image_attachment_mutation",
                 "exact_recently_deleted",
             ],
         )
-        self.assertTrue(
-            boundaries["compiler_required_private"]["requires_command_line_tools"]
+        self.assertFalse(
+            boundaries["bundled_native"]["requires_command_line_tools"]
         )
 
     def test_experimental_diagnosis_fails_closed_across_usable_stores(

@@ -37,7 +37,13 @@ DEFAULT_MCP_TOOL_NAMES = [
     "create_reminder",
     "change_reminder",
     "delete_reminder",
+    "inspect_recently_deleted",
+    "recover_deleted_reminder",
+    "inspect_reminder_native",
     "ensure_reminder_list",
+    "create_reminder_section",
+    "organize_reminder",
+    "change_reminder_attachment",
     "diagnose_reminders",
 ]
 
@@ -194,7 +200,7 @@ class SourcePackagePolicyTests(unittest.TestCase):
                 "launcher selected an external supported Python instead of its bundled runtime",
             )
             responses = [json.loads(line) for line in completed.stdout.splitlines()]
-            self.assertEqual(len(responses[1]["result"]["tools"]), 9)
+            self.assertEqual(len(responses[1]["result"]["tools"]), 15)
 
     def test_worktree_source_snapshot_allowlist_passes(self) -> None:
         result = audit_source_package.audit_source(self.plugin_root)

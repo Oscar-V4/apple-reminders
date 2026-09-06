@@ -1278,10 +1278,12 @@ def _bundled_helper_inventory() -> dict[str, str]:
         raise BundledHelperUnavailable(
             "native helper directory could not be inspected"
         ) from exc
-    if set(native_entries) != {
-        BUNDLED_HELPER_APP_NAME,
-        BUNDLED_HELPER_MANIFEST_NAME,
-    }:
+    core_entries = {BUNDLED_HELPER_APP_NAME, BUNDLED_HELPER_MANIFEST_NAME}
+    optional_native_entries = {"AppleRemindersNativeHelper.app", "native-helper-build.json"}
+    # Core verifies only its own signed bundle. A missing or damaged optional
+    # Native component is rejected by its resolver, without disabling Core.
+    # Never follow, inspect, or execute these optional sibling paths here.
+    if not core_entries <= set(native_entries) or set(native_entries) - core_entries - optional_native_entries:
         raise BundledHelperUnavailable("native helper inventory is invalid")
     manifest_metadata = native_entries[BUNDLED_HELPER_MANIFEST_NAME]
     if (

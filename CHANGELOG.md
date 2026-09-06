@@ -4,9 +4,38 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 
 ## Unreleased
 
+The v0.7.0 candidate contains verified signed, notarized, and stapled EventKit
+and Native bundles with authenticated provenance. Publication and clean-user
+acceptance remain pending. See the [signoff record](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/release-candidate-signoff.md).
+
+## 0.7.0 — Unreleased candidate
+
+### Changed
+
+- Packaging diagnosis collects only platform and plugin artifact metadata/static
+  source, without Reminders store/schema, permission, or Native-runtime probes.
+- Release verification authenticates an optional complete Native app/manifest
+  pair and its exact signed-source provenance; incomplete pairs block release.
+
+- Source candidate: default discovery includes all 15 tools. Explicit
+  `--core-only` exposes nine Core/diagnostic tools and rejects Native dispatch.
+  `--experimental` is retained only as a legacy hybrid URL opt-in.
+- Default URL create/change remains EventKit metadata only. Use an explicit
+  attachment action for a native URL card.
+- Native helper paths target a verified prebuilt signed universal bundle, with
+  no ordinary-user Xcode or Command Line Tools dependency. Source fallback is
+  contributor-only through `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`.
+  Both helper signatures and signing attestations have been verified. Packaged
+  startup smoke passed; this entry does not announce a published release or
+  completed clean-user acceptance.
+- Skills diagnose exact capability availability instead of asking users to
+  enable Experimental mode. Private support remains `experimental_internals`;
+  OS/app/schema admission, reference safety, and final read-back remain strict.
+  Sections and tags still need acceptance evidence.
+
 ### Fixed
 
-- Experimental helper compilation now supplies the macOS SDK from the selected
+- Contributor source-build helper compilation now supplies the macOS SDK from the selected
   Xcode or Command Line Tools installation. This fixes missing AppKit headers
   in both diagnosis and image/section/recovery helper builds.
 - Attachment admission now compares the command-scoped fingerprint of the

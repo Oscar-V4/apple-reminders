@@ -53,6 +53,8 @@ from reminders_image_input import (  # noqa: E402
     ValidatedImage,
     validate_image_input,
 )
+from native_helper import NativeHelperUnavailable, resolve_helper as resolve_native_helper, source_build_enabled
+
 from experimental_capabilities import (  # noqa: E402
     capability_for_adapter_command,
     detect_runtime_identity,
@@ -600,22 +602,11 @@ def preflight_experimental_command(args: argparse.Namespace) -> dict[str, Any] |
     )
     if build_decision.reason_code != "schema_unverified":
         _experimental_capability_failure(build_decision, mutation=spec.mutation)
-    compiler_probe = (
-        resolve_selected_clang()
-        if spec.compiler_requirement == "required"
-        else None
-    )
-    compiler_available = bool(compiler_probe and compiler_probe.available)
-    if compiler_probe and compiler_probe.available:
-        setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
-    if spec.compiler_requirement == "required" and not compiler_available:
-        compiler_decision = evaluate_capability(
-            spec.capability_id,
-            identity,
-            schema_fingerprint=None,
-            compiler_available=False,
-        )
-        _experimental_capability_failure(compiler_decision, mutation=spec.mutation)
+    provider = None
+    compiler_available = False
+    if spec.compiler_requirement == "required":
+        provider = require_native_helper_runtime()
+        compiler_available = provider == "developer_source"
 
     db = resolve_database(getattr(args, "db", None))
     con = connect_read_only(db)
@@ -628,10 +619,14 @@ def preflight_experimental_command(args: argparse.Namespace) -> dict[str, Any] |
         identity,
         schema_fingerprint=str(schema.get("schema_fingerprint") or "") or None,
         compiler_available=compiler_available,
+        native_helper_available=provider == "bundled_signed",
     )
     if not schema.get("supported") or not decision.allowed:
         _experimental_capability_failure(decision, mutation=spec.mutation)
     public = decision.to_public_dict()
+    if provider:
+        public["runtime_dependency"] = "native_helper"
+        public["runtime_provider"] = provider
     public["schema_gate"] = "minimum_fields_and_exact_fingerprint"
     setattr(args, "_experimental_capability", public)
     return public
@@ -650,32 +645,35 @@ def receipt_capability(
 def require_image_helper_compiler(args: argparse.Namespace) -> None:
     """Resolve the conditional delete route before any image helper dispatch."""
 
-    compiler_probe = resolve_selected_clang()
-    if compiler_probe.available:
-        setattr(args, "_experimental_compiler_path", compiler_probe.compiler_path)
-        return
-    capability = dict(getattr(args, "_experimental_capability", {}) or {})
-    capability.update(
-        {
-            "capability": "image_attachment_mutation",
-            "support_tier": "experimental_internals",
-            "compiler_requirement": "required",
-            "runtime_state": "runtime_unverified",
-            "reason_code": "compiler_required",
-            "available": False,
-        }
-    )
-    raise MutationNotStartedError(
-        "This Experimental image capability requires Xcode Command Line Tools.",
-        code="unsupported_capability",
-        reason_code="compiler_required",
-        capability=capability,
-    )
+    provider = require_native_helper_runtime()
+    current = getattr(args, "_experimental_capability", None)
+    capability = dict(current) if isinstance(current, dict) else {}
+    capability.update(runtime_dependency="native_helper", runtime_provider=provider,
+                      compiler_requirement="not_required" if provider == "bundled_signed" else "required")
+    setattr(args, "_experimental_capability", capability)
+
+
+def require_native_helper_runtime() -> str:
+    try:
+        resolve_native_helper("image")
+        return "bundled_signed"
+    except NativeHelperUnavailable as exc:
+        if not source_build_enabled():
+            raise MutationNotStartedError(
+                "The signed Native helper is missing or could not be verified.",
+                code="unsupported_capability", reason_code="native_helper_unavailable",
+                runtime_dependency="native_helper", compiler_requirement="not_required",
+            ) from exc
+    require_private_helper_compiler()
+    return "developer_source"
 
 
 def require_private_helper_compiler() -> list[str]:
     """Return selected clang plus its SDK or fail before helper preparation."""
 
+    if not source_build_enabled():
+        raise MutationNotStartedError("Native source builds require explicit developer opt-in.",
+                                      code="unsupported_capability", reason_code="native_helper_unavailable")
     compiler_probe = resolve_selected_clang()
     if compiler_probe.available:
         return compiler_probe.compiler_command
@@ -1779,6 +1777,14 @@ def image_size(path: Path) -> tuple[int, int]:
 
 
 def reminderkit_attach_helper() -> Path:
+    try:
+        return resolve_native_helper("image")
+    except NativeHelperUnavailable as exc:
+        if not source_build_enabled():
+            raise MutationNotStartedError(
+                "The signed Native helper is missing or could not be verified.",
+                code="unsupported_capability", reason_code="native_helper_unavailable",
+            ) from exc
     source = Path(__file__).resolve().with_name("remkit_attach_image.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit helper source not found: {source.name}")
@@ -1845,6 +1851,14 @@ def reminderkit_attach_helper() -> Path:
 
 
 def reminderkit_sections_helper() -> Path:
+    try:
+        return resolve_native_helper("sections")
+    except NativeHelperUnavailable as exc:
+        if not source_build_enabled():
+            raise MutationNotStartedError(
+                "The signed Native helper is missing or could not be verified.",
+                code="unsupported_capability", reason_code="native_helper_unavailable",
+            ) from exc
     source = Path(__file__).resolve().with_name("remkit_sections.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit section helper source not found: {source.name}")
@@ -1909,6 +1923,14 @@ def reminderkit_sections_helper() -> Path:
 
 
 def reminderkit_recover_helper() -> Path:
+    try:
+        return resolve_native_helper("recovery")
+    except NativeHelperUnavailable as exc:
+        if not source_build_enabled():
+            raise MutationNotStartedError(
+                "The signed Native helper is missing or could not be verified.",
+                code="unsupported_capability", reason_code="native_helper_unavailable",
+            ) from exc
     source = Path(__file__).resolve().with_name("remkit_recover.m")
     if not source.exists():
         raise AdapterError(f"ReminderKit recovery helper source not found: {source.name}")

@@ -17,7 +17,7 @@ Preserve wording, choose an exact destination, and create each intended Reminder
 6. In the default Core session, use `url` for a requested URL field; this saves
    EventKit metadata only. Preserve a contextual URL in `notes` when a visible
    note link is intended. Do not claim a native attachment card from metadata
-   verification. In an explicitly enabled Experimental session, string URLs
+   verification. Only in legacy `--experimental` URL mode, string URLs
    also compose a private attachment; use them only for explicit native URL
    intent with admitted capability, and do not attach a verified hybrid again.
 7. On `verified` or `unchanged`, report the returned exact state, ID, and fresh reference. An extra `read_reminder` is unnecessary unless the returned result lacks a final reference.
@@ -52,8 +52,7 @@ The app may show a relative alarm's trigger as its main time. Report due and tri
 
 - By default, summarize a source screenshot/photo in the Reminder notes or store
   a user-provided remote reference in notes. Do not sync a private local path.
-- Attach a native image only when Experimental tools are already enabled, the
-  user explicitly asks, and
+- Attach a native image when the user explicitly asks and
   `diagnose_reminders {scope:"attachments"}` reports the image capability
   available. Create the Reminder through Core first, then use its fresh
   reference with action `attach_image`.
@@ -65,7 +64,7 @@ When a newly created Reminder is the destination for consolidation, verify the c
 For a URL on an existing Reminder, call `read_reminder` and use its fresh
 reference to patch `url` in the default session. For a visible note link, append
 only the requested link while preserving the complete existing `notes`. Native
-URL cards require already enabled Experimental tools and an admitted capability.
+URL cards use explicit attachment actions with an admitted capability.
 Do not change configuration or install Xcode to complete a capture. If native
 attachment is essential and unavailable, explain that before creating an item;
 complete a text-only capture only when that satisfies the user's request.

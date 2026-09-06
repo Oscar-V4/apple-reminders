@@ -30,7 +30,7 @@ DIAGNOSIS_CHECKS = {
         {"helper_toolchain", "private_frameworks", "command_schema", "store_access"}
     ),
     "packaging": frozenset(
-        {"platform", "local_artifacts", "redaction", "command_schema"}
+        {"platform", "local_artifacts", "redaction"}
     ),
 }
 EXECUTION_MODES = frozenset({"metadata_only", "experimental_toolchain"})
@@ -62,7 +62,8 @@ DIAGNOSIS_CAPABILITIES = {
         "recently_deleted_exact_inspection",
         "recently_deleted_recovery",
     ),
-    "packaging": ("stable_core",),
+    # Package metadata does not establish data-access or runtime readiness.
+    "packaging": (),
 }
 PUBLIC_ERROR_CODES = frozenset(
     {

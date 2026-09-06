@@ -44,7 +44,24 @@ The command does not access Apple Reminders or local Reminder data. It:
    four checksums, both capsule manifests, historical source inputs and source
    ancestry, and one shared five-subject SLSA statement from
    `prepare-signed-runtime-source.yml`. A bundled-launcher release without its
-   runtime fails the source audit.
+   runtime fails the source audit; and
+8. when the Native app/manifest pair is present, requires both components,
+   authenticates the Native manifest's closed three-subject signing statement,
+   and verifies its exact source and workflow ancestry, three source fingerprints,
+   and six build-input fingerprints. All six tooling inputs must match between
+   workflow and source commits. The signed/notarized expanded app must match
+   the authenticated manifest; Native helper operations are never executed.
+
+For the v0.7.0 Unreleased candidate, both EventKit and Native artifacts passed
+Developer ID, notarization/stapling, and exact signing-attestation verification.
+The [signoff record](release-evidence/release-candidate-signoff.md) records those
+results separately from the still-pending tag, immutable release, canonical
+post-publication verifier, and clean-user acceptance.
+Older releases with no Native pair remain verifiable. A partial or invalid pair
+fails release verification, even though runtime Native unavailability leaves
+healthy Core usable. The signing archive and checksum are authenticated sibling
+subjects; future verification relies on the embedded manifest/app and enduring
+attestation evidence, not temporary Actions artifact retention.
 
 `SHA256SUMS` remains useful for ordinary corruption detection, but it is not a
 detached signature. Its authenticity comes from being a separately verified

@@ -601,6 +601,163 @@ def verify_helper_manifest_ancestry_and_attestation(identity: GitIdentity) -> No
     raise first_error or VerificationError("no exact helper attestation")
 
 
+NATIVE_WORKFLOW = ".github/workflows/prepare-signed-native-helper-source.yml"
+NATIVE_TEAM_ID = "V8347N9346"
+NATIVE_REQUIRED_FROM_VERSION = (0, 7, 0)
+NATIVE_SUBJECTS = frozenset({
+    "AppleRemindersNativeHelper-notarized.zip", "native-helper-build.json", "SHA256SUMS",
+})
+
+
+def _historical_sha256(commit: str, relative: str) -> str:
+    """Hash Git blob bytes without text-mode newline or encoding conversion."""
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{relative}"], cwd=REPO_ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False,
+    )
+    if completed.returncode != 0:
+        raise VerificationError(f"Native historical input is unavailable: {relative}")
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
+def verify_native_manifest_attestation(
+    results: Any, *, workflow_commit: str, manifest_digest: str,
+) -> None:
+    """Authenticate one closed three-subject statement containing this manifest.
+
+    Only the expanded app and its manifest enter a release. The signed archive
+    and checksum digests are authenticated as sibling subjects, without needing
+    the temporary Actions artifact to survive for future release verification.
+    """
+    _require_sha256(manifest_digest, "Native manifest digest")
+    if not isinstance(results, list) or not results:
+        raise VerificationError("no verified Native manifest attestation")
+    first_error: VerificationError | None = None
+    for item in results:
+        try:
+            subjects = item["verificationResult"]["statement"]["subject"]
+            if not isinstance(subjects, list) or len(subjects) != len(NATIVE_SUBJECTS):
+                raise VerificationError("Native attestation subject inventory drift")
+            digests: dict[str, str] = {}
+            for subject in subjects:
+                if not isinstance(subject, dict) or subject.get("name") not in NATIVE_SUBJECTS:
+                    raise VerificationError("Native attestation subject inventory drift")
+                name = subject["name"]
+                digest = subject.get("digest")
+                if name in digests or not isinstance(digest, dict) or set(digest) != {"sha256"}:
+                    raise VerificationError("Native attestation subject digest or inventory drift")
+                value = digest["sha256"]
+                if not isinstance(value, str):
+                    raise VerificationError("Native attestation subject digest is invalid")
+                _require_sha256(value, f"Native subject {name}")
+                digests[name] = value
+            if set(digests) != NATIVE_SUBJECTS:
+                raise VerificationError("Native attestation subject inventory drift")
+            if digests["native-helper-build.json"] != manifest_digest:
+                raise VerificationError("Native manifest attestation digest drift")
+            _verify_slsa_item(
+                item, repository=REPOSITORY, workflow=NATIVE_WORKFLOW,
+                ref="refs/heads/main", commit=workflow_commit,
+                trigger="workflow_dispatch", asset_digests=digests,
+            )
+            return
+        except (KeyError, TypeError, VerificationError) as exc:
+            first_error = exc if isinstance(exc, VerificationError) else VerificationError(
+                "Native attestation evidence is incomplete"
+            )
+    raise first_error or VerificationError("no exact Native attestation")
+
+
+def verify_native_helper_provenance(
+    identity: GitIdentity, *, main_ref: str = CANONICAL_MAIN_REF,
+) -> dict[str, Any]:
+    """Require bundled Native from 0.7.0 and authenticate any legacy pair.
+
+    This is a release policy, independent of runtime Core availability when a
+    Native installation is absent or damaged. Native code is never executed.
+    """
+    version_match = TAG_RE.fullmatch(f"v{identity.version}")
+    if version_match is None:
+        raise VerificationError("Native release version is not strict semantic versioning")
+    native_required = tuple(map(int, version_match.groups())) >= NATIVE_REQUIRED_FROM_VERSION
+    native = PLUGIN_ROOT / "native"
+    app = native / "AppleRemindersNativeHelper.app"
+    manifest_path = native / "native-helper-build.json"
+    present = [path.exists() or path.is_symlink() for path in (app, manifest_path)]
+    if native.is_symlink():
+        raise VerificationError("Native release directory must be regular")
+    if not any(present):
+        if native_required:
+            raise VerificationError("Native app and manifest are required for releases 0.7.0 onward")
+        return {"present": False}
+    if not all(present) or app.is_symlink() or manifest_path.is_symlink():
+        raise VerificationError("Native release app and manifest must be a complete regular pair")
+    if not app.is_dir() or not manifest_path.is_file():
+        raise VerificationError("Native release app or manifest has an invalid type")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise VerificationError("Native manifest is unreadable") from exc
+    if not isinstance(manifest, dict) or type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
+        raise VerificationError("Native manifest schema is invalid")
+    if manifest.get("plugin_version") != identity.version:
+        raise VerificationError("Native manifest version drift")
+    source_commit = manifest.get("source_commit")
+    workflow_commit = manifest.get("workflow_commit")
+    for commit, label in ((source_commit, "Native source commit"), (workflow_commit, "Native workflow commit")):
+        if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+            raise VerificationError(f"{label} is invalid")
+        _run(("git", "cat-file", "-e", f"{commit}^{{commit}}"))
+        _require_ancestor(commit, identity.tag_commit, label)
+        _require_ancestor(commit, main_ref, label)
+    _require_ancestor(identity.tag_commit, main_ref, "Native release commit")
+    _require_ancestor(workflow_commit, source_commit, "Native workflow commit")
+
+    # Import only when the optional pair exists, retaining historical releases.
+    from build_native_helper_app import BUILD_INPUT_RELATIVE_PATHS, SOURCES
+    from verify_native_helper import BuildFailure, verify_app, verify_manifest
+
+    source_files = {
+        relative.as_posix(): _historical_sha256(
+            source_commit, f"plugins/apple-reminders/{relative.as_posix()}",
+        )
+        for relative in SOURCES.values()
+    }
+    build_inputs = {
+        relative.as_posix(): _historical_sha256(source_commit, relative.as_posix())
+        for relative in BUILD_INPUT_RELATIVE_PATHS
+    }
+    if manifest.get("source_files") != source_files:
+        raise VerificationError("Native historical source fingerprint drift")
+    if manifest.get("build_inputs") != build_inputs:
+        raise VerificationError("Native historical build-input fingerprint drift")
+    for relative, digest in build_inputs.items():
+        if _historical_sha256(workflow_commit, relative) != digest:
+            raise VerificationError("Native build tooling changed after the signing workflow commit")
+    results = _run_json((
+        "gh", "attestation", "verify", str(manifest_path), "--repo", REPOSITORY,
+        "--signer-workflow", f"{REPOSITORY}/{NATIVE_WORKFLOW}",
+        "--signer-digest", workflow_commit, "--source-digest", workflow_commit,
+        "--source-ref", "refs/heads/main", "--predicate-type", SLSA_PROVENANCE_V1,
+        "--deny-self-hosted-runners", "--format", "json",
+    ))
+    verify_native_manifest_attestation(
+        results, workflow_commit=workflow_commit, manifest_digest=sha256_file(manifest_path),
+    )
+    try:
+        actual = verify_app(
+            PLUGIN_ROOT, app, expected_team_id=NATIVE_TEAM_ID,
+            require_developer_id=True, require_notarized=True,
+        )
+        verify_manifest(
+            PLUGIN_ROOT, manifest_path, actual,
+            expected_source_commit=source_commit, expected_workflow_commit=workflow_commit,
+        )
+    except (BuildFailure, OSError, subprocess.SubprocessError) as exc:
+        raise VerificationError(f"Native signed app/manifest verification failed: {exc}") from exc
+    return {"present": True, "source_commit": source_commit, "workflow_commit": workflow_commit}
+
+
 def _release_attestation_with_retries(
     identity: GitIdentity,
     *,
@@ -735,6 +892,7 @@ def verify_published_release(
         )
         verify_source_and_rebuild(release_root, identity)
         verify_helper_manifest_ancestry_and_attestation(identity)
+        native_helper = verify_native_helper_provenance(identity)
         try:
             runtime = verify_runtime_provenance(
                 PLUGIN_ROOT / "runtime", identity.tag_commit,
@@ -747,6 +905,7 @@ def verify_published_release(
         "release_attestation": "verified",
         "repository": repository,
         "signed_helper_manifest": "verified",
+        "signed_native_helper": "verified" if native_helper["present"] else "not_in_release",
         "bundled_python_runtime": "verified" if runtime["present"] else "not_in_release",
         "source_audit": "verified",
         "tag": tag,

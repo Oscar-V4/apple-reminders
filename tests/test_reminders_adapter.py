@@ -2045,7 +2045,8 @@ class AttachmentSyncTests(unittest.TestCase):
         )
         self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
 
-    def test_image_delete_uses_native_reminderkit_removal(self) -> None:
+    @mock.patch.object(reminders_adapter, "require_native_helper_runtime", return_value="bundled_signed")
+    def test_image_delete_uses_native_reminderkit_removal(self, _runtime) -> None:
         db = Path("/tmp/reminders.sqlite")
         args = mock.Mock(
             db=str(db),
@@ -2189,7 +2190,8 @@ class AttachmentSyncTests(unittest.TestCase):
         connect.assert_called_once_with(db)
         con.close.assert_called_once()
 
-    def test_image_delete_reconnect_failure_preserves_native_commit_evidence(self) -> None:
+    @mock.patch.object(reminders_adapter, "require_native_helper_runtime", return_value="bundled_signed")
+    def test_image_delete_reconnect_failure_preserves_native_commit_evidence(self, _runtime) -> None:
         db = Path("/tmp/reminders.sqlite")
         args = mock.Mock(
             db=str(db),
@@ -2251,7 +2253,8 @@ class AttachmentSyncTests(unittest.TestCase):
         self.assertTrue(raised.exception.details["native_removal_verified"])
         self.assertTrue(raised.exception.details["mutation_outcome_unknown"])
 
-    def test_image_delete_post_native_read_failure_preserves_commit_evidence(self) -> None:
+    @mock.patch.object(reminders_adapter, "require_native_helper_runtime", return_value="bundled_signed")
+    def test_image_delete_post_native_read_failure_preserves_commit_evidence(self, _runtime) -> None:
         db = Path("/tmp/reminders.sqlite")
         args = mock.Mock(
             db=str(db),

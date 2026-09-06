@@ -72,6 +72,17 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
         ):
             self.assertIn(gate, self.text)
 
+    def test_native_pair_has_an_independent_gate_before_eventkit_inventory(self) -> None:
+        gate = self.verify.index("Independently verify optional Native helper provenance")
+        inventory = self.verify.index("Bind the expanded helper bytes to the manifest")
+        package = self.verify.index("Build the deterministic release package twice")
+        self.assertLess(gate, inventory)
+        self.assertLess(inventory, package)
+        self.assertIn("verify_native_helper_provenance(", self.verify)
+        self.assertIn('main_ref="refs/remotes/origin/main"', self.verify)
+        self.assertIn("unexpected native helper root entry", self.verify)
+        self.assertIn('"AppleRemindersNativeHelper.app", "native-helper-build.json"', self.verify)
+
     def test_expanded_helper_and_deterministic_package_are_fail_closed(self) -> None:
         for gate in (
             'native helper symlink rejected',
@@ -113,7 +124,7 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
                 compile(source, f"{WORKFLOW}:{start + 1}", "exec")
                 compiled += 1
             index += 1
-        self.assertEqual(compiled, 9)
+        self.assertEqual(compiled, 10)
 
     def test_exact_release_subjects_are_attested_without_target_code(self) -> None:
         self.assertIn("needs: verify_release", self.attest)

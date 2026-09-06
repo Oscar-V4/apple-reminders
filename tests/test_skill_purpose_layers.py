@@ -638,19 +638,33 @@ class PurposeSkillLayerTests(unittest.TestCase):
         for name in SKILL_NAMES:
             self.assertIn(f"${name}", skill_text)
 
-    def test_primary_skill_starts_core_without_doctor_and_gates_experimental(self) -> None:
+    def test_primary_skill_starts_core_without_doctor_and_checks_native_availability(self) -> None:
         skill_text = (PLUGIN_ROOT / "skills/apple-reminders/SKILL.md").read_text(
             encoding="utf-8"
         )
 
         core_instruction = "Start with the requested bounded Core operation"
-        diagnosis_instruction = "Use `diagnose_reminders` for an explicitly requested Experimental capability"
+        diagnosis_instruction = "Use `diagnose_reminders` for an explicitly requested Native capability"
         self.assertIn(core_instruction, skill_text)
         self.assertIn("Do not run Doctor for\n   ordinary Core work", skill_text)
         self.assertIn("request access once and retry the original operation once", skill_text)
         self.assertIn(diagnosis_instruction, skill_text)
         self.assertLess(skill_text.index(core_instruction), skill_text.index(diagnosis_instruction))
         self.assertNotIn("On first use or after an environment change, run", skill_text)
+
+    def test_native_skills_distinguish_admitted_preflight_from_blocking_reason(self) -> None:
+        for name in ("apple-reminders", "apple-reminders-attachment-maintenance"):
+            with self.subTest(skill=name):
+                text = " ".join((PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text().split())
+                self.assertIn("`runtime_state=runtime_unverified`", text)
+                self.assertIn("`reason_code=runtime_verification_required` is an admitted metadata preflight", text)
+                self.assertIn("Stop on `available=false` or a blocking `reason_code`", text)
+                self.assertIn("`native_helper_unavailable`", text)
+                self.assertIn("after the write" if name.endswith("attachment-maintenance") else "follows the write", text)
+        attachment = " ".join((PLUGIN_ROOT / "skills/apple-reminders-attachment-maintenance/SKILL.md").read_text().split())
+        self.assertIn("warning alone is inconclusive when the exact capability is available", attachment)
+        self.assertIn("do not repeat the original mutation", attachment)
+        self.assertIn("Unresolved or ambiguous state stops the write chain", attachment)
 
 
 if __name__ == "__main__":

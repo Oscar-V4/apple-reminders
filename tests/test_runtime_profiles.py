@@ -42,48 +42,56 @@ def discovered_tools(runtime: server.McpRuntime) -> list[dict]:
 
 
 class RuntimeProfileTests(unittest.TestCase):
-    def test_stdio_discovery_selects_nine_or_fifteen_tools(self) -> None:
-        for experimental in (False, True):
-            with self.subTest(experimental=experimental):
+    def test_default_native_discovery_keeps_core_url_metadata_contract(self) -> None:
+        runtime = server.McpRuntime(dispatch=mock.Mock())
+        tools = discovered_tools(runtime)
+        self.assertEqual({tool['name'] for tool in tools}, PUBLIC_TOOLS)
+        core_create = next(tool for tool in tools if tool['name'] == 'create_reminder')
+        self.assertNotIn('also composes a private visible attachment', core_create['description'])
+        self.assertFalse(runtime._enable_experimental)
+
+    def test_explicit_core_only_profile_remains_available(self) -> None:
+        runtime = server.McpRuntime(dispatch=mock.Mock(), core_only=True)
+        self.assertEqual(
+            {tool['name'] for tool in discovered_tools(runtime)},
+            CORE_TOOLS | DIAGNOSTIC_TOOLS,
+        )
+
+    def test_stdio_discovery_selects_native_default_or_explicit_core(self) -> None:
+        for mode in ("default", "core", "legacy"):
+            with self.subTest(mode=mode):
                 responses = run_server(
-                    [initialize(), LIST_TOOLS], enable_experimental=experimental
+                    [initialize(), LIST_TOOLS],
+                    enable_experimental=mode == "legacy", core_only=mode == "core",
                 )
                 tools = responses[1]["result"]["tools"]
-                expected = PUBLIC_TOOLS if experimental else CORE_TOOLS | DIAGNOSTIC_TOOLS
+                expected = CORE_TOOLS | DIAGNOSTIC_TOOLS if mode == "core" else PUBLIC_TOOLS
                 self.assertEqual({tool["name"] for tool in tools}, expected)
-                self.assertEqual(len(tools), 15 if experimental else 9)
+                self.assertEqual(len(tools), 9 if mode == "core" else 15)
                 instructions = responses[0]["result"]["instructions"]
-                self.assertIn(
-                    "Experimental tools are enabled" if experimental else "Core mode",
-                    instructions,
-                )
+                self.assertIn({
+                    "legacy": "Experimental tools are enabled",
+                    "core": "Core mode", "default": "Native tools are discoverable",
+                }[mode], instructions)
 
-    def test_source_cli_discovery_works_in_both_modes(self) -> None:
-        # This exercises the actual entry point, including argument parsing.
-        # Discovery does not construct a facade or access any backend.
+    def test_source_cli_discovery_works_in_all_modes(self) -> None:
+        # Exercise the actual entry point, including argument parsing, without
+        # constructing a facade or accessing any backend.
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         wire = "".join(json.dumps(item) + "\n" for item in (initialize(), LIST_TOOLS))
-        for experimental in (False, True):
-            with self.subTest(experimental=experimental):
+        for mode, flags in (("default", []), ("core", ["--core-only"]),
+                            ("legacy", ["--experimental"])):
+            with self.subTest(mode=mode):
                 completed = subprocess.run(
-                    [
-                        sys.executable,
-                        str(PLUGIN_ROOT / "mcp" / "server.py"),
-                        *(["--experimental"] if experimental else []),
-                    ],
-                    cwd=PLUGIN_ROOT,
-                    env=env,
-                    input=wire,
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                    check=False,
+                    [sys.executable, str(PLUGIN_ROOT / "mcp" / "server.py"), *flags],
+                    cwd=PLUGIN_ROOT, env=env, input=wire, text=True,
+                    capture_output=True, timeout=15, check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 messages = [json.loads(line) for line in completed.stdout.splitlines()]
-                expected = PUBLIC_TOOLS if experimental else CORE_TOOLS | DIAGNOSTIC_TOOLS
+                expected = CORE_TOOLS | DIAGNOSTIC_TOOLS if mode == "core" else PUBLIC_TOOLS
                 self.assertEqual(
-                    {tool["name"] for tool in messages[1]["result"]["tools"]}, expected
+                    {tool["name"] for tool in messages[1]["result"]["tools"]}, expected,
                 )
 
     def test_source_cli_rejects_unknown_option_before_serving(self) -> None:
@@ -100,9 +108,9 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertIn("unrecognized arguments", completed.stderr)
 
-    def test_all_private_names_are_rejected_before_dispatch(self) -> None:
+    def test_core_only_rejects_all_native_names_before_dispatch(self) -> None:
         dispatch = mock.Mock(side_effect=AssertionError("Private dispatch must not run"))
-        runtime = server.McpRuntime(dispatch=dispatch)
+        runtime = server.McpRuntime(dispatch=dispatch, core_only=True)
         runtime.handle(initialize())
         for name in sorted(PRIVATE_TOOLS):
             for via_protocol in (False, True):
@@ -122,19 +130,18 @@ class RuntimeProfileTests(unittest.TestCase):
                     payload = result["structuredContent"]
                     self.assertTrue(result["isError"])
                     self.assertEqual(payload["status"], "failed_no_mutation")
-                    self.assertEqual(payload["error"]["reason_code"], "experimental_disabled")
+                    self.assertEqual(payload["error"]["reason_code"], "native_tools_disabled")
                     if name in MUTATION_TOOLS:
                         self.assertIs(payload["verification"]["write_performed"], False)
         dispatch.assert_not_called()
 
-    def test_explicit_experimental_mode_admits_all_six_private_routes(self) -> None:
+    def test_default_mode_admits_all_six_native_routes(self) -> None:
         native, recovery = RecordingFacade(), RecordingFacade()
         dispatch = server._LocalToolDispatch(
             server.DEFAULT_BACKEND_PATHS,
             facade_overrides={"native": native, "recovery": recovery},
-            enable_experimental=True,
         )
-        runtime = server.McpRuntime(dispatch=dispatch, enable_experimental=True)
+        runtime = server.McpRuntime(dispatch=dispatch)
         for name in sorted(PRIVATE_TOOLS):
             with self.subTest(name=name):
                 result = runtime.call_tool(name, copy.deepcopy(VALID_ARGUMENTS[name]))
@@ -144,7 +151,7 @@ class RuntimeProfileTests(unittest.TestCase):
 
     def test_private_diagnosis_and_toolchain_are_gated_before_dispatch(self) -> None:
         dispatch = mock.Mock(side_effect=AssertionError("Private diagnosis must not run"))
-        runtime = server.McpRuntime(dispatch=dispatch)
+        runtime = server.McpRuntime(dispatch=dispatch, core_only=True)
         diagnostic = server.TOOLS_BY_NAME["diagnose_reminders"]["inputSchema"]["properties"]
         private_scopes = set(diagnostic["scope"]["enum"]) - {"core", "access", "packaging"}
         cases = [{"scope": scope} for scope in sorted(private_scopes)]
@@ -157,12 +164,12 @@ class RuntimeProfileTests(unittest.TestCase):
                 result = runtime.call_tool("diagnose_reminders", arguments)
                 payload = result["structuredContent"]
                 self.assertTrue(result["isError"])
-                self.assertEqual(payload["error"]["reason_code"], "experimental_disabled")
+                self.assertEqual(payload["error"]["reason_code"], "native_tools_disabled")
         dispatch.assert_not_called()
 
     def test_profiles_and_discovery_responses_do_not_share_mutable_schemas(self) -> None:
         catalog_before = copy.deepcopy(server.TOOLS)
-        core = server.McpRuntime(dispatch=mock.Mock())
+        core = server.McpRuntime(dispatch=mock.Mock(), core_only=True)
         experimental = server.McpRuntime(dispatch=mock.Mock(), enable_experimental=True)
         core_tools = discovered_tools(core)
         experimental_tools = discovered_tools(experimental)
@@ -187,7 +194,7 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(server.TOOLS, catalog_before)
         self.assertEqual(
             discovered_tools(core),
-            discovered_tools(server.McpRuntime(dispatch=mock.Mock())),
+            discovered_tools(server.McpRuntime(dispatch=mock.Mock(), core_only=True)),
         )
         self.assertEqual(
             discovered_tools(experimental),

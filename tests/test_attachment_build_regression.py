@@ -17,6 +17,15 @@ import reminders_doctor as doctor
 
 
 class AttachmentBuildRegressionTests(unittest.TestCase):
+    def setUp(self):
+        # These existing cases explicitly exercise the contributor source-build path.
+        env = mock.patch.dict("os.environ", {"APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        bundled = mock.patch.object(doctor, "resolve_native_helper", side_effect=doctor.NativeHelperUnavailable("test fixture"))
+        bundled.start()
+        self.addCleanup(bundled.stop)
+
     def test_doctor_passes_sdk_to_selected_compiler(self):
         selected = capabilities.resolve_selected_clang(
             runner=lambda *args: SimpleNamespace(returncode=0, stdout='/Selected/Developer\n'),

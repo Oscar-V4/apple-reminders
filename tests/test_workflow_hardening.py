@@ -177,7 +177,7 @@ class WorkflowHardeningTests(unittest.TestCase):
             self.assertIn("Cross-reminder image copy | **Intentional boundary**", matrix)
             self.assertNotIn('{"kind":"copy_image"', public_interface)
 
-    def test_default_guidance_is_core_first_and_private_blocks_are_terminal(
+    def test_default_guidance_preserves_native_intent_and_terminal_capability_blocks(
         self,
     ) -> None:
         primary = read(PRIMARY_SKILL)
@@ -198,13 +198,15 @@ class WorkflowHardeningTests(unittest.TestCase):
             self.assertIn(phrase, primary + "\n" + readme)
         self.assertIn("contextual URL in `notes`", quick)
         self.assertIn("move to a dedicated archive Reminder", primary)
-        self.assertIn("Default to Stable Core organization", organize)
-        self.assertIn("Prefer a Core-safe note link", attachment)
-        self.assertIn("Core-first alternatives", matrix)
+        self.assertIn("Honor explicit section, native tag, or", organize)
+        self.assertIn("when the exact capability is", organize)
+        self.assertIn("Preserve explicit image or URL-card intent", attachment)
+        self.assertIn("user agrees", attachment)
+        self.assertIn("Alternatives when a Native capability is unavailable", matrix)
         self.assertIn("App Intents and Shortcuts review", runtime_gate_adr)
         self.assertIn("Shortcuts tag support", runtime_gate_adr)
         self.assertIn("--experimental", readme)
-        self.assertIn("does not bypass admission", read(ROOT / "docs/installation.md"))
+        self.assertIn("signed bundle does not override those checks", read(ROOT / "docs/installation.md"))
         self.assertIn("`/usr/bin/xcode-select -p`", runtime_gate_adr)
         self.assertNotIn("Organize my Inbox reminders into sensible sections", readme)
 

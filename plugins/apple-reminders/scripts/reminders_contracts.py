@@ -37,10 +37,10 @@ def runtime_boundary_metadata() -> dict[str, object]:
                 "read_only_native_inspection",
             ],
         },
-        "compiler_required_private": {
+        "bundled_native": {
             "maturity": "experimental",
-            "requires_command_line_tools": True,
-            "compiler_invocation": "explicit_diagnosis_or_operation_only",
+            "requires_command_line_tools": False,
+            "compiler_invocation": "explicit_development_only",
             "paths": [
                 "section_mutation",
                 "image_attachment_mutation",
