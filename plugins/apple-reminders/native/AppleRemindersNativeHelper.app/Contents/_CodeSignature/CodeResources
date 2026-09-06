@@ -10,7 +10,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			2PaeVdVstzbh8zbf47Rz6YNgUqE=
+			b31p0n77aTwCAZSGsgMIeO5bHoI=
 			</data>
 			<key>requirement</key>
 			<string>identifier "io.github.oscar-v4.apple-reminders.native-helper" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = V8347N9346</string>
@@ -19,7 +19,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			0v5K+rFa8MWe+PwBqebn1P4OAYg=
+			emF52CpLnFRdrka7rzGoH+/cBkk=
 			</data>
 			<key>requirement</key>
 			<string>identifier "io.github.oscar-v4.apple-reminders.native-helper" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = V8347N9346</string>
