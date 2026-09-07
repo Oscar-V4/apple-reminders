@@ -6,7 +6,7 @@ description: "Manage Apple Reminders from Codex: capture notes or screenshots, b
 # Apple Reminders
 
 Use the bundled MCP as the only normal operation surface. Stable Core uses
-documented EventKit. Sections, tag assignments, native attachments, and exact
+documented EventKit. Calendar Early Reminder, sections, tag assignments, native attachments, and exact
 Recently Deleted work are Experimental Internals. A missing or blocked
 capability is not permission to call a deprecated CLI, edit the Reminders
 database, improvise with AppleScript/UI automation, or bypass the runtime gate.
@@ -51,7 +51,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
    never resolve duplicate list titles without them, recover one item at a time,
    and stop on any non-verified result.
 8. For explicitly requested Native Extension work, diagnose the matching
-   `sections`, `tags`, or `attachments` scope first. Continue only when the
+   `sections`, `tags`, `attachments`, or `early_reminder` scope first. Continue only when the
    result says `support_tier=experimental_internals`, `available=true`, and the
    build/schema admission passed. Resolve the exact reminder and use the public
    Native tools: inspect with `inspect_reminder_native`, then pass a fresh opaque
@@ -109,7 +109,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Prefer separate exact Reminder Lists or user-approved textual headings over
   sections. Prefer a plain-text title/note label over a native tag. Section reads
   and writes use exact `list_id`; section names are not global.
-- `organize_reminder` supports Experimental section moves and tag assignments
+- `organize_reminder` supports Experimental Early Reminder, section moves and tag assignments
   only after admission. Unused-label row cleanup is withheld.
 - Image input must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, 16,384 pixels per dimension, and 40,000,000 pixels total.
 - Cross-reminder image copy uses `change_reminder_attachment` action `copy_image` with fresh destination and source `rev1` references plus one exact active source image attachment ID. It never exports a private file path or mutates the source.

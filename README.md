@@ -82,6 +82,7 @@ the saved result.
 
 - “Turn these meeting notes into reminders in my Project list.”
 - “Show what is due this week.”
+- “Remind me one calendar month before this annual renewal.”
 - “Add this link to the reminder.”
 - “Move the reminders for this project into my Project Archive list.”
 

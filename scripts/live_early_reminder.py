@@ -10,7 +10,7 @@ import uuid
 from live_smoke import McpStdioClient, PLUGIN_ROOT, SmokeFailure
 
 
-def run(plugin: Path, list_id: str, record_path: Path, *, cleanup: bool = False) -> None:
+def run(plugin: Path, list_id: str, record_path: Path, *, cleanup: bool = False, timed: bool = False) -> None:
     if os.environ.get('APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD') == '1':
         raise SmokeFailure('Final acceptance requires the signed bundled Native helper')
     if record_path.is_symlink() or (record_path.exists() and not cleanup):
@@ -23,7 +23,7 @@ def run(plugin: Path, list_id: str, record_path: Path, *, cleanup: bool = False)
         token = str(uuid.uuid4())
         record = {'scenario': 'calendar_early_reminder', 'list_id': list_id,
             'title': f'Codex calendar renewal {token}', 'idempotency_key': token,
-            'reminder_id': None, 'steps': [], 'outcome': 'incomplete', 'cleanup': 'not_created'}
+            'reminder_id': None, 'timed': timed, 'steps': [], 'outcome': 'incomplete', 'cleanup': 'not_created'}
     def save():
         record_path.parent.mkdir(parents=True, exist_ok=True)
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2)+'\n')
@@ -66,8 +66,10 @@ def run(plugin: Path, list_id: str, record_path: Path, *, cleanup: bool = False)
         selected=[item for item in lists if item['id']==list_id]
         if len(selected)!=1:
             raise SmokeFailure('Exact destination list was not resolved')
+        original_due = ({'kind':'timed','floating':True,'local_date_time':'2028-03-31T09:30:00'}
+                        if timed else {'kind':'all_day','date':'2028-03-31'})
         call('create_reminder',{'list_id':list_id,'title':record['title'],
-            'notes':'Preserve this renewal note.','priority':5,'due':{'kind':'all_day','date':'2028-03-31'},
+            'notes':'Preserve this renewal note.','priority':5,'due':original_due,
             'recurrence_rules':[{'frequency':'yearly','interval':1}],
             'alarms':[{'kind':'relative','offset_seconds':-2678400}],
             'idempotency_key':record['idempotency_key']})
@@ -75,14 +77,16 @@ def run(plugin: Path, list_id: str, record_path: Path, *, cleanup: bool = False)
         result=set_early(month)
         assert result['after']['early_reminder']==month
         # This calendar delta survives changes to the annual due occurrence.
-        for due in ({'kind':'all_day','date':'2029-03-31'}, {'kind':'all_day','date':'2032-03-31'},
-                    {'kind':'timed','date_time':'2028-04-10T09:30:00-07:00','time_zone':'America/Los_Angeles'}):
+        dates = ['2029-03-31', '2032-03-31']
+        for day in dates:
+            due = ({'kind':'timed','floating':True,'local_date_time':day+'T09:30:00'}
+                   if timed else {'kind':'all_day','date':day})
             current=read()
             call('change_reminder',{'reference':current['reference'],'action':{'kind':'patch','patch':{'due':due}}})
             assert inspect()['early_reminder']==month
         current=read()
         call('change_reminder',{'reference':current['reference'],'action':{'kind':'patch',
-            'patch':{'due':{'kind':'all_day','date':'2028-03-31'},'alarms':[]}}})
+            'patch':{'due':original_due,'alarms':[]}}})
         assert inspect()['early_reminder']==month
         assert read()['alarms']==[]
         state=inspect();stale=state['reference']
@@ -106,9 +110,10 @@ def main():
     parser.add_argument('--list-id',required=True)
     parser.add_argument('--record',type=Path,required=True,help='Private JSON path outside the source repository')
     parser.add_argument('--cleanup-record',action='store_true')
+    parser.add_argument('--timed',action='store_true',help='Use a separate floating wall-clock fixture; preserve its temporal mode')
     args=parser.parse_args()
     if Path(__file__).resolve().parents[1] in args.record.resolve().parents:
         parser.error('--record must stay outside the source repository')
-    run(args.plugin_root.resolve(),args.list_id,args.record.resolve(),cleanup=args.cleanup_record)
+    run(args.plugin_root.resolve(),args.list_id,args.record.resolve(),cleanup=args.cleanup_record,timed=args.timed)
 
 if __name__=='__main__': main()
