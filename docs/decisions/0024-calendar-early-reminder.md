@@ -70,7 +70,10 @@ remain pending; failed reads never become an absent Early Reminder.
 The native interval is retained for each recurrence; the plugin does not
 precompute a future series into absolute dates. The opt-in data-free native
 calendar checker exercises REMDueDateDeltaInterval.addedTo: for month ends,
-leap and non-leap February, and US/European DST while preserving local time.
+leap and non-leap February, and US/European DST. On this exact build, a lead
+landing in the US spring gap advances 02:30 to 03:30; an autumn 01:30 fold
+selects standard time. These are native calendar results, not a plugin-defined
+conversion policy.
 Live acceptance also patches due dates and ordinary alarms while checking that
 the native month value survives. Existing recurring-completion restrictions
 remain in force.

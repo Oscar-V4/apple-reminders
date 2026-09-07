@@ -1,24 +1,27 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes **v0.7.1**. Before installing, verify the
-[v0.7.1 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+This guide describes **v0.8.0**. Before installing, verify the
+[v0.8.0 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.8.0)
 and its versioned verification results, then use the README's exact commands.
 Publication status and release checks belong in the
-[signoff](release-evidence/patch-candidate-0.7.1.md).
+[calendar Early Reminder evidence](decisions/0024-calendar-early-reminder.md).
+A source candidate is not evidence of publication; install the versioned tag
+only after its release and verification are available.
 The [historical v0.7.0 evidence](release-evidence/public-beta-0.7.0.md) applies
 only to that earlier version.
 
 ## Version contract
 
-| Area | v0.7.1 contract |
+| Area | v0.8.0 contract |
 |---|---|
 | Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
 | Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
 | Legacy URL mode | `--experimental` is only a legacy hybrid URL opt-in, with the same 15-tool inventory |
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
-| EventKit helper | Verified v0.7.1 signed, notarized, and stapled bundle |
+| EventKit helper | Verified v0.8.0 signed, notarized, and stapled bundle |
+| Early Reminder | Calendar unit/count through Native inspection and set/clear; exact build/schema admission |
 | Native helper | Signed universal bundle; maintainer-host image checks are bounded evidence; clean-user acceptance is not established by these checks |
 
 ## Bundled runtime and Finder-launched Codex

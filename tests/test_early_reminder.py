@@ -78,6 +78,35 @@ class EarlyReminderSafetyTests(unittest.TestCase):
             self.assertEqual(result['status'],'committed_verification_pending',fault)
             self.assertIsNone(result['after']);self.assertEqual(state,'committed')
 
+    def test_verified_and_unchanged_require_the_last_core_projection(self):
+        from reminders_service import ExactRead
+        for status in ('verified','unchanged'):
+            for late_change in (False, True):
+                backend,refs=Backend(),References()
+                proof={'id':'REMINDER-1','title':'Keep','last_modified':'2028-01-01T00:00:00Z'}
+                observed=dict(proof)
+                if late_change: observed['title']='Concurrent change'
+                refs.read_exact=mock.Mock(return_value=ExactRead(observed,'rev1.'+'n'*32))
+                after={'early_reminder':{'unit':'month','value':1},'early_reminder_count':1}
+                payload=mutation_payload('set_early_reminder',status=status,after=after)
+                payload['_early_core_final']=proof
+                state='committed' if status=='verified' else 'not_mutated'
+                backend.native_mutation_payloads['set_early_reminder']=MutationOutcome(payload,state)
+                result,state=self.facade(backend,refs).call_with_state('organize_reminder',{
+                    'reference':'rev1.'+'x'*32,'action':{'kind':'set_early_reminder','early_reminder':{'unit':'month','value':1}}})
+                validate_public_result('organize_reminder',result,state)
+                self.assertEqual(result['status'],'committed_verification_pending' if late_change else status)
+                self.assertNotIn('_early_core_final',json.dumps(result))
+
+    def test_unknown_build_rejects_before_resolving_store(self):
+        import argparse
+        from receipt_contract import MutationNotStartedError
+        with mock.patch.object(adapter,'detect_runtime_identity',return_value=RuntimeIdentity('26.9','unknown','7.0','9999')), \
+             mock.patch.object(adapter,'resolve_database') as resolve:
+            with self.assertRaises(MutationNotStartedError):
+                adapter.preflight_experimental_command(argparse.Namespace(command='set_early_reminder'))
+        resolve.assert_not_called()
+
     def test_unknown_build_and_schema_fail_closed(self):
         observed=RuntimeIdentity('26.5.2','25F84','7.0','3976')
         for capability in ('early_reminder_inspection','early_reminder_mutation'):

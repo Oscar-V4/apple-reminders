@@ -11,14 +11,17 @@ selected tool results return to Codex. See [Privacy](PRIVACY.md).
 
 ## This version
 
-This guide describes **v0.7.1**. Before installing, verify the
-[v0.7.1 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+This guide describes **v0.8.0**. Before installing, verify the
+[v0.8.0 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.8.0)
 and its versioned verification results. The installation commands select that
 exact version; publication status and release checks are recorded in the
-[signoff](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/patch-candidate-0.7.1.md).
+[calendar Early Reminder design and evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/decisions/0024-calendar-early-reminder.md).
+A source candidate is not a published release; use the tag commands only after
+the linked release and verification results are available.
 
-This patch preserves exact image attachment IDs in verified receipts and
-clarifies inconclusive-framework diagnostics. The
+This version adds the app's calendar Early Reminder control, including a
+calendar month before each annual due occurrence, with separate native
+readback and preserved ordinary alarms. The
 [historical v0.7.0 publication evidence](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-evidence/public-beta-0.7.0.md)
 applies only to that earlier version.
 
@@ -33,7 +36,8 @@ An explicit attachment action adds or changes a native URL card.
 The package uses signed universal helpers without a user compiler. The
 maintainer-host image test does not establish clean-user acceptance or support
 on other builds. Exact OS/app/schema admission applies to every private
-operation; this patch adds no new section/tag or other private capability admission.
+operation. Early Reminder admission is limited to its recorded build/schema;
+section and tag admission are unchanged.
 
 ## Get started in three steps
 
@@ -43,11 +47,11 @@ need Xcode, Command Line Tools, Homebrew, or an Apple Developer membership.
 
 ### 1. Verify the versioned release, then install
 
-Verify the linked v0.7.1 public beta release before using these commands. Ask
+Verify the linked v0.8.0 public beta release before using these commands. Ask
 Codex to run them, or use a terminal where the `codex` command is available:
 
 ```bash
-codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.7.1
+codex plugin marketplace add Oscar-V4/apple-reminders --ref v0.8.0
 codex plugin add apple-reminders@oscar-v4-reminders
 ```
 

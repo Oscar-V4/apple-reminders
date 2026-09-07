@@ -29,7 +29,9 @@ int main(void) { @autoreleasepool {
   @[@"America/Los_Angeles",@"2028-12-03 09:30",@"2028-11-03 09:30",@4,@(-1)],
   @[@"America/Los_Angeles",@"2028-03-13 09:30",@"2028-03-12 09:30",@2,@(-1)],
   @[@"America/Los_Angeles",@"2028-11-06 09:30",@"2028-11-05 09:30",@2,@(-1)],
-  @[@"Europe/Berlin",@"2028-04-25 09:30",@"2028-03-25 09:30",@4,@(-1)]
+  @[@"Europe/Berlin",@"2028-04-25 09:30",@"2028-03-25 09:30",@4,@(-1)],
+  @[@"America/Los_Angeles",@"2028-04-12 02:30",@"2028-03-12 03:30",@4,@(-1)],
+  @[@"America/Los_Angeles",@"2028-12-05 01:30",@"2028-11-05 01:30",@4,@(-1)]
  ];
  for(NSArray *row in cases) {
   [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:row[0]]];
@@ -44,6 +46,12 @@ int main(void) { @autoreleasepool {
   BOOL ok=[rendered isEqual:row[2]];
   printf("%s %s %s -> %s\n",ok?"PASS":"FAIL",[row[0] UTF8String],[row[1] UTF8String],rendered.UTF8String);
   if(!ok) return 1;
+  if([row[1] isEqual:@"2028-12-05 01:30"]) {
+   fmt.dateFormat=@"yyyy-MM-dd HH:mm XXX";
+   NSString *fold=[fmt stringFromDate:actual];
+   printf("FOLD %s\n",fold.UTF8String);
+   if (![fold isEqual:@"2028-11-05 01:30 -08:00"]) return 1;
+  }
  }
  return 0;
 }}
