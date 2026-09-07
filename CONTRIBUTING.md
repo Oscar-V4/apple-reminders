@@ -18,20 +18,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/audit_source_package.py plugins/apple-
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-On macOS, also validate all native sources and the EventKit plist:
-
-```bash
-clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
-  -framework ImageIO \
-  -fsyntax-only plugins/apple-reminders/scripts/remkit_attach_image.m
-clang -x objective-c -fobjc-arc -framework Foundation -framework AppKit \
-  -fsyntax-only plugins/apple-reminders/scripts/remkit_sections.m
-clang -x objective-c -fobjc-arc -framework Foundation -framework EventKit \
-  -fsyntax-only plugins/apple-reminders/scripts/reminders_eventkit.m
-clang -x objective-c -fobjc-arc -framework Foundation \
-  -fsyntax-only plugins/apple-reminders/scripts/remkit_recover.m
-plutil -lint plugins/apple-reminders/scripts/eventkit_bridge_info.plist
-```
+On macOS, use the native syntax and plist checks in
+[CI](.github/workflows/ci.yml), covering `remkit_attach_image.m`,
+`remkit_sections.m`, `remkit_recover.m`, `reminders_eventkit.m`, and the
+EventKit plist. The private-helper check resolves the selected compiler and
+matching SDK together; preserve that command instead of substituting a bare
+compiler invocation. These are contributor checks, not end-user dependencies.
 
 Exercise request validation without compiling or accessing EventKit:
 
@@ -43,6 +35,13 @@ printf '%s\n' '{"schema_version":1,"operation":"capabilities"}' | \
 CI must use synthetic fixtures and static validation. Do not add a CI step that
 opens a user's Reminders database, launches Reminders, prompts for permission,
 loads a private framework, or performs a write.
+
+## Milestone user-task validation
+
+At runnable user-facing milestones and before release signoff, follow
+[realistic user-task validation](docs/user-task-validation.md). Invent a
+composed user request, exercise the exact package through its normal entry
+point, and record the user's outcome, preservation evidence, and cleanup.
 
 ## Performance and opt-in live validation
 
@@ -93,8 +92,8 @@ its bundled adapter, EventKit bridge, and Doctor.
   server/schema files are packaged. If the MCP is removed, remove the manifest
   declaration, config, runtime files, documentation, and tests together.
 - Keep the complete schema catalog at 15 tools: eight Core, four Native
-  Extension, two Recovery, and one Diagnostics tool. ADR 0021 sets the default
-  runtime to nine Core/Diagnostics tools; Experimental startup advertises 15.
+  Extension, two Recovery, and one Diagnostics tool. ADR 0023 makes all 15
+  discoverable by default; `--core-only` exposes nine Core/Diagnostics tools.
 - Keep MCP inputs closed-schema, bounded, semantically scoped, and exact-ID
   based. Result envelopes and Receipts must pass the centralized validator even
   though optional MCP `outputSchema` descriptors are omitted from discovery.
@@ -109,11 +108,13 @@ its bundled adapter, EventKit bridge, and Doctor.
   release changes it. The validator rejects drift.
 - Do not add unsupported manifest fields or unresolved placeholders.
 
-The complete catalog is listed below. Default discovery contains only the
-eight Core tools and Diagnostics. `--experimental` exposes the six Native and
-Recovery tools and hybrid URL behavior, while retaining all private admission
-gates. See ADR 0021; tests must cover both mode isolation and direct-call
-rejection before dispatch.
+The complete catalog is listed below. Default discovery contains all 15 tools;
+`--experimental` is the legacy hybrid URL opt-in. Default Core URL writes save
+EventKit metadata; explicit attachment actions create native cards. Discovery
+does not imply capability admission. See
+[ADR 0023](docs/decisions/0023-native-default-minimal-dependencies.md); tests
+cover core-only isolation, URL behavior, and direct-call rejection before
+dispatch.
 
 The catalog is:
 
@@ -192,9 +193,10 @@ must continue to pass `scripts/validate_minis_export.py`.
   final read, ReminderKit image/section saves, exact-list section scope,
   fresh-revision tag changes, create idempotency, concurrency rejection, and
   normalized Receipts.
-- Run normal bounded operations without Doctor preflight. Route to the
-  content-free `diagnose_reminders` only after a relevant permission,
-  environment, build, schema, or native-capability failure.
+- Run normal bounded Core operations without Doctor preflight. Diagnose
+  requested Native capabilities as directed by their current skills, and use
+  targeted content-free diagnosis for relevant permission, environment, build,
+  or schema failures.
 
 ## Privacy and Fixtures
 
@@ -216,8 +218,12 @@ notarization, Gatekeeper, source-hash, mode, and artifact-attestation
 verification, and enter the repository through normal review. Never commit a
 local or ad-hoc build.
 
-The only other binary exceptions are the two signed Python capsules and their
-three metadata files under `plugins/apple-reminders/runtime/`, described below.
+The signed Native bundle exception is
+`plugins/apple-reminders/native/AppleRemindersNativeHelper.app` with
+`native/native-helper-build.json`, subject to its protected signing workflow,
+exact input/inventory, signing, notarization, and provenance checks. The other
+binary exceptions are the two signed Python capsules and their three metadata
+files under `plugins/apple-reminders/runtime/`, described below.
 This does not permit arbitrary archives, downloaded tools, or locally built
 executables in the package.
 
