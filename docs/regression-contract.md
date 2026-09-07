@@ -41,11 +41,13 @@ even though optional MCP `outputSchema` descriptors are omitted from
    signed offset and require an existing or same-request due value. The public
    writable relative subset is an integral offset from `-31536000` through `0`,
    exactly 31,536,000 seconds (365 elapsed days) before due at the lower bound.
-6. A non-null URL create/change preserves EventKit metadata, verifies the
-   user-visible native URL attachment, and then performs a final exact EventKit
-   read. An unavailable final read remains verification-pending; a failed
-   attachment step remains partial; idempotent retry does not duplicate the
-   reminder or attachment.
+6. Default URL create/change preserves EventKit metadata without creating a
+   native URL attachment; an explicit attachment action represents card intent.
+   The legacy `--experimental` hybrid URL flow additionally verifies the native
+   URL attachment and performs a final exact EventKit read. In that legacy
+   flow, an unavailable final read remains verification-pending and a failed
+   attachment step remains partial. Idempotent retry does not duplicate the
+   reminder or attachment; mode semantics remain bound to the receipt.
 7. Image attach and replacement use the ReminderKit image-data path, derive
    PNG/JPEG UTI from decoded bytes rather than a filename suffix, and require
    the stored UTI to match native helper read-back. CloudKit evidence can be
@@ -302,9 +304,10 @@ compatibility shim or deprecated parser route.
 
 ## Diagnosis contract
 
-Normal bounded work runs without Doctor preflight. `diagnose_reminders` is used
-only after a relevant permission, environment, build, schema, or native
-capability failure. It is content-free and a Native failure does not block Core.
+Normal bounded Core work runs without Doctor preflight. Requested Native
+capabilities follow their current skill's diagnosis step; other diagnosis is
+targeted to a relevant permission, environment, build, or schema failure.
+It is content-free and a Native failure does not block Core.
 A missing private-framework path alone is inconclusive on shared-cache systems.
 The default `execution_mode=metadata_only` must execute no developer-tool
 process and must never invoke `clang` or request installation. Only an explicit
@@ -325,6 +328,11 @@ compiler-free private, and CLT-required private boundary metadata.
 These are regression budgets, not cross-machine performance claims.
 
 ## Test boundary
+
+At user-facing milestones, apply [realistic user-task validation](user-task-validation.md)
+to the exact package and record the complete journey separately from component
+tests. A blocked or partial journey is retained as evidence, not promoted to
+successful feature acceptance.
 
 Production ignores backend-path environment overrides. Source integration tests
 inject a `BackendPaths` instance into `mcp.server.main(...)` through the
