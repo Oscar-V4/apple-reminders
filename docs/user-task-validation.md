@@ -28,8 +28,10 @@ than waiting for the user to discover the next integration failure.
 4. Use existing maintainer/user authorization and disposable synthetic fixtures
    for autonomous acceptance. Resolve an exact writable account/list, record
    ownership before creating anything, and retain exact fixture identifiers
-   privately for cleanup. Test data should use future dates to avoid incidental
-   alerts during the run. User-owned reminders are not reusable test fixtures.
+   privately for cleanup. Keep both the deadline and every calculated alarm
+   trigger safely beyond the expected test and cleanup window; a future
+   deadline alone can still produce an imminent or past relative alert.
+   User-owned reminders are not reusable test fixtures.
    CI remains synthetic and performs no live store
    reads, framework loads, permission prompts, or writes.
 5. Check the user's outcome through fresh public reads after each meaningful
