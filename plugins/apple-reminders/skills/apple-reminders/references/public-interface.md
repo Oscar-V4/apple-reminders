@@ -103,7 +103,7 @@ images. Use the native actions only for explicit intent after targeted diagnosis
 
 - `inspect_reminder_native`: use `kind=reminder` with a reference and requested `include` values; `kind=sections` with exact `list_id`; or `kind=tags` with an optional account/query bound.
 - `create_reminder_section {list_id, name}`: create or repair one exact-list section with native read-back evidence.
-- `organize_reminder {reference, action}`: `move_to_section`, `add_tag`, or `remove_tag`.
+- `organize_reminder {reference, action}`: `move_to_section`, `add_tag`, `remove_tag`, or `set_early_reminder`.
 - `change_reminder_attachment {reference, action}`: attach/copy/replace an image or URL, or delete an exact attachment ID.
 
 Attachment actions are:
@@ -132,7 +132,7 @@ Native mutation starts by revalidating the opaque Core reference, then captures 
 
 ## Diagnostics
 
-`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area, support tier, compiler requirement, build/schema compatibility, runtime state, and precise block reason. Use it before an explicitly requested Experimental mutation or after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only contributor-requested `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; source fallback requires `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`. Diagnosis never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
+`diagnose_reminders {scope?, detail_level?, execution_mode?}` runs one content-free diagnosis and reports the requested area, support tier, compiler requirement, build/schema compatibility, runtime state, and precise block reason. Use it before an explicitly requested Experimental mutation or after a relevant failure. Public scopes are `core`, `access`, `native_extension`, `sections`, `tags`, `attachments`, `recovery`, `early_reminder`, and `packaging`. The default `metadata_only` mode runs no developer-tool process. Only contributor-requested `experimental_toolchain` mode for a related Native Extension or Recovery scope may run the private-helper toolchain gate; source fallback requires `APPLE_REMINDERS_NATIVE_ALLOW_SOURCE_BUILD=1`. Diagnosis never runs `xcode-select --install`. Core and packaging diagnosis remain metadata-only.
 
 ## Receipt rules
 
@@ -154,3 +154,32 @@ Broad cleanup uses 25–40 candidates per authorized chunk, with the final remai
 ## Withheld
 
 Native flag mutation, MCP-level UI selection/order, unused-label row deletion, attachment export/download, attachment repair apply, backup/Snapshot apply, list/section rename or deletion, and log purge are not public tools. A user request for one of these may receive a read-only diagnosis or proposal, but not an adapter/SQLite/AppleScript/UI-automation fallback write.
+
+
+## Calendar Early Reminder
+
+This Native Extension changes the app's separate Early Reminder control. Core
+`alarms` remains the existing EventKit complete-array replacement API. Core
+reads alone do not establish Early Reminder presence or absence.
+
+1. Diagnose `scope:"early_reminder"` and require exact build/schema admission.
+2. Read the exact Reminder to obtain `rev1`; inspect with
+   `{"kind":"reminder","reference":"rev1.…","include":["early_reminder"]}`.
+3. Use the refreshed reference:
+   `{"reference":"rev1.…","action":{"kind":"set_early_reminder","early_reminder":{"unit":"month","value":1}}}`.
+4. Require a verified receipt with the exact interval and count of one.
+
+`unit` is minute/hour/day/week/month; `value` is an integer 1–200. Null clears
+only Early Reminder. The native value is a signed calendar delta, recalculated
+against each due occurrence by Reminders. Month-end clamping and DST follow
+Apple calendar arithmetic. All-day notification time remains an app preference;
+storing the interval does not prove notification delivery or iCloud convergence.
+
+Inspection returns `early_reminder`, `early_reminder_count`, and the bounded
+`early_reminders` array. More than one alert, or an unsupported/read-only native
+delta, cannot be overwritten. Failed or incomplete reads never mean “none.”
+Writes revalidate the opaque Core reference, private version and a native
+snapshot immediately before save. Separate native and Core final reads verify
+the requested delta and preserved fields, including the complete ordinary alarm
+multiset, dates, recurrence, notes, native attachments, tags and completion.
+A missing final read keeps a pending receipt and issues no new write reference.

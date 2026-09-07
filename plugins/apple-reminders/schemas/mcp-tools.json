@@ -1469,7 +1469,7 @@
     {
       "name": "inspect_reminder_native",
       "title": "Inspect reminder details",
-      "description": "Native operation with capability-specific compatibility checks. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference.",
+      "description": "Native operation with capability-specific compatibility checks. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference. Include early_reminder to read the separate native calendar interval; EventKit alarms do not project this setting.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1486,14 +1486,15 @@
           "include": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 4,
+            "maxItems": 5,
             "uniqueItems": true,
             "items": {
               "enum": [
                 "section",
                 "tags",
                 "attachments",
-                "sync"
+                "sync",
+                "early_reminder"
               ]
             }
           },
@@ -1542,14 +1543,15 @@
               "include": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 4,
+                "maxItems": 5,
                 "uniqueItems": true,
                 "items": {
                   "enum": [
                     "section",
                     "tags",
                     "attachments",
-                    "sync"
+                    "sync",
+                    "early_reminder"
                   ]
                 }
               },
@@ -1714,7 +1716,7 @@
     {
       "name": "organize_reminder",
       "title": "Organize reminder",
-      "description": "Native operation with capability-specific compatibility checks. Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list.",
+      "description": "Native operation with capability-specific compatibility checks. Move one exact Reminder to one exact section or add/remove one tag using a fresh opaque Reference. Section moves remain within the Reminder's current list. Set or clear the separate native Early Reminder with set_early_reminder after early_reminder capability diagnosis; month means a calendar month, never fixed seconds. Existing alarms remain unchanged.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1774,6 +1776,51 @@
                 "required": [
                   "kind",
                   "tag"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "set_early_reminder"
+                  },
+                  "early_reminder": {
+                    "description": "Calendar interval before each due occurrence. null clears only Early Reminder. Ordinary EventKit alarms are preserved. Month remains a month for month ends, leap years and repeated schedules; no seconds conversion.",
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "unit": {
+                            "enum": [
+                              "minute",
+                              "hour",
+                              "day",
+                              "week",
+                              "month"
+                            ]
+                          },
+                          "value": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200
+                          }
+                        },
+                        "required": [
+                          "unit",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "early_reminder"
                 ],
                 "additionalProperties": false
               }
@@ -2005,7 +2052,8 @@
               "tags",
               "attachments",
               "recovery",
-              "packaging"
+              "packaging",
+              "early_reminder"
             ],
             "default": "core",
             "description": "core diagnoses Stable Core. Native scopes report exact capability availability. Image, section, and recovery operations use a verified prebuilt helper; ordinary users need no compiler. Packaging scope never probes private stores or account permissions."

@@ -1,9 +1,5 @@
 [
   {
-    "prompt": "오늘 할 일 브리핑해줘. 지난 항목, 오늘 마감, 이번 주 예정, 기한 없는 항목을 나눠서 보여줘.",
-    "expected_behavior": "Reads bounded current Reminders state first, normalizes today's date and timezone, groups results by operational status, and includes exact list or section names without dumping raw rows."
-  },
-  {
     "prompt": "스크린샷 파일을 '취업캠프 준비' 미리알림에 첨부하고 아이폰에서 보일 수 있는지 확인해줘.",
     "expected_behavior": "Diagnoses the exact Native capability in the default session; if unavailable, explains the precise limit and offers an agreed alternative without changing flags or installing a compiler. When admitted: Resolves the exact reminder and source image, obtains a fresh opaque reference, inspects attachments, uses change_reminder_attachment with attach_image and an idempotency key, and reports mobile evidence without claiming iPhone confirmation."
   },
@@ -38,5 +34,9 @@
   {
     "prompt": "상대 알람이 있는 '연간 갱신' 미리알림의 마감일만 없애고 알람은 그대로 둬.",
     "expected_behavior": "Reads the exact Reminder and recognizes that retaining a relative alarm while setting due:null is invalid. Does not dispatch that patch. Explains that the user must retain or replace the due anchor, explicitly clear alarms with null/[], or provide a complete non-relative alarm replacement; never silently removes the alarm."
+  },
+  {
+    "prompt": "매년 3월 31일인 종일 갱신 일정에 달력상 한 달 전 마감 예정 미리 알림을 설정해줘. 기존 메모와 반복은 유지해줘.",
+    "expected_behavior": "Diagnoses early_reminder capability, preserves exact due and yearly recurrence, and uses organize_reminder.set_early_reminder with unit month and value 1 after exact Core/native reads. Verifies the native interval and count. Never substitutes 30 days or fixed seconds. Preserves ordinary alarms unless their removal was explicitly requested; reports unavailable capability or pending verification truthfully."
   }
 ]

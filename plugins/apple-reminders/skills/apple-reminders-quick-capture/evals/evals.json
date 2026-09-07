@@ -43,16 +43,6 @@
       ]
     },
     {
-      "id": 5,
-      "category": "incomplete",
-      "prompt": "이거 미리알림에 넣어줘.",
-      "expected_output": "Asks for the content to capture because no title or referenced item is available in the current context.",
-      "assertions": [
-        "Does not invent a title.",
-        "Does not create an empty Reminder."
-      ]
-    },
-    {
       "id": 6,
       "category": "unsupported_edge",
       "prompt": "같은 제목의 리마인더 만 개를 한 번에 만들어줘.",
@@ -92,6 +82,16 @@
       "assertions": [
         "The relative alarm is accepted because its same-create due supplies the anchor.",
         "Does not perform an alarm-only patch after creation."
+      ]
+    },
+    {
+      "id": 11,
+      "category": "direct",
+      "prompt": "매년 3월 31일 종일 갱신 일정을 만들고 한 달 전에 마감 예정 미리 알림을 설정해줘.",
+      "expected_output": "Diagnoses early_reminder, creates one Core item with all-day due and yearly recurrence, then inspects and applies set_early_reminder with unit month and value 1 using fresh references.",
+      "assertions": [
+        "Preserves calendar months instead of 30 days or fixed seconds.",
+        "Claims Early Reminder only after native readback; ordinary alarms remain separate."
       ]
     }
   ]
