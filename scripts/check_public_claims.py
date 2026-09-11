@@ -292,7 +292,11 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             add_command,
             "macOS permission prompt",
             "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md",
-            "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/release-verification.md",
+            f"/plugin marketplace add https://github.com/Oscar-V4/apple-reminders.git#{tag}",
+            "/plugin install apple-reminders@oscar-v4-reminders",
+            f"https://github.com/Oscar-V4/apple-reminders/releases/download/{tag}/apple-reminders-{version}.mcpb",
+            "selected tool results are sent to your assistant",
+            "PRIVACY.md",
         ),
         readme_path,
         errors,
@@ -300,12 +304,8 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
     for pattern, label in (
         (r"macOS\s+14(?:\+| or newer| and later)", "minimum macOS requirement"),
         (
-            r"(?:plugin|runtime).{0,80}?includes.{0,50}?Python runtime",
-            "explicit bundled Python runtime",
-        ),
-        (
-            r"(?:Core|Ordinary reminder work).{0,200}?do(?:es)? not\s+(?:need|require)\s+Xcode",
-            "ordinary Core without user Xcode",
+            r"Everything (?:needed|required) to run the plugin is bundled",
+            "bundled setup statement",
         ),
         (
             rf"https://github\.com/Oscar-V4/apple-reminders/releases/tag/{re.escape(tag)}",
@@ -314,7 +314,6 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
         (r"Start a\s+new\s+(?:Codex\s+)?task", "new-task installation step"),
     ):
         _require_claim(readme, pattern, readme_path, errors, label=label)
-    _require_current_contract(readme, tag, readme_path, errors)
 
     installation = texts[INSTALLATION_GUIDE]
     _require_current_contract(installation, tag, INSTALLATION_GUIDE, errors)
