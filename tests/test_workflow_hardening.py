@@ -205,7 +205,7 @@ class WorkflowHardeningTests(unittest.TestCase):
         self.assertIn("Alternatives when a Native capability is unavailable", matrix)
         self.assertIn("App Intents and Shortcuts review", runtime_gate_adr)
         self.assertIn("Shortcuts tag support", runtime_gate_adr)
-        self.assertIn("--experimental", readme)
+        self.assertIn("--experimental", read(ROOT / "docs/installation.md"))
         self.assertIn("signed bundle does not override those checks", read(ROOT / "docs/installation.md"))
         self.assertIn("`/usr/bin/xcode-select -p`", runtime_gate_adr)
         self.assertNotIn("Organize my Inbox reminders into sensible sections", readme)
