@@ -98,6 +98,7 @@ MUTATION_COMMANDS = frozenset(
         "remove_tag",
         "create_section",
         "move_to_section",
+        "set_early_reminder",
         "attach_image",
         "copy_image_attachment",
         "attach_url",
@@ -2975,6 +2976,133 @@ def cmd_list_sections(args: argparse.Namespace) -> int:
         return 0
     finally:
         con.close()
+
+
+def invoke_early_reminder(operation: str, reminder_id: str, *arguments: str) -> dict[str, Any]:
+    helper = _prepare_helper_before_mutation(
+        reminderkit_sections_helper, label="Early Reminder helper",
+        reason_code="native_early_helper_build_failed",
+    )
+    mutation = operation == "early-set"
+    try:
+        proc = run_bounded_process(
+            [str(helper), operation, reminder_id, *arguments],
+            timeout_s=SUBPROCESS_TIMEOUT_SECONDS, stdout_limit=NATIVE_STDOUT_LIMIT_BYTES,
+            stderr_limit=NATIVE_STDERR_LIMIT_BYTES, output="utf8",
+        )
+    except ProcessLaunchError as exc:
+        raise MutationNotStartedError("Early Reminder helper could not start", code="unexpected_error") from exc
+    except ProcessError as exc:
+        raise AdapterError("Early Reminder helper result is unavailable", code="sync_pending",
+            partial_failure=mutation, mutation_outcome_unknown=mutation) from exc
+    try:
+        payload = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AdapterError("Early Reminder helper returned invalid JSON", code="sync_pending",
+            partial_failure=mutation, mutation_outcome_unknown=mutation) from exc
+    if not isinstance(payload, dict) or proc.returncode or payload.get("ok") is not True:
+        attempted = mutation and (not isinstance(payload, dict) or payload.get("mutation_attempted") is not False)
+        reason = payload.get("error") if isinstance(payload, dict) else "invalid_native_output"
+        code = reason if reason in {"concurrent_modification", "invalid_input"} else "sync_pending" if attempted else "unsupported_capability"
+        raise AdapterError("Early Reminder helper could not verify the operation", code=code,
+            reason_code=reason, partial_failure=attempted, mutation_outcome_unknown=attempted)
+    if payload.get("operation") != operation:
+        raise AdapterError("Early Reminder helper operation mismatch", code="sync_pending",
+            partial_failure=mutation, mutation_outcome_unknown=mutation)
+    if not mutation:
+        snapshot = payload.get("snapshot")
+        if (payload.get("mutation_attempted") is not False or not isinstance(snapshot, dict)
+                or snapshot.get("reminder_id") != reminder_id
+                or not re.fullmatch(r"[a-f0-9]{64}", str(snapshot.get("native_guard", "")))
+                or not re.fullmatch(r"[a-f0-9]{64}", str(snapshot.get("stable_digest", "")))
+                or not isinstance(snapshot.get("early_reminders"), list)
+                or snapshot.get("early_reminder_count") != len(snapshot["early_reminders"])
+                or "early_reminder" not in snapshot):
+            raise AdapterError("Early Reminder snapshot is incomplete", code="schema_mismatch")
+    else:
+        attempted = payload.get("mutation_attempted")
+        if (type(attempted) is not bool or payload.get("saved") is not attempted
+                or (attempted and payload.get("pre_save_guard_matched") is not True)):
+            raise AdapterError("Early Reminder mutation proof is incomplete", code="sync_pending",
+                partial_failure=True, mutation_outcome_unknown=True)
+    return payload
+
+
+def early_public_state(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {key: snapshot[key] for key in (
+        "reminder_id", "early_reminder", "early_reminder_count", "early_reminders"
+    ) if key in snapshot}
+
+
+def cmd_read_early_reminder(args: argparse.Namespace) -> int:
+    identifier = normalize_uuid(args.id)
+    payload = invoke_early_reminder("early-read", identifier)
+    json_out({"ok": True, "reminder": early_public_state(payload["snapshot"])})
+    return 0
+
+
+def cmd_set_early_reminder(args: argparse.Namespace) -> int:
+    identifier = normalize_uuid(args.id)
+    try:
+        desired = json.loads(args.early_reminder_json)
+    except (TypeError, ValueError) as exc:
+        raise MutationNotStartedError("Invalid Early Reminder interval", code="invalid_input") from exc
+    if desired is not None and (
+        not isinstance(desired, dict) or set(desired) != {"unit", "value"}
+        or desired["unit"] not in ("minute", "hour", "day", "week", "month")
+        or type(desired["value"]) is not int or not 1 <= desired["value"] <= 200
+    ):
+        raise MutationNotStartedError("Use a calendar unit and an integer value from 1 through 200", code="invalid_input")
+    db = resolve_database(None)
+    con = connect_read_only(db)
+    try:
+        capability = receipt_capability(args, require_command_capability(con, "early_reminder_native"))
+        require_reminder_version(find_reminder(con, reminder_id=identifier), args.if_version, required=True)
+    finally:
+        con.close()
+    before = invoke_early_reminder("early-read", identifier)["snapshot"]
+    con = connect_read_only(db)
+    try:
+        require_command_capability(con, "early_reminder_native")
+        require_reminder_version(find_reminder(con, reminder_id=identifier), args.if_version, required=True)
+    finally:
+        con.close()
+    payload = invoke_early_reminder("early-set", identifier, before["native_guard"],
+        json.dumps(desired, separators=(",", ":")))
+    wrote = payload["saved"]
+    try:
+        final = invoke_early_reminder("early-read", identifier)["snapshot"]
+    except Exception:
+        json_out(operation_receipt(
+            status="committed_verification_pending", operation="set_early_reminder", backend="reminderkit_private",
+            target={"id": identifier}, before=early_public_state(before), after={},
+            verification={"state": "pending", "write_performed": True if wrote else None, "final_read": False},
+            recovery={"semantics": "read_before_retry", "automatic_retry_safe": False},
+            error={"code": "sync_pending", "reason_code": "early_reminder_final_read_failed",
+                   "message": "The helper returned, but the independent final read failed."},
+            warnings=[{"code": "verification_pending", "message": "Inspect exact native and Core state before retrying."}],
+        ))
+        return 0
+    matched = (payload.get("matched") is True
+        and payload.get("before") == before
+        and final["stable_digest"] == before["stable_digest"]
+        and final["early_reminder"] == desired
+        and final["early_reminder_count"] == (0 if desired is None else 1))
+    status = ("verified" if wrote else "unchanged") if matched else "committed_verification_pending"
+    extra = {} if matched else {
+        "error": {"code": "sync_pending", "reason_code": "early_reminder_verification_pending",
+                  "message": "The Early Reminder result or preserved state did not match."},
+        "warnings": [{"code": "verification_pending", "message": "Read exact native and Core state before retrying."}],
+    }
+    json_out(operation_receipt(
+        status=status, operation="set_early_reminder", backend="reminderkit_private",
+        target={"id": identifier}, before=early_public_state(before), after=early_public_state(final),
+        verification={"state": "read_back" if matched else "pending", "write_performed": wrote if matched or wrote else None,
+            "final_read": True, "matched": matched},
+        recovery={"semantics": "read_before_retry", "automatic_retry_safe": False},
+        capability=capability, **extra,
+    ))
+    return 0
 
 
 def cmd_read_reminder(args: argparse.Namespace) -> int:
@@ -5953,6 +6081,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-id")
     p.add_argument("--name", required=True)
     p.set_defaults(func=cmd_create_section)
+
+    p = sub.add_parser("read_early_reminder")
+    add_common_db(p)
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_read_early_reminder)
+
+    p = sub.add_parser("set_early_reminder")
+    add_common_db(p)
+    p.add_argument("--id", required=True)
+    p.add_argument("--if-version", type=int, required=True)
+    p.add_argument("--early-reminder-json", required=True)
+    p.set_defaults(func=cmd_set_early_reminder)
 
     p = sub.add_parser("move_to_section")
     add_common_db(p)

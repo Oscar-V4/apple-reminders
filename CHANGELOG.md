@@ -17,6 +17,16 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
 - Preserve the 15-tool default, Core-only mode, exact references, receipts,
   and private capability admission. Client support adds no new macOS admission.
 
+- Adds exact native Early Reminder inspection and set/clear through the existing
+  Native tools. Calendar months, weeks and days remain calendar units; ordinary
+  EventKit relative alarms retain their elapsed-second semantics.
+- Verifies the separate native delta context and preserved native/Core state.
+  Unknown builds, schema drift, multiple unsupported alerts and stale revisions
+  fail closed; missing final reads remain pending.
+- Adds synthetic contract/preservation regressions and opt-in native calendar
+  checks for month ends, leap years, recurrence and DST. Admission is limited
+  to the recorded macOS/Reminders build.
+
 ## 0.7.1 — Patch contents
 
 This version preserves exact attachment identity in successful image receipts

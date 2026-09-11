@@ -6,7 +6,7 @@ description: "Manage Apple Reminders: capture notes or screenshots, brief upcomi
 # Apple Reminders
 
 Use the bundled MCP as the only normal operation surface. Stable Core uses
-documented EventKit. Sections, tag assignments, native attachments, and exact
+documented EventKit. Calendar Early Reminder, sections, tag assignments, native attachments, and exact
 Recently Deleted work are Experimental Internals. A missing or blocked
 capability is not permission to call a deprecated CLI, edit the Reminders
 database, improvise with AppleScript/UI automation, or bypass the runtime gate.
@@ -51,7 +51,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
    never resolve duplicate list titles without them, recover one item at a time,
    and stop on any non-verified result.
 8. For explicitly requested Native Extension work, diagnose the matching
-   `sections`, `tags`, or `attachments` scope first. Continue only when the
+   `sections`, `tags`, `attachments`, or `early_reminder` scope first. Continue only when the
    result says `support_tier=experimental_internals`, `available=true`, and the
    build/schema admission passed. Resolve the exact reminder and use the public
    Native tools: inspect with `inspect_reminder_native`, then pass a fresh opaque
@@ -77,8 +77,10 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 ## Dates, URLs, and recurrence
 
 - Resolve relative dates in the user's timezone. An all-day due value is `{"kind":"all_day","date":"YYYY-MM-DD"}`. For an explicitly zoned instant, use RFC 3339 `date_time` and an IANA `time_zone`. For a local wall-clock time that follows the device's current timezone, use `{"kind":"timed","floating":true,"local_date_time":"YYYY-MM-DDTHH:MM:SS"}`. Preserve the user's choice: never silently turn a zoned request into floating time after a failed verification. Repeated DST hours cannot preserve a selected zoned occurrence and are rejected before saving.
-- Add an alarm only when requested. Preserve “before the due date” wording as a due-anchored relative alarm. Before an alarm-only relative patch to an existing Reminder, call `read_reminder` immediately beforehand, confirm its current `due`, inspect the complete current alarm array, and use the returned fresh reference.
-- A relative alarm verifies the EventKit trigger. The Reminders app can display that trigger time as the row's main time; this does not configure or verify its separate Early Reminder control. Describe the due and trigger separately when that distinction matters.
+- Add an alarm only when requested. Preserve elapsed-time “before the due date” wording as a due-anchored relative alarm; calendar months and explicit Early Reminder intent use the Native route below. Before an alarm-only relative patch to an existing Reminder, call `read_reminder` immediately beforehand, confirm its current `due`, inspect the complete current alarm array, and use the returned fresh reference.
+- Calendar leads such as “one month before,” or an explicit request for the app's Early Reminder control (마감 예정 미리 알림), use Native Early Reminder. Diagnose `scope=early_reminder`, read the exact Reminder, inspect with `include:["early_reminder"]`, then use the refreshed reference with `organize_reminder` action `{"kind":"set_early_reminder","early_reminder":{"unit":"month","value":1}}`. The due date is required. Confirm `after.early_reminder` and `early_reminder_count:1` in the verified receipt. For creation, create Core due/recurrence first, then apply this action to that exact new item.
+- Early Reminder stores a positive count (1–200) of `minute`, `hour`, `day`, `week`, or `month` before each due occurrence. A month stays a calendar month across month ends, leap years, and DST. It does not become 30 days or a fixed number of seconds. Apple controls actual notification delivery and all-day notification time. `early_reminder:null` clears only Early Reminder. Ordinary EventKit alarms stay independent and unchanged; explicitly requested migration may clear duplicate ordinary alarms through a separate guarded Core patch.
+- A relative alarm verifies the EventKit trigger and does not configure the separate Early Reminder control. Use it for elapsed-second alarm intent and report due and trigger separately. If the native calendar capability is unavailable, report that limitation without silently approximating a calendar lead.
 - `alarms` is a complete-array replacement. Omitting `alarms` preserves every current alarm whenever alarm-array intent is unchanged and the resulting due remains non-null; `null` or `[]` explicitly clears all alarms. Setting `due:null` while retaining a relative alarm is rejected, so pair the due clear with `alarms:null`, `alarms:[]`, or a complete non-relative replacement. An alarm marked `read_only:true` records trigger, offset, or action semantics outside the faithful writable subset and cannot be resubmitted. If the user asks to change alarms while one is present, stop and report that a non-empty replacement is unsafe. Use `null`/`[]` only when the user explicitly requests clearing every alarm.
 - Writable relative offsets are whole seconds from `-31536000` through `0`: exactly 31,536,000 seconds (365 elapsed days) before the due value through the due instant. Absolute and coordinate-backed enter/leave alarms remain available; messaging alarms are not public.
 - Only one validated recurrence rule is supported and it requires a due date.
@@ -107,7 +109,7 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 - Prefer separate exact Reminder Lists or user-approved textual headings over
   sections. Prefer a plain-text title/note label over a native tag. Section reads
   and writes use exact `list_id`; section names are not global.
-- `organize_reminder` supports Experimental section moves and tag assignments
+- `organize_reminder` supports Experimental Early Reminder, section moves and tag assignments
   only after admission. Unused-label row cleanup is withheld.
 - Image input must be an absolute regular non-symlink PNG or JPEG, at most 25 MiB, 16,384 pixels per dimension, and 40,000,000 pixels total.
 - Cross-reminder image copy uses `change_reminder_attachment` action `copy_image` with fresh destination and source `rev1` references plus one exact active source image attachment ID. It never exports a private file path or mutates the source.

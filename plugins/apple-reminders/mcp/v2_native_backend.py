@@ -30,6 +30,8 @@ from reminders_service import (
     ReferenceRejected,
     mutation_state_after_unverified_projection,
     unverified_mutation_projection,
+    STABLE_USER_FIELDS,
+    reminder_matches_fields,
 )
 from receipt_contract import (
     FAILURE_RECEIPT_STATUSES,
@@ -57,6 +59,7 @@ class NativeBackend:
     }
     _EXPECTED_OPERATIONS = {
         "move_reminder_to_section": "move_to_section",
+        "set_reminder_early_reminder": "set_early_reminder",
         "add_reminder_tag": "add_tag",
         "remove_reminder_tag": "remove_tag",
         "attach_image_to_reminder": "attach_image",
@@ -265,6 +268,13 @@ class NativeBackend:
             raise RuntimeError("The private attachment read failed")
         return payload
 
+    def _early_read(self, reminder_id: str) -> dict[str, Any]:
+        transport = self._adapter_call(["read_early_reminder", "--id", reminder_id])
+        state = transport.payload.get("reminder")
+        if transport.is_error or not isinstance(state, dict) or state.get("reminder_id") != reminder_id:
+            raise RuntimeError("The exact Early Reminder read failed")
+        return state
+
     def read(self, guard: Guard, arguments: dict[str, Any]) -> dict[str, Any]:
         self._revalidate_guard(guard)
         include = set(arguments.get("include") or [])
@@ -286,6 +296,9 @@ class NativeBackend:
                     )
                     if key in reminder
                 }
+        if "early_reminder" in include:
+            result.update(self._early_read(guard.reminder_id))
+            self._revalidate_guard(guard)
         if "attachments" in include:
             attachments = self._private_attachments(
                 guard.reminder_id,
@@ -383,6 +396,10 @@ class NativeBackend:
             "reminder_id": guard.reminder_id,
             "if_version": reminder_version,
         }
+        if command == "set_early_reminder":
+            return "set_reminder_early_reminder", {
+                **base, "early_reminder_json": json.dumps(arguments["early_reminder"], separators=(",", ":")),
+            }
         if command == "move_to_section":
             return "move_reminder_to_section", {
                 **base,
@@ -581,6 +598,10 @@ class NativeBackend:
         *,
         adapter_after: Any = None,
     ) -> bool:
+        if command == "set_early_reminder":
+            desired = arguments["early_reminder"]
+            return ("early_reminder" in final_state and final_state["early_reminder"] == desired
+                    and final_state.get("early_reminder_count") == (0 if desired is None else 1))
         if command == "move_to_section":
             expected_section = cls._canonical_identifier(arguments.get("section_id"))
             return (
@@ -689,7 +710,7 @@ class NativeBackend:
         arguments: dict[str, Any],
     ) -> MutationOutcome:
         try:
-            self._revalidate_guard(guard)
+            public_before = self._revalidate_guard(guard)
             private_state = self._private_attachments(guard.reminder_id, limit=1)
         except ReferenceRejected as exc:
             return self._failure_outcome(
@@ -764,7 +785,16 @@ class NativeBackend:
         mutation_state = validated_receipt_mutation_state(payload)
         if status in {"verified", "unchanged"}:
             try:
-                if command in {"move_to_section", "add_tag", "remove_tag"}:
+                if command == "set_early_reminder":
+                    final_state = self._early_read(guard.reminder_id)
+                    public_result = self._bridge_call("read_reminder", {"reminder_id": guard.reminder_id})
+                    public_final = public_result.payload.get("data", {}).get("reminder", {})
+                    expected = {key: public_before[key] for key in STABLE_USER_FIELDS if key in public_before}
+                    if public_result.is_error or public_final.get("id") != guard.reminder_id or not reminder_matches_fields(public_final, expected):
+                        raise RuntimeError("The stable Core state changed during Early Reminder mutation")
+                    payload["after"] = final_state
+                    payload["_early_core_final"] = copy.deepcopy(public_final)
+                elif command in {"move_to_section", "add_tag", "remove_tag"}:
                     final_state = self._private_read_reminder(guard.reminder_id)
                     payload["after"] = final_state
                 else:

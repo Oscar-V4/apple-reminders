@@ -91,6 +91,7 @@ then checks the saved result.
 
 - “Turn these meeting notes into reminders in my Project list.”
 - “Show what is due this week.”
+- “Remind me one calendar month before this annual renewal.”
 - “Add this link to the reminder.”
 - “Move these project reminders into my Project Archive list.”
 
@@ -105,7 +106,11 @@ tags, attachments, and recovery use version-sensitive private interfaces with
 exact OS/app/schema admission. Their support tier remains
 `experimental_internals`; tool discovery does not establish availability.
 See [supported workflows](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/workflow-capability-matrix.md).
-This release changes client compatibility, not private capability admission.
+This release also includes the app's calendar Early Reminder control, including
+one calendar month before an annual renewal. It preserves ordinary alarms and
+requires its recorded build/schema admission. See the
+[Early Reminder design](https://github.com/Oscar-V4/apple-reminders/blob/main/docs/decisions/0024-calendar-early-reminder.md).
+Client compatibility adds no further private capability admission.
 
 A pending or partially verified change needs an exact read before retrying.
 Verified local changes do not prove delivery or display on every device.

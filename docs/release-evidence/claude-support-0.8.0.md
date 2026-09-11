@@ -5,13 +5,16 @@ Status: candidate validation in progress; publication has not yet been verified.
 ## Scope
 
 One local MCP runtime supports Codex, Claude Code, and a Claude Desktop MCPB
-extension. Code clients receive the same five workflow skills. Desktop receives
-MCP instructions and the tool catalog. No private capability admission changes.
+extension, integrated with the existing calendar Early Reminder candidate
+(PR #66). Code clients receive the same five workflow skills. Desktop receives
+MCP instructions and the tool catalog. Client integration adds no private
+capability admission beyond the separately recorded Early Reminder change.
 
 The packaging source for signed helper preparation is
 `9b78b30d9fad96ba08a59710184178f993173ad3`. Existing Python runtime capsules are
-reused unchanged. EventKit and Native helpers are prepared by the existing
-protected, main-owned signing workflows for version 0.8.0.
+reused unchanged. The EventKit helper is prepared by the existing protected, main-owned signing
+workflow for the new manifest. The Early Reminder candidate's signed 0.8.0
+Native helper is retained with its original source ancestry and verification.
 
 ## Acceptance scenario
 

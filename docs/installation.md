@@ -63,6 +63,7 @@ The bundle manifest follows [MCPB 0.3](https://github.com/modelcontextprotocol/m
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
 | EventKit helper | Verified v0.8.0 signed, notarized, and stapled bundle |
+| Early Reminder | Calendar unit/count through Native inspection and set/clear; exact build/schema admission |
 | Native helper | Signed universal bundle; maintainer-host image checks are bounded evidence; clean-user acceptance is not established by these checks |
 
 ## Bundled runtime and Finder-launched Codex

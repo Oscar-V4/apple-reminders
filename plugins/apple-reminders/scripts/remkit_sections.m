@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <CommonCrypto/CommonDigest.h>
 
 static id send_id(id target, SEL selector) {
     return ((id (*)(id, SEL))objc_msgSend)(target, selector);
@@ -38,6 +39,164 @@ static NSString *object_uuid(id object) {
     return uuid.UUIDString;
 }
 
+// Early Reminder is a due-date delta context, never a REMAlarmTimeIntervalTrigger.
+static id early_send1(id target, NSString *name, id value) {
+    return ((id (*)(id, SEL, id))objc_msgSend)(target, NSSelectorFromString(name), value);
+}
+
+static NSString *early_digest(id value) {
+    NSError *error = nil;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:value requiringSecureCoding:NO error:&error];
+    if (!data || error) return nil;
+    unsigned char bytes[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, bytes);
+    NSMutableString *result = [NSMutableString string];
+    for (NSUInteger i = 0; i < sizeof(bytes); i++) [result appendFormat:@"%02x", bytes[i]];
+    return result;
+}
+
+static NSDictionary *early_snapshot(id reminder) {
+    id storage = [reminder valueForKey:@"storage"];
+    id context = [reminder valueForKey:@"dueDateDeltaAlertContext"];
+    NSArray *alerts = [context valueForKey:@"dueDateDeltaAlerts"];
+    if (!storage || !context || ![alerts isKindOfClass:[NSArray class]] || alerts.count > 200) return nil;
+    NSArray *units = @[@"minute", @"hour", @"day", @"week", @"month"];
+    NSMutableArray *values = [NSMutableArray array];
+    for (id alert in alerts) {
+        id delta = [alert valueForKey:@"dueDateDelta"];
+        NSNumber *unit = [delta valueForKey:@"unit"], *count = [delta valueForKey:@"count"];
+        if (!unit || !count) return nil;
+        NSInteger code = unit.integerValue, amount = count.integerValue;
+        if (code < 0 || code >= (NSInteger)units.count || amount >= 0 || amount < -200) {
+            [values addObject:@{@"read_only": @YES, @"unit_code": unit, @"count": count}];
+        } else {
+            [values addObject:@{@"unit": units[code], @"value": @(-amount)}];
+        }
+    }
+    // Hash every reviewed user-owned native field independently. Preserve full alarm
+    // objects and duplicate counts; provider revision/display metadata is excluded.
+    NSArray *fields = @[@"objectID", @"listID", @"accountID", @"parentReminderID",
+        @"titleDocumentData", @"notesDocumentData", @"titleAsString", @"notesAsString",
+        @"icsUrl", @"userActivity", @"priority", @"completed", @"completionDate",
+        @"flagged", @"allDay", @"timeZone", @"startDateComponents", @"dueDateComponents",
+        @"recurrenceRules", @"alarms", @"attachments", @"hashtags", @"assignments",
+        @"contactHandles", @"isUrgentStateEnabledForCurrentUser"];
+    NSMutableArray *stable = [NSMutableArray array];
+    for (NSString *field in fields) {
+        id value = [storage valueForKey:field] ?: [NSNull null];
+        if ([value isKindOfClass:[NSArray class]] || [value isKindOfClass:[NSSet class]]) {
+            NSMutableArray *digests = [NSMutableArray array];
+            for (id member in value) {
+                NSString *digest = early_digest(member);
+                if (!digest) return nil;
+                [digests addObject:digest];
+            }
+            value = [digests sortedArrayUsingSelector:@selector(compare:)];
+        }
+        NSString *digest = early_digest(value);
+        if (!digest) return nil;
+        [stable addObject:@[field, digest]];
+    }
+    NSString *guard = early_digest(storage), *preserved = early_digest(stable);
+    if (!guard || !preserved) return nil;
+    return @{@"reminder_id": object_uuid(reminder) ?: @"", @"native_guard": guard,
+        @"stable_digest": preserved, @"early_reminders": values,
+        @"early_reminder": values.count == 1 ? values[0] : [NSNull null],
+        @"early_reminder_count": @(values.count)};
+}
+
+static id early_fetch(id store, NSUUID *uuid, NSError **error) {
+    Class optionsClass = NSClassFromString(@"REMReminderFetchOptions");
+    id options = [[optionsClass alloc] init];
+    SEL include = NSSelectorFromString(@"setIncludeDueDateDeltaAlerts:");
+    SEL fetch = NSSelectorFromString(@"fetchReminderWithObjectID:fetchOptions:error:");
+    if (![options respondsToSelector:include] || ![store respondsToSelector:fetch]) return nil;
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(options, include, YES);
+    id objectID = early_send1(NSClassFromString(@"REMReminder"), @"objectIDWithUUID:", uuid);
+    return ((id (*)(id, SEL, id, id, NSError **))objc_msgSend)(store, fetch, objectID, options, error);
+}
+
+static int early_main(int argc, const char **argv, NSString *operation) {
+    BOOL mutation = [operation isEqualToString:@"early-set"];
+    if ((mutation && argc != 5) || (!mutation && argc != 3)) return fail(@"invalid_arguments", nil, NO);
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:@(argv[2])];
+    NSString *expectedGuard = mutation ? @(argv[3]) : nil;
+    id desired = mutation ? [NSJSONSerialization JSONObjectWithData:[@(argv[4]) dataUsingEncoding:NSUTF8StringEncoding]
+        options:NSJSONReadingFragmentsAllowed error:nil] : nil;
+    NSArray *units = @[@"minute", @"hour", @"day", @"week", @"month"];
+    if (!uuid || (mutation && (expectedGuard.length != 64 || !desired))) return fail(@"invalid_arguments", nil, NO);
+    if (mutation && desired != [NSNull null]) {
+        if (![desired isKindOfClass:[NSDictionary class]] || [desired count] != 2
+            || ![units containsObject:desired[@"unit"]] || ![desired[@"value"] isKindOfClass:[NSNumber class]]
+            || CFGetTypeID((__bridge CFTypeRef)desired[@"value"]) == CFBooleanGetTypeID()
+            || [desired[@"value"] doubleValue] != [desired[@"value"] integerValue]
+            || [desired[@"value"] integerValue] < 1 || [desired[@"value"] integerValue] > 200)
+            return fail(@"invalid_arguments", nil, NO);
+    }
+    BOOL attempted = NO;
+    @try {
+        Class storeClass = NSClassFromString(@"REMStore");
+        id store = [[storeClass alloc] init]; NSError *error = nil;
+        id reminder = early_fetch(store, uuid, &error);
+        if (!reminder) return fail(@"native_read_failed", error, NO);
+        NSDictionary *before = early_snapshot(reminder);
+        if (!before) return fail(@"native_guard_unavailable", nil, NO);
+        if (!mutation) {
+            write_json(@{@"ok": @YES, @"operation": operation, @"mutation_attempted": @NO, @"snapshot": before});
+            return 0;
+        }
+        if (![before[@"native_guard"] isEqual:expectedGuard]) return fail(@"concurrent_modification", nil, NO);
+        if ([before[@"early_reminder_count"] integerValue] > 1
+            || [before[@"early_reminder"] isKindOfClass:[NSDictionary class]] && before[@"early_reminder"][@"read_only"])
+            return fail(@"unsupported_early_reminder", nil, NO);
+        if (desired != [NSNull null] && ![reminder valueForKey:@"dueDateComponents"])
+            return fail(@"early_reminder_requires_due", nil, NO);
+        if ([before[@"early_reminder"] isEqual:desired]) {
+            write_json(@{@"ok": @YES, @"operation": operation, @"mutation_attempted": @NO,
+                @"saved": @NO, @"matched": @YES, @"before": before, @"after": before});
+            return 0;
+        }
+        id save = early_send1([NSClassFromString(@"REMSaveRequest") alloc], @"initWithStore:", store);
+        SEL sync = NSSelectorFromString(@"setSyncToCloudKit:"), saveSEL = NSSelectorFromString(@"saveSynchronouslyWithError:");
+        if (![save respondsToSelector:sync] || ![save respondsToSelector:saveSEL]) return fail(@"required_reminderkit_selectors_missing", nil, NO);
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(save, sync, YES);
+        id change = early_send1(save, @"updateReminder:", reminder);
+        id context = [change valueForKey:@"dueDateDeltaAlertContext"];
+        SEL remove = NSSelectorFromString(@"removeAllFetchedDueDateDeltaAlerts");
+        SEL add = NSSelectorFromString(@"addDueDateDeltaAlertWithDueDateDelta:");
+        if (![context respondsToSelector:remove] || ![context respondsToSelector:add]) return fail(@"required_reminderkit_selectors_missing", nil, NO);
+        id delta = nil;
+        if (desired != [NSNull null]) {
+            id allocated = [NSClassFromString(@"REMDueDateDeltaInterval") alloc];
+            SEL init = NSSelectorFromString(@"initWithUnit:count:");
+            if (![allocated respondsToSelector:init]) return fail(@"required_reminderkit_selectors_missing", nil, NO);
+            delta = ((id (*)(id, SEL, NSInteger, NSInteger))objc_msgSend)(allocated, init,
+                [units indexOfObject:desired[@"unit"]], -[desired[@"value"] integerValue]);
+            if (!delta) return fail(@"invalid_native_delta", nil, NO);
+        }
+        // Re-read with a separate store immediately before constructing the save.
+        id latest = early_fetch([[storeClass alloc] init], uuid, &error);
+        NSDictionary *latestSnapshot = latest ? early_snapshot(latest) : nil;
+        if (![latestSnapshot[@"native_guard"] isEqual:expectedGuard]) return fail(@"concurrent_modification", nil, NO);
+        ((void (*)(id, SEL))objc_msgSend)(context, remove);
+        if (delta && !((id (*)(id, SEL, id))objc_msgSend)(context, add, delta)) return fail(@"invalid_native_delta", nil, NO);
+        attempted = YES;
+        BOOL saved = ((BOOL (*)(id, SEL, NSError **))objc_msgSend)(save, saveSEL, &error);
+        if (!saved) return fail(@"save_failed", error, YES);
+        id final = early_fetch([[storeClass alloc] init], uuid, &error);
+        NSDictionary *after = final ? early_snapshot(final) : nil;
+        BOOL matched = after && [after[@"stable_digest"] isEqual:before[@"stable_digest"]]
+            && [after[@"early_reminder"] isEqual:desired]
+            && [after[@"early_reminder_count"] integerValue] == (desired == [NSNull null] ? 0 : 1);
+        write_json(@{@"ok": @YES, @"operation": operation, @"mutation_attempted": @YES,
+            @"saved": @YES, @"matched": @(matched), @"before": before, @"after": after ?: @{},
+            @"pre_save_guard_matched": @YES});
+        return 0;
+    } @catch (NSException *exception) {
+        return fail(@"native_early_reminder_exception", nil, attempted);
+    }
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         if (argc < 2) {
@@ -55,6 +214,10 @@ int main(int argc, const char **argv) {
         if (!reminderKit && !reminderKitInternal) {
             return fail(@"dlopen_failed", nil, NO);
         }
+
+        NSString *earlyOperation = @(argv[1]);
+        if ([earlyOperation isEqualToString:@"early-read"] || [earlyOperation isEqualToString:@"early-set"])
+            return early_main(argc, argv, earlyOperation);
 
         Class REMStore = NSClassFromString(@"REMStore");
         Class REMList = NSClassFromString(@"REMList");

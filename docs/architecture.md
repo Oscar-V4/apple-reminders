@@ -286,6 +286,10 @@ Historical adapter backup, repair, cache, log-purge, direct Core-write, and
 UI-handoff routes are not part of the 0.5 runtime contract. They were removed
 as a release-blocking cleanup rather than exposed or retained as fallbacks.
 
+Calendar Early Reminder is a distinct Native delta context. See
+[ADR 0024](decisions/0024-calendar-early-reminder.md) for its typed interface,
+exact admission and cross-backend preservation checks.
+
 ## Client distribution
 
 Codex and Claude Code load one plugin subtree, `plugins/apple-reminders`,

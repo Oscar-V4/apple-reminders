@@ -153,6 +153,10 @@ ROUTES: dict[str, ToolRoute] = {
         command="create_section",
         options=(("list_id", "--list-id"), ("name", "--name")),
     ),
+    "set_reminder_early_reminder": ToolRoute(
+        command="set_early_reminder",
+        options=(("reminder_id", "--id"), ("if_version", "--if-version"), ("early_reminder_json", "--early-reminder-json")),
+    ),
     "move_reminder_to_section": ToolRoute(
         command="move_to_section",
         options=(
@@ -1364,7 +1368,7 @@ def _v2_public_operation(name: str, arguments: Mapping[str, Any]) -> str:
     if name == "organize_reminder":
         return (
             f"organize_reminder.{kind}"
-            if kind in {"move_to_section", "add_tag", "remove_tag"}
+            if kind in {"move_to_section", "add_tag", "remove_tag", "set_early_reminder"}
             else "organize_reminder.move_to_section"
         )
     if name == "change_reminder_attachment":
