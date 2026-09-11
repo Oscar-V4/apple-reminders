@@ -50,9 +50,9 @@ Restart your Claude Code session after installation.
 
 ## Try it
 
-- “Show my overdue reminders and everything due today.”
-- “Add ‘Submit expense report’ to my Work list for Friday at 3 PM.”
-- “Move it to Monday, keeping my notes and alert.”
+- “Extract the action items from these meeting notes and create a Reminders list.”
+- “Break this project plan into small, actionable tasks and add them to my project list.”
+- “Pull the to-dos out of these rough notes, combine duplicates, and organize them into a Reminders list.”
 
 Allow Reminders access when the macOS permission prompt appears.
 
