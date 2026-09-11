@@ -49,7 +49,8 @@ DEFAULT_MCP_TOOL_NAMES = [
 
 
 def installed_mcp_command(plugin_root: Path) -> tuple[str, ...]:
-    payload = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
+    manifest = json.loads((plugin_root / ".codex-plugin/plugin.json").read_text())
+    payload = json.loads((plugin_root / manifest["mcpServers"]).read_text(encoding="utf-8"))
     registered = payload["mcpServers"]["apple-reminders-local"]
     return (registered["command"], *registered["args"])
 

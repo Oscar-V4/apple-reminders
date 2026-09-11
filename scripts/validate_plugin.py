@@ -366,10 +366,12 @@ def _semver_core(version: str) -> str:
 
 
 def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> None:
-    config_path = root / ".mcp.json"
     declaration = manifest.get("mcpServers")
-    if config_path.exists() and declaration != "./.mcp.json":
-        errors.append("plugin.json must declare mcpServers as ./.mcp.json when substantive MCP config exists")
+    if declaration not in {"./.mcp.json", "./.codex-plugin/mcp.json"}:
+        errors.append("plugin.json must declare mcpServers as a supported local MCP config")
+        return
+    config_path = _resolve_plugin_path(root, declaration, "plugin.json mcpServers", errors)
+    if config_path is None:
         return
     if declaration is not None and not config_path.is_file():
         errors.append("plugin.json declares mcpServers but .mcp.json is missing")

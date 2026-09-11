@@ -37,7 +37,10 @@ MIRRORED_ROOT_DOCUMENTS = {
 }
 PACKAGE_ROOT_FILES = {
     Path(".codex-plugin/plugin.json"),
+    Path(".codex-plugin/mcp.json"),
+    Path(".claude-plugin/plugin.json"),
     Path(".mcp.json"),
+    Path("manifest.json"),
     Path("CHANGELOG.md"),
     Path("LICENSE"),
     Path("PRIVACY.md"),
@@ -738,7 +741,8 @@ def validate_document_mirrors(
 def _validate_python_runtime(root: Path) -> list[str]:
     runtime = root / "runtime"
     try:
-        config = json.loads((root / ".mcp.json").read_text())
+        plugin = json.loads((root / ".codex-plugin/plugin.json").read_text())
+        config = json.loads((root / plugin["mcpServers"]).read_text())
         uses_bundled = any(
             "./scripts/launch_bundled_mcp.sh" in server.get("args", [])
             for server in config.get("mcpServers", {}).values()

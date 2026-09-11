@@ -1,0 +1,35 @@
+{
+  "manifest_version": "0.3",
+  "name": "apple-reminders",
+  "display_name": "Apple Reminders",
+  "version": "0.8.0",
+  "description": "Read, add, update, and complete Apple Reminders from Codex or Claude on your Mac.",
+  "author": {
+    "name": "Sungsoo Kim (Oscar-V4)",
+    "url": "https://github.com/Oscar-V4"
+  },
+  "homepage": "https://github.com/Oscar-V4/apple-reminders",
+  "documentation": "https://github.com/Oscar-V4/apple-reminders/blob/main/docs/installation.md",
+  "support": "https://github.com/Oscar-V4/apple-reminders/issues",
+  "icon": "assets/icon.png",
+  "license": "MIT",
+  "privacy_policies": [
+    "https://github.com/Oscar-V4/apple-reminders/blob/main/PRIVACY.md"
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ]
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "scripts/launch_bundled_mcp.sh",
+    "mcp_config": {
+      "command": "/bin/sh",
+      "args": [
+        "${__dirname}/scripts/launch_bundled_mcp.sh"
+      ]
+    }
+  },
+  "tools_generated": true
+}

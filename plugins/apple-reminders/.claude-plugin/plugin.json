@@ -1,0 +1,26 @@
+{
+  "name": "apple-reminders",
+  "version": "0.8.0",
+  "description": "Read, add, update, and complete Apple Reminders from Codex or Claude on your Mac.",
+  "author": {
+    "name": "Sungsoo Kim (Oscar-V4)",
+    "url": "https://github.com/Oscar-V4"
+  },
+  "homepage": "https://github.com/Oscar-V4/apple-reminders",
+  "repository": "https://github.com/Oscar-V4/apple-reminders",
+  "license": "MIT",
+  "keywords": [
+    "apple-reminders",
+    "reminders",
+    "tasks",
+    "productivity",
+    "attachments",
+    "local-mcp",
+    "macos",
+    "codex",
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "mcpb"
+  ]
+}
