@@ -1,6 +1,6 @@
 # Contributing
 
-Apple Reminders is a local macOS Codex plugin with real mutation capability and
+Apple Reminders is a local macOS plugin for Codex and Claude with real mutation capability and
 version-sensitive private integration paths. Contributions must preserve
 explicit trust boundaries, machine-readable failure semantics, bounded reads,
 and deterministic source packaging.
@@ -88,7 +88,7 @@ its bundled adapter, EventKit bridge, and Doctor.
 
 - Keep `plugins/apple-reminders/.codex-plugin/plugin.json` name aligned with the plugin directory and
   use strict semantic versioning.
-- Declare `mcpServers` only when `plugins/apple-reminders/.mcp.json` is substantive and all referenced
+- Declare Codex `mcpServers` only when `plugins/apple-reminders/.codex-plugin/mcp.json` is substantive and all referenced
   server/schema files are packaged. If the MCP is removed, remove the manifest
   declaration, config, runtime files, documentation, and tests together.
 - Keep the complete schema catalog at 15 tools: eight Core, four Native
@@ -255,7 +255,7 @@ proves ancestry, historical build inputs, and the exact workflow attestation.
 Runtime C/plist/lock changes require a fresh runtime; an unrelated plugin
 version or CI-tooling edit does not change the identity of an existing runtime.
 
-The ordinary `.mcp.json` uses `scripts/launch_bundled_mcp.sh`. Both signed
+Every client configuration uses `scripts/launch_bundled_mcp.sh`. Both signed
 capsules and the matching plugin-version EventKit helper must remain assembled
 and verified together. The bundled launcher has no external Python or download
 fallback. Its fixed `--render-daily-brief` entrypoint also runs the skill's
@@ -328,3 +328,22 @@ before save.
 Keep this private integration out of OpenMinis contributions unless that
 project explicitly accepts the dependency. Use only `minis/apple-reminders/`
 for the reduced public command surface.
+
+## Client compatibility and release formats
+
+Keep Codex, Claude Code, and MCPB manifest identities aligned. Codex selects
+`.codex-plugin/mcp.json`; Claude Code auto-discovers `.mcp.json` and resolves
+`${CLAUDE_PLUGIN_ROOT}`. Desktop resolves `${__dirname}` in `manifest.json`.
+Only the client configuration differs; all paths launch the same bundled server.
+Skills use relative links so either plugin host can load the same guidance.
+Desktop receives server instructions and tool descriptions, not Code skill loading.
+
+Build `--format mcpb` with the same allowlisted packager as the ZIP. MCPB files
+live at the archive root; plugin ZIPs retain their `apple-reminders/` prefix.
+Both are deterministic and carry the same source bytes and executable modes.
+Run `scripts/smoke_installed_package.py --core-count 9 --check-packaging --check-clients`
+on macOS. It exercises client configs from installed paths with spaces, including
+Claude startup from an unrelated directory, using content-free protocol calls.
+When Claude Code is installed, also run `claude plugin validate plugins/apple-reminders`
+and `claude plugin validate .claude-plugin/marketplace.json --strict`.
+The release workflow attests and publishes the ZIP, MCPB, and their exact checksum file.

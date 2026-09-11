@@ -1,6 +1,6 @@
 ---
 name: apple-reminders
-description: "Manage Apple Reminders from Codex: capture notes or screenshots, brief upcoming work, and create, change, complete, or delete exact reminders. Use exact capability diagnosis for sections, tags, native attachments, and recovery."
+description: "Manage Apple Reminders: capture notes or screenshots, brief upcoming work, and create, change, complete, or delete exact reminders. Use exact capability diagnosis for sections, tags, native attachments, and recovery."
 ---
 
 # Apple Reminders
@@ -22,10 +22,10 @@ Read [references/public-interface.md](references/public-interface.md) only when 
 
 ## Route by goal
 
-- Use `$apple-reminders-daily-brief` for today, overdue, week, or no-due-date briefs.
-- Use `$apple-reminders-quick-capture` for one or a bounded set from notes or screenshots, or one reminder with typed dates, alarms, recurrence, URLs, or an image follow-up.
-- Use `$apple-reminders-organize-cleanup` for bounded completion/deletion/recovery workflows, list or section moves, section creation, and tag assignment changes.
-- Use `$apple-reminders-attachment-maintenance` for image and URL inspection, attach, cross-reminder image copy, replace, or delete work.
+- Use [daily brief](../apple-reminders-daily-brief/SKILL.md) for today, overdue, week, or no-due-date briefs.
+- Use [quick capture](../apple-reminders-quick-capture/SKILL.md) for one or a bounded set from notes or screenshots, or one reminder with typed dates, alarms, recurrence, URLs, or an image follow-up.
+- Use [organize and cleanup](../apple-reminders-organize-cleanup/SKILL.md) for bounded completion/deletion/recovery workflows, list or section moves, section creation, and tag assignment changes.
+- Use [attachment maintenance](../apple-reminders-attachment-maintenance/SKILL.md) for image and URL inspection, attach, cross-reminder image copy, replace, or delete work.
 
 ## Normal workflow
 

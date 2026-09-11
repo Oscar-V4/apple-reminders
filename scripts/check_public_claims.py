@@ -355,7 +355,7 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
     _require_all(
         texts[privacy_path],
         (
-            "tool results are returned to the Codex host process",
+            "tool results are returned to the assistant host process (Codex, Claude Code, or Claude Desktop)",
             "prefers public EventKit",
             "undocumented and version-sensitive",
         ),
@@ -425,9 +425,9 @@ def check_claims(root: Path = REPO_ROOT) -> list[str]:
             "mutable `origin` is never trusted for source identity",
             "gh release verify",
             "gh attestation verify",
-            "one shared two-subject statement",
+            "one shared three-subject statement",
             "immutable releases",
-            "deterministic ZIP twice",
+            "both deterministic formats twice",
             "native/eventkit-helper-build.json",
         ),
         RELEASE_VERIFICATION,

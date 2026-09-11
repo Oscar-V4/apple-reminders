@@ -105,12 +105,17 @@ def verify_release_payload(
     *,
     expected_package_sha256: str,
     expected_checksums_sha256: str,
+    expected_extension_sha256: str | None = None,
 ) -> dict[str, str]:
-    """Verify the closed two-file payload and its exact checksum statement."""
+    """Verify the closed release inventory and its exact checksum statement."""
 
     _require_sha256(expected_package_sha256, "expected package digest")
     _require_sha256(expected_checksums_sha256, "expected checksum digest")
     expected = {package_name, "SHA256SUMS"}
+    extension_name = str(Path(package_name).with_suffix(".mcpb"))
+    if expected_extension_sha256 is not None:
+        _require_sha256(expected_extension_sha256, "expected extension digest")
+        expected.add(extension_name)
     if root.is_symlink() or not root.is_dir():
         raise VerificationError("release payload root is missing or unsafe")
     actual = {path.name for path in root.iterdir()}
@@ -133,14 +138,20 @@ def verify_release_payload(
         raise VerificationError("release package digest drift")
     if checksums_digest != expected_checksums_sha256:
         raise VerificationError("release checksum digest drift")
-    expected_checksum = f"{package_digest}  {package_name}\n"
+    digests = {package_name: package_digest}
+    if expected_extension_sha256 is not None:
+        extension_digest = sha256_file(root / extension_name)
+        if extension_digest != expected_extension_sha256:
+            raise VerificationError("release extension digest drift")
+        digests[extension_name] = extension_digest
+    expected_checksum = "".join(f"{digest}  {name}\n" for name, digest in digests.items())
     try:
         checksum_text = (root / "SHA256SUMS").read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise VerificationError("checksum file is not UTF-8") from exc
     if checksum_text != expected_checksum:
         raise VerificationError("checksum file drift")
-    return {package_name: package_digest, "SHA256SUMS": checksums_digest}
+    return {**digests, "SHA256SUMS": checksums_digest}
 
 
 def verify_release_metadata(
@@ -459,19 +470,19 @@ def verify_source_and_rebuild(release_root: Path, identity: GitIdentity) -> None
         raise VerificationError(
             "source audit failed: " + "; ".join((*source.errors, *mirror_errors))
         )
-    package_name = f"apple-reminders-{identity.version}.zip"
-    archive_errors = audit_archive(PLUGIN_ROOT, release_root / package_name)
-    if archive_errors:
-        raise VerificationError("release archive audit failed: " + "; ".join(archive_errors))
     with tempfile.TemporaryDirectory(prefix="apple-reminders-release-rebuild-") as temporary:
         base = Path(temporary)
-        build_a = build_package(PLUGIN_ROOT, base / "a")
-        build_b = build_package(PLUGIN_ROOT, base / "b")
-        downloaded = release_root / package_name
-        if build_a.read_bytes() != build_b.read_bytes():
-            raise VerificationError("two deterministic rebuilds disagree")
-        if build_a.read_bytes() != downloaded.read_bytes():
-            raise VerificationError("downloaded release does not match deterministic rebuild")
+        for format in ("zip", "mcpb"):
+            downloaded = release_root / f"apple-reminders-{identity.version}.{format}"
+            archive_errors = audit_archive(PLUGIN_ROOT, downloaded)
+            if archive_errors:
+                raise VerificationError("release archive audit failed: " + "; ".join(archive_errors))
+            build_a = build_package(PLUGIN_ROOT, base / "a", format=format)
+            build_b = build_package(PLUGIN_ROOT, base / "b", format=format)
+            if build_a.read_bytes() != build_b.read_bytes():
+                raise VerificationError("two deterministic rebuilds disagree")
+            if build_a.read_bytes() != downloaded.read_bytes():
+                raise VerificationError("downloaded release does not match deterministic rebuild")
 
 
 def _helper_manifest(identity: GitIdentity) -> tuple[Path, dict[str, Any], str, str]:
@@ -798,6 +809,7 @@ def verify_published_release(
         raise VerificationError(f"repository must be exactly {REPOSITORY}")
     identity = resolve_git_identity(tag)
     package_name = f"apple-reminders-{identity.version}.zip"
+    extension_name = f"apple-reminders-{identity.version}.mcpb"
     with tempfile.TemporaryDirectory(prefix="apple-reminders-release-download-") as temporary:
         release_root = Path(temporary)
         _run(
@@ -813,11 +825,14 @@ def verify_published_release(
                 "--pattern",
                 package_name,
                 "--pattern",
+                extension_name,
+                "--pattern",
                 "SHA256SUMS",
             )
         )
         provisional_digests = {
             package_name: sha256_file(release_root / package_name),
+            extension_name: sha256_file(release_root / extension_name),
             "SHA256SUMS": sha256_file(release_root / "SHA256SUMS"),
         }
         asset_digests = verify_release_payload(
@@ -825,6 +840,7 @@ def verify_published_release(
             package_name,
             expected_package_sha256=provisional_digests[package_name],
             expected_checksums_sha256=provisional_digests["SHA256SUMS"],
+            expected_extension_sha256=provisional_digests[extension_name],
         )
         metadata = _run_json(
             (

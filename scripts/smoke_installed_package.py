@@ -130,8 +130,27 @@ def validate_responses(stdout: str, expected_names: frozenset[str], check_packag
         raise SmokeError(f"installed MCP contract failed: {exc}") from exc
 
 
+def client_command(plugin: Path, client: str) -> list[str]:
+    """Resolve only documented client placeholders; never evaluate shell text."""
+    if client == "codex":
+        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
+        config = json.loads((plugin / manifest["mcpServers"]).read_text())
+        server = config["mcpServers"]["apple-reminders-local"]
+    elif client == "claude-code":
+        config = json.loads((plugin / ".mcp.json").read_text())
+        server = config["mcpServers"]["apple-reminders-local"]
+    elif client == "claude-desktop":
+        server = json.loads((plugin / "manifest.json").read_text())["server"]["mcp_config"]
+    else:
+        raise ValueError(f"unsupported client: {client}")
+    return [value.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin))
+            .replace("${__dirname}", str(plugin))
+            for value in [server["command"], *server.get("args", [])]]
+
+
 def smoke(plugin: Path, *, default_count: int, experimental_count: int,
-          core_count: int | None = None, check_packaging: bool = False) -> dict:
+          core_count: int | None = None, check_packaging: bool = False,
+          check_clients: bool = False) -> dict:
     modes = profile_modes(default_count, experimental_count, core_count)
     with tempfile.TemporaryDirectory(prefix="apple reminders installed smoke ") as temporary:
         root = Path(temporary)
@@ -148,9 +167,31 @@ def smoke(plugin: Path, *, default_count: int, experimental_count: int,
             if result.returncode:
                 raise SmokeError(f"{mode} installed launcher failed (exit {result.returncode})")
             validate_responses(result.stdout, expected_names, check_packaging)
-        return {"ok": True, "archive_sha256": sha256(archive),
-                "modes": {mode: len(names) for mode, _, names in modes},
-                "tools_call": "schema-validation-and-packaging-metadata" if check_packaging else "schema-validation-only"}
+        report = {"ok": True, "archive_sha256": sha256(archive),
+                  "modes": {mode: len(names) for mode, _, names in modes},
+                  "tools_call": "schema-validation-and-packaging-metadata" if check_packaging else "schema-validation-only"}
+        if check_clients:
+            desktop = build_package(plugin, root / "package output", format="mcpb")
+            desktop_root = root / "Claude extension with spaces"
+            extract_audited_archive(desktop, desktop_root)
+            report["mcpb_sha256"] = sha256(desktop)
+            report["clients"] = {}
+            for client, selected in (("codex", installed_plugin),
+                                     ("claude-code", installed_plugin),
+                                     ("claude-desktop", desktop_root)):
+                # Claude runs from an unrelated working directory. This catches
+                # accidental dependencies on Codex's plugin-root cwd handling.
+                cwd = selected if client == "codex" else root
+                for mode, arguments, names in modes:
+                    result = run(client_command(selected, client) + arguments,
+                                 input=probe_wire(check_packaging), cwd=cwd,
+                                 timeout_s=60, stdout_limit=1024 * 1024,
+                                 stderr_limit=64 * 1024)
+                    if result.returncode:
+                        raise SmokeError(f"{client} {mode} launcher failed (exit {result.returncode})")
+                    validate_responses(result.stdout, names, check_packaging)
+                report["clients"][client] = {mode: len(names) for mode, _, names in modes}
+        return report
 
 
 def main() -> None:
@@ -162,11 +203,14 @@ def main() -> None:
     parser.add_argument("--core-count", type=int, choices=(9,), help="Also probe explicit --core-only")
     parser.add_argument("--check-packaging", action="store_true",
                         help="Also call packaging-only diagnosis (requires scope-bounded collector)")
+    parser.add_argument("--check-clients", action="store_true",
+                        help="Probe Codex, Claude Code, and Desktop MCPB launch configurations")
     args = parser.parse_args()
     try:
         print(json.dumps(smoke(args.plugin, default_count=args.default_count,
                                experimental_count=args.experimental_count,
-                               core_count=args.core_count, check_packaging=args.check_packaging), sort_keys=True))
+                               core_count=args.core_count, check_packaging=args.check_packaging,
+                               check_clients=args.check_clients), sort_keys=True))
     except (OSError, RuntimeError) as exc:
         parser.exit(1, f"installed package smoke failed: {exc}\n")
 

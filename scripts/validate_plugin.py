@@ -366,8 +366,9 @@ def _semver_core(version: str) -> str:
 
 
 def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> None:
+    root = root.resolve()
     declaration = manifest.get("mcpServers")
-    if declaration not in {"./.mcp.json", "./.codex-plugin/mcp.json"}:
+    if not isinstance(declaration, str) or declaration not in {"./.mcp.json", "./.codex-plugin/mcp.json"}:
         errors.append("plugin.json must declare mcpServers as a supported local MCP config")
         return
     config_path = _resolve_plugin_path(root, declaration, "plugin.json mcpServers", errors)
@@ -595,6 +596,7 @@ def validate_root(root: Path) -> list[str]:
     if "apps" in manifest:
         _resolve_plugin_path(root, manifest["apps"], "plugin.json apps", errors)
     validate_mcp(root, manifest, errors)
+    validate_clients(root, manifest, errors)
 
     try:
         raw_manifest = manifest_path.read_text(encoding="utf-8")
@@ -603,6 +605,45 @@ def validate_root(root: Path) -> list[str]:
     if PLACEHOLDER_RE.search(raw_manifest):
         errors.append("plugin.json contains an unresolved placeholder")
     return errors
+
+
+def validate_clients(root: Path, codex: dict[str, Any], errors: list[str]) -> None:
+    """Keep all three clients on one local runtime and one release identity."""
+    claude = _load_json(root / ".claude-plugin/plugin.json", errors)
+    desktop = _load_json(root / "manifest.json", errors)
+    for label, manifest in (("Claude Code", claude), ("Claude Desktop", desktop)):
+        if not isinstance(manifest, dict):
+            errors.append(f"{label} manifest must be an object")
+            continue
+        for key in ("name", "version", "author", "license"):
+            if manifest.get(key) != codex.get(key):
+                errors.append(f"{label} manifest {key} must match the Codex manifest")
+    config = _load_json(root / ".mcp.json", errors)
+    expected = {"mcpServers": {"apple-reminders-local": {
+        "command": "/bin/sh",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch_bundled_mcp.sh"],
+    }}}
+    if config != expected:
+        errors.append("Claude Code MCP must launch the bundled runtime from CLAUDE_PLUGIN_ROOT")
+    if isinstance(claude, dict) and "mcpServers" in claude:
+        errors.append("Claude Code must discover only the default .mcp.json configuration")
+    if not isinstance(desktop, dict):
+        return
+    if desktop.get("manifest_version") != "0.3":
+        errors.append("Claude Desktop manifest must use MCPB 0.3")
+    if desktop.get("compatibility") != {"platforms": ["darwin"]}:
+        errors.append("Claude Desktop must require macOS without an external runtime")
+    expected_server = {
+        "type": "binary",
+        "entry_point": "scripts/launch_bundled_mcp.sh",
+        "mcp_config": {"command": "/bin/sh", "args": [
+            "${__dirname}/scripts/launch_bundled_mcp.sh",
+        ]},
+    }
+    if desktop.get("server") != expected_server:
+        errors.append("Claude Desktop must launch the bundled runtime from __dirname")
+    if codex.get("mcpServers") != "./.codex-plugin/mcp.json":
+        errors.append("Codex must use its own .codex-plugin/mcp.json configuration")
 
 
 def main(argv: list[str] | None = None) -> int:

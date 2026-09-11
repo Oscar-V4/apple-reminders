@@ -26,6 +26,8 @@ jobs:
       checksums_sha256: ${{ steps.release_artifacts.outputs.checksums_sha256 }}
       package_name: ${{ steps.release_artifacts.outputs.package_name }}
       package_sha256: ${{ steps.release_artifacts.outputs.package_sha256 }}
+      extension_name: ${{ steps.release_artifacts.outputs.extension_name }}
+      extension_sha256: ${{ steps.release_artifacts.outputs.extension_sha256 }}
       release_tag: ${{ steps.release_identity.outputs.release_tag }}
       tag_commit: ${{ steps.release_identity.outputs.tag_commit }}
       tag_object: ${{ steps.release_identity.outputs.tag_object }}
@@ -478,6 +480,7 @@ jobs:
           build_b="$RUNNER_TEMP/apple-reminders-package-b"
           release_root="$RUNNER_TEMP/apple-reminders-release"
           package_name="apple-reminders-$RELEASE_VERSION.zip"
+          extension_name="apple-reminders-$RELEASE_VERSION.mcpb"
           [[ ! -e "$build_a" && ! -e "$build_b" && ! -e "$release_root" ]]
 
           python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
@@ -488,18 +491,30 @@ jobs:
           python3 scripts/audit_source_package.py "$PLUGIN_ROOT" \
             --archive "$build_a/$package_name"
 
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
+            --format mcpb --output-directory "$build_a"
+          python3 scripts/build_source_package.py "$PLUGIN_ROOT" \
+            --format mcpb --output-directory "$build_b"
+          cmp "$build_a/$extension_name" "$build_b/$extension_name"
+          python3 scripts/audit_source_package.py "$PLUGIN_ROOT" \
+            --archive "$build_a/$extension_name"
+
           mkdir -m 0755 "$release_root"
           install -m 0644 "$build_a/$package_name" "$release_root/$package_name"
+          install -m 0644 "$build_a/$extension_name" "$release_root/$extension_name"
           (
             cd "$release_root"
-            shasum -a 256 "$package_name" > SHA256SUMS
+            shasum -a 256 "$package_name" "$extension_name" > SHA256SUMS
             shasum -a 256 -c SHA256SUMS
           )
-          [[ "$(find "$release_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == 2 ]]
+          [[ "$(find "$release_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == 3 ]]
           [[ "$(find "$release_root" -mindepth 1 -maxdepth 1 ! -type f | wc -l | tr -d ' ')" == 0 ]]
           package_sha256="$(shasum -a 256 "$release_root/$package_name" | awk '{print $1}')"
+          extension_sha256="$(shasum -a 256 "$release_root/$extension_name" | awk '{print $1}')"
           checksums_sha256="$(shasum -a 256 "$release_root/SHA256SUMS" | awk '{print $1}')"
           {
+            printf 'extension_name=%s\n' "$extension_name"
+            printf 'extension_sha256=%s\n' "$extension_sha256"
             printf 'package_name=%s\n' "$package_name"
             printf 'package_sha256=%s\n' "$package_sha256"
             printf 'checksums_sha256=%s\n' "$checksums_sha256"
@@ -511,6 +526,7 @@ jobs:
           name: apple-reminders-release-${{ steps.release_identity.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/apple-reminders-release/${{ steps.release_artifacts.outputs.package_name }}
+            ${{ runner.temp }}/apple-reminders-release/${{ steps.release_artifacts.outputs.extension_name }}
             ${{ runner.temp }}/apple-reminders-release/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
@@ -545,6 +561,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PACKAGE_NAME: ${{ needs.verify_release.outputs.package_name }}
           PACKAGE_SHA256: ${{ needs.verify_release.outputs.package_sha256 }}
+          EXTENSION_NAME: ${{ needs.verify_release.outputs.extension_name }}
+          EXTENSION_SHA256: ${{ needs.verify_release.outputs.extension_sha256 }}
           RELEASE_TAG: ${{ needs.verify_release.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.verify_release.outputs.version }}
         run: |
@@ -562,16 +580,19 @@ jobs:
           [[ "$EXPECTED_TAG_OBJECT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
           [[ "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
           [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXTENSION_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PACKAGE_NAME" == "apple-reminders-$RELEASE_VERSION.zip" ]]
+          [[ "$EXTENSION_NAME" == "apple-reminders-$RELEASE_VERSION.mcpb" ]]
           [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
 
           release_root="$RUNNER_TEMP/apple-reminders-release"
-          python3 - "$release_root" "$PACKAGE_NAME" <<'PY'
+          python3 - "$release_root" "$PACKAGE_NAME" "$EXTENSION_NAME" <<'PY'
           import stat
           import sys
           from pathlib import Path
 
           root = Path(sys.argv[1])
-          expected = {sys.argv[2], "SHA256SUMS"}
+          expected = {sys.argv[2], sys.argv[3], "SHA256SUMS"}
           if root.is_symlink() or not root.is_dir():
               raise SystemExit("release attestation subject root is missing or unsafe")
           actual = {path.name for path in root.iterdir()}
@@ -592,11 +613,12 @@ jobs:
             printf 'release package digest drift\n' >&2
             exit 1
           }
+          [[ "$(sha256sum "$release_root/$EXTENSION_NAME" | awk '{print $1}')" == "$EXTENSION_SHA256" ]]
           [[ "$(sha256sum "$release_root/SHA256SUMS" | awk '{print $1}')" == "$CHECKSUMS_SHA256" ]] || {
             printf 'release checksum digest drift\n' >&2
             exit 1
           }
-          expected_checksum_line="$(printf '%s  %s' "$PACKAGE_SHA256" "$PACKAGE_NAME")"
+          expected_checksum_line="$(printf '%s  %s\n%s  %s' "$PACKAGE_SHA256" "$PACKAGE_NAME" "$EXTENSION_SHA256" "$EXTENSION_NAME")"
           [[ "$(cat "$release_root/SHA256SUMS")" == "$expected_checksum_line" ]]
           (
             cd "$release_root"
@@ -630,6 +652,7 @@ jobs:
         with:
           subject-path: |
             ${{ runner.temp }}/apple-reminders-release/${{ needs.verify_release.outputs.package_name }}
+            ${{ runner.temp }}/apple-reminders-release/${{ needs.verify_release.outputs.extension_name }}
             ${{ runner.temp }}/apple-reminders-release/SHA256SUMS
 
   publish_release:
@@ -662,6 +685,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PACKAGE_NAME: ${{ needs.verify_release.outputs.package_name }}
           PACKAGE_SHA256: ${{ needs.verify_release.outputs.package_sha256 }}
+          EXTENSION_NAME: ${{ needs.verify_release.outputs.extension_name }}
+          EXTENSION_SHA256: ${{ needs.verify_release.outputs.extension_sha256 }}
           RELEASE_TAG: ${{ needs.verify_release.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.verify_release.outputs.version }}
         run: |
@@ -679,16 +704,19 @@ jobs:
           [[ "$EXPECTED_TAG_OBJECT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
           [[ "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
           [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXTENSION_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PACKAGE_NAME" == "apple-reminders-$RELEASE_VERSION.zip" ]]
+          [[ "$EXTENSION_NAME" == "apple-reminders-$RELEASE_VERSION.mcpb" ]]
           [[ "$CHECKSUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
 
           release_root="$RUNNER_TEMP/apple-reminders-release"
-          python3 - "$release_root" "$PACKAGE_NAME" <<'PY'
+          python3 - "$release_root" "$PACKAGE_NAME" "$EXTENSION_NAME" <<'PY'
           import stat
           import sys
           from pathlib import Path
 
           root = Path(sys.argv[1])
-          expected = {sys.argv[2], "SHA256SUMS"}
+          expected = {sys.argv[2], sys.argv[3], "SHA256SUMS"}
           if root.is_symlink() or not root.is_dir():
               raise SystemExit("release payload root is missing or unsafe")
           actual = {path.name for path in root.iterdir()}
@@ -706,6 +734,7 @@ jobs:
           PY
 
           [[ "$(sha256sum "$release_root/$PACKAGE_NAME" | awk '{print $1}')" == "$PACKAGE_SHA256" ]]
+          [[ "$(sha256sum "$release_root/$EXTENSION_NAME" | awk '{print $1}')" == "$EXTENSION_SHA256" ]]
           [[ "$(sha256sum "$release_root/SHA256SUMS" | awk '{print $1}')" == "$CHECKSUMS_SHA256" ]]
           (
             cd "$release_root"
@@ -736,6 +765,7 @@ jobs:
 
           package_attestation="$RUNNER_TEMP/release-package-attestation.json"
           checksums_attestation="$RUNNER_TEMP/release-checksums-attestation.json"
+          extension_attestation="$RUNNER_TEMP/release-extension-attestation.json"
           gh attestation verify "$release_root/$PACKAGE_NAME" \
             --repo "Oscar-V4/apple-reminders" \
             --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/release.yml" \
@@ -745,6 +775,15 @@ jobs:
             --predicate-type "https://slsa.dev/provenance/v1" \
             --deny-self-hosted-runners \
             --format json > "$package_attestation"
+          gh attestation verify "$release_root/$EXTENSION_NAME" \
+            --repo "Oscar-V4/apple-reminders" \
+            --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/release.yml" \
+            --signer-digest "$EXPECTED_TAG_COMMIT" \
+            --source-digest "$EXPECTED_TAG_COMMIT" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$extension_attestation"
           gh attestation verify "$release_root/SHA256SUMS" \
             --repo "Oscar-V4/apple-reminders" \
             --signer-workflow "Oscar-V4/apple-reminders/.github/workflows/release.yml" \
@@ -761,7 +800,10 @@ jobs:
             "$PACKAGE_SHA256" \
             "$CHECKSUMS_SHA256" \
             "$RELEASE_TAG" \
-            "$EXPECTED_TAG_COMMIT" <<'PY'
+            "$EXPECTED_TAG_COMMIT" \
+            "$extension_attestation" \
+            "$EXTENSION_NAME" \
+            "$EXTENSION_SHA256" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -773,6 +815,9 @@ jobs:
           checksums_digest = sys.argv[5]
           release_tag = sys.argv[6]
           tag_commit = sys.argv[7]
+          extension_results = json.loads(Path(sys.argv[8]).read_text(encoding="utf-8"))
+          extension_name = sys.argv[9]
+          extension_digest = sys.argv[10]
           repository = "Oscar-V4/apple-reminders"
           workflow_path = ".github/workflows/release.yml"
           ref = f"refs/tags/{release_tag}"
@@ -794,6 +839,7 @@ jobs:
           }
           expected_subjects = {
               package_name: package_digest,
+              extension_name: extension_digest,
               "SHA256SUMS": checksums_digest,
           }
           expected_workflow = {
@@ -828,7 +874,7 @@ jobs:
                       if workflow != expected_workflow:
                           raise ValueError("release attestation workflow identity drift: parameters")
                       subjects = statement.get("subject")
-                      if not isinstance(subjects, list) or len(subjects) != 2:
+                      if not isinstance(subjects, list) or len(subjects) != 3:
                           raise ValueError("release attestation subject inventory drift")
                       by_name = {}
                       for subject in subjects:
@@ -856,7 +902,7 @@ jobs:
                   raise SystemExit(first_error or "no exact release attestation")
               return bundles
 
-          common = exact_bundles(package_results) & exact_bundles(checksums_results)
+          common = exact_bundles(package_results) & exact_bundles(checksums_results) & exact_bundles(extension_results)
           if not common:
               raise SystemExit("release subjects do not share one exact attestation")
           PY
@@ -874,7 +920,8 @@ jobs:
             release_flags+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" \
-            "$release_root/$PACKAGE_NAME#Apple Reminders plugin $RELEASE_VERSION" \
+            "$release_root/$PACKAGE_NAME#Codex and Claude Code plugin $RELEASE_VERSION" \
+            "$release_root/$EXTENSION_NAME#Claude Desktop extension $RELEASE_VERSION" \
             "$release_root/SHA256SUMS#SHA-256 checksums" \
             --repo "$GITHUB_REPOSITORY" \
             "${release_flags[@]}" \

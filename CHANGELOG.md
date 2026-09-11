@@ -2,6 +2,21 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.8.0 — 2026-09-11
+
+- Add a Claude Code marketplace and plugin manifest. Codex and Claude Code share
+  the same MCP server, five workflow skills, bundled Python, and signed helpers.
+- Add a self-contained Claude Desktop `.mcpb` installation file, built and
+  verified through the deterministic release pipeline alongside the plugin ZIP.
+- Resolve each client's installation paths explicitly, including paths with
+  spaces and Claude startup from a different working directory.
+- Carry essential read-before-write and uncertain-result guidance in MCP
+  initialization for clients that do not load plugin skills.
+- Update English and Korean installation, upgrade, removal, privacy, support,
+  and maintainer instructions. No npm or separate runtime installation is required.
+- Preserve the 15-tool default, Core-only mode, exact references, receipts,
+  and private capability admission. Client support adds no new macOS admission.
+
 ## 0.7.1 — Patch contents
 
 This version preserves exact attachment identity in successful image receipts

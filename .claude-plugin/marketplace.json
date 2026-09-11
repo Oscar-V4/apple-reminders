@@ -11,5 +11,8 @@
       "description": "Read, add, update, and complete Apple Reminders from Codex or Claude on your Mac.",
       "category": "productivity"
     }
-  ]
+  ],
+  "metadata": {
+    "description": "Local Apple Reminders tools and skills for Codex and Claude on macOS."
+  }
 }
