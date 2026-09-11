@@ -285,3 +285,32 @@ share initialization, rate-limit history, or lazy Facade instances.
 Historical adapter backup, repair, cache, log-purge, direct Core-write, and
 UI-handoff routes are not part of the 0.5 runtime contract. They were removed
 as a release-blocking cleanup rather than exposed or retained as fallbacks.
+
+Calendar Early Reminder is a distinct Native delta context. See
+[ADR 0024](decisions/0024-calendar-early-reminder.md) for its typed interface,
+exact admission and cross-backend preservation checks.
+
+## Client distribution
+
+Codex and Claude Code load one plugin subtree, `plugins/apple-reminders`,
+through separate marketplace catalogs. The Codex manifest selects its own
+`.mcp.json`; Claude Code uses its inline `mcpServers` override and resolves
+`${CLAUDE_PLUGIN_ROOT}`. Both load the same five skills.
+
+Claude Desktop installs a root-layout MCPB archive from the same allowlisted
+source. Its `manifest.json` resolves `${__dirname}` into an absolute launcher
+argument. The Desktop extension contributes tools and MCP instructions; it
+does not install Code plugin skills. All three paths run
+`scripts/launch_bundled_mcp.sh` with the bundled Python capsules and signed
+helpers. There is no Node wrapper, install-time download, or second backend.
+
+Client configuration is a distribution concern. Exact references, bounded
+queries, idempotency, permissions, capability admission, and receipts remain
+owned by the shared server and backend modules. Legacy cache/support directory
+names stay shared across local clients to preserve operation records.
+
+MCP discovery presents object-shaped schemas without root `oneOf`, which
+Anthropic clients reject. Canonical schemas keep their branch constraints
+and remain authoritative for every tool call before backend dispatch. The
+discovery copy retains the complete closed property set, nested action schemas,
+and field bounds; tool descriptions explain branch-specific required inputs.

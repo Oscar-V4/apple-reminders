@@ -340,3 +340,10 @@ source-only harness. Contract tests must exercise the 15-tool schema, Core,
 Native, Recovery, and Diagnostics Modules, result validator, packaged startup,
 and representative live
 workflow without coupling to private route ordering.
+
+Calendar Early Reminder must retain its native unit/count, independently of
+Core alarm replacement. A month cannot verify as elapsed seconds. Synthetic
+regressions cover stale references, wrong units/counts, preserved Core fields
+and lost final reads. Unknown runtime/schema evidence blocks before mutation.
+See [ADR 0024](decisions/0024-calendar-early-reminder.md) and the opt-in
+`scripts/check_early_reminder_calendar.py` for calendar acceptance.

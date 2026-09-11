@@ -2,13 +2,14 @@
 
 ## Before filing an issue
 
-Confirm the exact installed plugin version and compare it with the latest tagged release. These documents describe v0.6.0; use the matching release for its package and verification results. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run metadata-only summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure. Opt in to Experimental toolchain diagnosis only for a CLT-required capability failure.
+Confirm the exact installed plugin version and compare it with the latest tagged release. These documents describe v0.8.0; use the matching release for its package and verification results. Read the installation and troubleshooting sections in the README, then retry one bounded read. Run metadata-only summary diagnosis only when the operation returns an environment, Native Extension, or Recovery failure. Opt in to Experimental toolchain diagnosis only for a CLT-required capability failure.
 
 ## What to include
 
 - plugin version and installation source
 - macOS version and Reminders build
-- Codex desktop or CLI version
+- client name and version: Codex app/CLI, Claude Code, or Claude Desktop
+- installation type: Codex plugin, Claude Code plugin, or Desktop MCPB extension
 - the exact user goal and tool error code
 - whether Core work still succeeds
 - whether the bundled runtime starts; no separate Python installation is required
@@ -17,13 +18,13 @@ Confirm the exact installed plugin version and compare it with the latest tagged
 Never attach a Reminders database, container archive, diagnostic bundle, reminder content, image attachment, account identifier, token, or absolute home-directory path. Replace exact IDs with stable placeholders while preserving whether two IDs were equal or different.
 
 For a missing or invalid bundled runtime, reinstall the same reviewed release
-and start a new Codex task. Installing Homebrew, another Python, or developer
+and start a fresh conversation/session. Installing Homebrew, another Python, or developer
 tools is not the repair path for ordinary startup. Advanced tools remain off by
 default and retain their separate compatibility requirements.
 
 ## Supported scope
 
-The project supports local Codex use on macOS. It does not promise ChatGPT web, Codex cloud, Windows, Linux, automatic restore, direct iPhone inspection, or compatibility with every future private Reminders schema.
+The project supports local Codex, Claude Code, and Claude Desktop use on macOS. It does not promise ChatGPT web, browser-only Claude, Codex cloud, Windows, Linux, automatic restore, direct iPhone inspection, or compatibility with every future private Reminders schema.
 Exact user-directed recovery from Recently Deleted is available only within its
 documented 30-day, same-account, compatible-local-build boundary; it is not an
 automatic or broad backup restoration service.

@@ -1,0 +1,18 @@
+{
+  "name": "oscar-v4-reminders",
+  "owner": {
+    "name": "Sungsoo Kim (Oscar-V4)",
+    "url": "https://github.com/Oscar-V4"
+  },
+  "plugins": [
+    {
+      "name": "apple-reminders",
+      "source": "./plugins/apple-reminders",
+      "description": "Read, add, update, and complete Apple Reminders from Codex or Claude on your Mac.",
+      "category": "productivity"
+    }
+  ],
+  "metadata": {
+    "description": "Local Apple Reminders tools and skills for Codex and Claude on macOS."
+  }
+}

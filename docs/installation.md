@@ -1,32 +1,77 @@
 # Installation and advanced troubleshooting
 
 For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
-This guide describes **v0.7.1**. Before installing, verify the
-[v0.7.1 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.7.1)
+This guide describes **v0.8.0**. Before installing, verify the
+[v0.8.0 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.8.0)
 and its versioned verification results, then use the README's exact commands.
 Publication status and release checks belong in the
-[signoff](release-evidence/patch-candidate-0.7.1.md).
+[signoff](release-evidence/claude-support-0.8.0.md).
 The [historical v0.7.0 evidence](release-evidence/public-beta-0.7.0.md) applies
 only to that earlier version.
 
+## Choose a client
+
+Use the [client-specific installation steps](../README.md#1-install-for-your-assistant).
+Codex and Claude Code install the same five skills alongside MCP tools.
+Claude Desktop installs the local tools through an MCPB extension and receives
+MCP server guidance; it does not load the Code plugin's skill files.
+This is local Mac integration. Browser-only Claude, remote Linux sessions,
+and Codex cloud cannot access a Mac's Reminders through this stdio server.
+
+### Claude Code skill discovery
+
+Run `/apple-reminders:apple-reminders` to load the primary workflow explicitly,
+or ask naturally. The other skills cover briefs, quick capture, organization,
+and attachments. If the plugin is missing, check `/plugin` and restart the
+session. In `/mcp`, the local server is namespaced under the plugin.
+Install through the plugin marketplace so both tools and skills are included.
+
+### Claude Desktop extension
+
+The `.mcpb` contains both CPU runtimes and the signed helpers. Use
+**Settings → Extensions → Advanced settings → Install Extension…** and select
+the exact versioned file from GitHub Releases. Ensure it is enabled, then
+start a fresh conversation. The extension uses the bundled runtime even when
+Desktop is launched from Finder; no `npx`, external Python, or configuration
+file edits are required. A custom extension may be restricted by workspace
+policy. Tool approval in Claude and macOS Reminders permission are separate.
+
+### Other local MCP clients
+
+A client that supports local stdio MCP can run an extracted, reviewed package
+using `/bin/sh` as the command and an absolute path to
+`scripts/launch_bundled_mcp.sh` as its first argument. Keep the whole plugin
+directory intact. No arguments are needed for the default profile. This route
+provides tools, not automatic skill installation, and has not been qualified
+for every MCP client. Put diagnostics on stderr and leave stdout for MCP.
+
+### Installation format references
+
+Client packaging follows the [OpenAI plugin documentation](https://developers.openai.com/plugins/build/plugins),
+[Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference),
+[Claude marketplace guide](https://code.claude.com/docs/en/plugin-marketplaces),
+and [Desktop extension installation guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop).
+The bundle manifest follows [MCPB 0.3](https://github.com/modelcontextprotocol/mcpb/blob/main/MANIFEST.md).
+
 ## Version contract
 
-| Area | v0.7.1 contract |
+| Area | v0.8.0 contract |
 |---|---|
 | Tool discovery | 15 tools by default: Core 8, diagnosis 1, Native/Recovery 6 |
 | Core-only dispatch | `--core-only` exposes 9 Core and diagnostic tools; Native calls are rejected before dispatch |
 | Legacy URL mode | `--experimental` is only a legacy hybrid URL opt-in, with the same 15-tool inventory |
 | Core `url` create/change | EventKit URL metadata only by default; use an explicit attachment action for a native card |
 | Python | Bundled signed Python runtime; no separate Python installation |
-| EventKit helper | Verified v0.7.1 signed, notarized, and stapled bundle |
+| EventKit helper | Verified v0.8.0 signed, notarized, and stapled bundle |
+| Early Reminder | Calendar unit/count through Native inspection and set/clear; exact build/schema admission |
 | Native helper | Signed universal bundle; maintainer-host image checks are bounded evidence; clean-user acceptance is not established by these checks |
 
 ## Bundled runtime and Finder-launched Codex
 
 This version includes Python 3.13.15 for Apple silicon and Intel Macs. You do
 not need Python, Homebrew, Xcode, or Command Line Tools for ordinary Core work.
-Codex launched from Finder uses the same packaged runtime as Codex launched
-from a terminal; startup does not search `PATH`, activate a virtual environment,
+Codex and Claude Desktop launched from Finder use the same packaged runtime
+as the terminal clients; startup does not search `PATH`, activate a virtual environment,
 or run Apple's developer-tool Python shim.
 
 On first start, the plugin verifies its selected runtime capsule and prepares a
@@ -35,22 +80,22 @@ Later starts use that verified copy. No interpreter is downloaded at runtime.
 The cache contains runtime code, not reminder content.
 
 If the runtime or its signature is missing or invalid, reinstall the same
-reviewed release and start a new Codex task. Do not install a different Python
+reviewed release and start a fresh conversation in your assistant. Do not install a different Python
 to repair the packaged runtime. Startup stops rather than choosing a different
 interpreter, compiling a helper, or changing Gatekeeper settings.
 
 If the error specifically identifies the **runtime cache**, reinstalling alone
-does not replace that cached copy. Fully quit Codex. In Finder, choose
+does not replace that cached copy. Fully quit every Codex and Claude client using the plugin. In Finder, choose
 **Go → Go to Folder…** and open
 `~/Library/Caches/apple-reminders-codex/python-runtime/`. Move only that
-`python-runtime` folder to Trash, then reopen Codex and start a new task. The
+`python-runtime` folder to Trash, then reopen your assistant and start a fresh conversation. The
 plugin recreates it from the signed capsule. This removes executable cache
 files only; it does not change reminders or operation records.
 
 ## Reminders permission
 
 For first use, ask for a bounded read such as today's reminders. If access has
-not been decided, Codex can call `request_reminders_access` once and retry the
+not been decided, the assistant can call `request_reminders_access` once and retry the
 original request after the macOS prompt. The tool reports authorization state;
 it cannot claim to have observed the prompt itself.
 
@@ -106,7 +151,10 @@ They are plugin defects, not a reason to reinstall Xcode.
 ## Startup choices for contributors
 
 These commands run an MCP server from a complete checkout and expect protocol
-messages on standard input. The packaged `.mcp.json` uses the default command.
+messages on standard input. All three client configurations use the default command.
+Codex reads `.mcp.json`; Claude Code uses the inline `mcpServers` entry in
+`.claude-plugin/plugin.json` with `${CLAUDE_PLUGIN_ROOT}`, and Desktop reads `manifest.json` with `${__dirname}`.
+The launcher resolves its own directory and does not depend on Claude's working directory.
 
 ```bash
 # Default: 15 tools, exact private-operation admission remains required.
@@ -132,7 +180,7 @@ exact read before another write; neither startup mode proves iCloud convergence.
 
 Receipts distinguish `unchanged`, `verified`,
 `committed_verification_pending`, `partial_success`, `failed_no_mutation`, and
-`failed_manual_repair_required`. Ask Codex to inspect the exact reminder after
+`failed_manual_repair_required`. Ask the assistant to inspect the exact reminder after
 a pending or partial result; a blind retry can repeat a change that was already
 saved. A stale or consumed Reference needs a fresh `read_reminder` before a new
 change. `verified` covers the named local read-back evidence, not every device.
@@ -148,8 +196,9 @@ or compile a replacement automatically. Maintainers can inspect the
 First follow [Uninstall](../README.md#uninstall). Plugin removal does not delete
 reminders, undo iCloud changes, revoke macOS permission, or erase support data.
 
-If you also want to remove local support data, stop the plugin, start a new
-Codex task, and make sure no Reminders operation is running. In Finder, use
+If you also want to remove local support data, stop the plugin in every
+Codex and Claude client and make sure no Reminders operation is running.
+These folders are shared across clients; removing them affects every installation. In Finder, use
 **Go → Go to Folder…** to inspect these exact locations:
 
 - `~/Library/Application Support/apple-reminders-codex/`

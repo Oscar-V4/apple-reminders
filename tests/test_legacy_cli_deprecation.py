@@ -18,6 +18,8 @@ import reminders_adapter as adapter  # noqa: E402
 
 
 RETAINED_COMMANDS = {
+    "read_early_reminder",
+    "set_early_reminder",
     "read_reminder",
     "list_sections",
     "list_tags",

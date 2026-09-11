@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a byte-for-byte deterministic, allowlisted Codex plugin ZIP."""
+"""Build a deterministic, allowlisted plugin ZIP or Claude Desktop MCPB."""
 
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "apple-reminders"
 
 
-def build_package(root: Path, output_directory: Path, *, force: bool = False) -> Path:
+def build_package(root: Path, output_directory: Path, *, force: bool = False,
+                  format: str = "zip") -> Path:
+    if format not in {"zip", "mcpb"}:
+        raise ValueError("package format must be zip or mcpb")
     root = root.expanduser().resolve()
     output_directory = output_directory.expanduser().resolve()
     audit = audit_source(root)
@@ -31,7 +34,7 @@ def build_package(root: Path, output_directory: Path, *, force: bool = False) ->
         raise RuntimeError("source package audit failed: " + "; ".join(audit.errors))
     manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     plugin_name = manifest["name"]
-    archive = output_directory / f"{plugin_name}-{manifest['version']}.zip"
+    archive = output_directory / f"{plugin_name}-{manifest['version']}.{format}"
     output_directory.mkdir(parents=True, exist_ok=True)
     if archive.exists() and not force:
         raise FileExistsError(f"refusing to overwrite existing archive: {archive}")
@@ -44,7 +47,7 @@ def build_package(root: Path, output_directory: Path, *, force: bool = False) ->
     try:
         with zipfile.ZipFile(temporary, mode="w", compression=zipfile.ZIP_STORED) as handle:
             for relative in audit.files:
-                member = f"{plugin_name}/{relative.as_posix()}"
+                member = relative.as_posix() if format == "mcpb" else f"{plugin_name}/{relative.as_posix()}"
                 info = zipfile.ZipInfo(member, date_time=FIXED_ZIP_TIMESTAMP)
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_STORED
@@ -81,9 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         default=REPO_ROOT / "dist",
     )
     parser.add_argument("--force", action="store_true", help="Replace only the exact versioned artifact")
+    parser.add_argument("--format", choices=("zip", "mcpb"), default="zip")
     args = parser.parse_args(argv)
     try:
-        archive = build_package(args.plugin, args.output_directory, force=args.force)
+        archive = build_package(args.plugin, args.output_directory, force=args.force, format=args.format)
     except (FileExistsError, OSError, RuntimeError) as exc:
         parser.exit(1, f"source package build failed: {exc}\n")
     print(

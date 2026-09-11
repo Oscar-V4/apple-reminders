@@ -148,6 +148,8 @@ class CapabilityDecision:
 
 
 CAPABILITY_SPECS: Mapping[str, CapabilitySpec] = MappingProxyType({
+    "early_reminder_inspection": CapabilitySpec("early_reminder_inspection", "early_reminder_native", "required", False),
+    "early_reminder_mutation": CapabilitySpec("early_reminder_mutation", "early_reminder_native", "required", True),
     "tag_assignment_mutation": CapabilitySpec(
         "tag_assignment_mutation", "tag_assignment_db", "not_required", True
     ),
@@ -201,12 +203,20 @@ _RECOVERY_EVIDENCE = CompatibilityEvidence(
     schema_fingerprints=frozenset({RECOVERY_SCHEMA_FINGERPRINT}),
 )
 
+_EARLY_REMINDER_EVIDENCE = CompatibilityEvidence(
+    evidence_id="macos_26_5_2_25f84_reminders_7_0_3976_calendar_early_reminder",
+    identity=_OBSERVED_25F84,
+    schema_fingerprints=frozenset({"644afc465f44355207ce5dc511f85e44328c1fd709bdd037bb56d8223c3133c7"}),
+)
+
 # Section and tag mutations intentionally have no entries: repository evidence
 # does not bind those operations to an exact command-schema fingerprint.  The
 # absence is the kill switch, not an invitation to infer compatibility.
 COMPATIBILITY_ALLOWLIST: Mapping[
     str, tuple[CompatibilityEvidence, ...]
 ] = MappingProxyType({
+    "early_reminder_inspection": (_EARLY_REMINDER_EVIDENCE,),
+    "early_reminder_mutation": (_EARLY_REMINDER_EVIDENCE,),
     "image_attachment_mutation": (_ATTACHMENT_EVIDENCE,),
     "url_attachment_mutation": (_ATTACHMENT_EVIDENCE,),
     "attachment_delete_mutation": (_ATTACHMENT_EVIDENCE,),
@@ -467,7 +477,11 @@ def capability_for_adapter_command(
     url: str | None = None,
 ) -> CapabilitySpec | None:
     capability_id: str | None
-    if command in {"add_tag", "remove_tag"}:
+    if command == "read_early_reminder":
+        capability_id = "early_reminder_inspection"
+    elif command == "set_early_reminder":
+        capability_id = "early_reminder_mutation"
+    elif command in {"add_tag", "remove_tag"}:
         capability_id = "tag_assignment_mutation"
     elif command == "create_section":
         capability_id = "section_create_mutation"

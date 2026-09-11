@@ -2,6 +2,33 @@
 
 Notable user-visible changes to Apple Reminders are recorded here. The project follows semantic versioning after its first tagged public beta.
 
+## 0.8.0 — 2026-09-11
+
+- Add a Claude Code marketplace and plugin manifest. Codex and Claude Code share
+  the same MCP server, five workflow skills, bundled Python, and signed helpers.
+- Add a self-contained Claude Desktop `.mcpb` installation file, built and
+  verified through the deterministic release pipeline alongside the plugin ZIP.
+- Resolve each client's installation paths explicitly, including paths with
+  spaces and Claude startup from a different working directory.
+- Keep all 15 tools visible in Claude by adapting root schema composition for
+  discovery while preserving full server-side branch validation.
+- Carry essential read-before-write and uncertain-result guidance in MCP
+  initialization for clients that do not load plugin skills.
+- Update English and Korean installation, upgrade, removal, privacy, support,
+  and maintainer instructions. No npm or separate runtime installation is required.
+- Preserve the 15-tool default, Core-only mode, exact references, receipts,
+  and private capability admission. Client support adds no new macOS admission.
+
+- Adds exact native Early Reminder inspection and set/clear through the existing
+  Native tools. Calendar months, weeks and days remain calendar units; ordinary
+  EventKit relative alarms retain their elapsed-second semantics.
+- Verifies the separate native delta context and preserved native/Core state.
+  Unknown builds, schema drift, multiple unsupported alerts and stale revisions
+  fail closed; missing final reads remain pending.
+- Adds synthetic contract/preservation regressions and opt-in native calendar
+  checks for month ends, leap years, recurrence and DST. Admission is limited
+  to the recorded macOS/Reminders build.
+
 ## 0.7.1 — Patch contents
 
 This version preserves exact attachment identity in successful image receipts

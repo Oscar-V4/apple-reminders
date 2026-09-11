@@ -1,7 +1,7 @@
 # Release verification and authenticity
 
 GitHub Release assets are not trusted by filename or by `SHA256SUMS` alone.
-The canonical path is the repository verifier, which downloads the two assets
+The canonical path is the repository verifier, which downloads the three assets
 again and independently binds them to the exact tag, immutable release, source,
 workflow, signed helper history, and bundled Python runtime history. This is a
 maintainer verification procedure; ordinary installation does not need Python
@@ -24,19 +24,20 @@ The command does not access Apple Reminders or local Reminder data. It:
    and requires that commit to be an ancestor of current canonical
    `https://github.com/Oscar-V4/apple-reminders.git` `main`; the checkout's
    mutable `origin` is never trusted for source identity;
-2. downloads only `apple-reminders-X.Y.Z.zip` and `SHA256SUMS`, rejects any
+2. downloads only `apple-reminders-X.Y.Z.zip`, `apple-reminders-X.Y.Z.mcpb`,
+   and `SHA256SUMS`, rejects any
    other inventory, and checks both GitHub asset digests and the exact checksum
    statement;
 3. runs `gh release verify` and requires a GitHub immutable-release attestation
-   for the exact tag object, two asset names, and two SHA-256 digests; the
+   for the exact tag object, three asset names, and three SHA-256 digests; the
    separately resolved peeled commit remains bound by the release metadata and
    source-history checks;
-4. runs `gh attestation verify` separately for the ZIP and `SHA256SUMS`, while
+4. runs `gh attestation verify` separately for the ZIP, MCPB, and `SHA256SUMS`, while
    enforcing the `release.yml` signer workflow, its exact tag commit and ref,
    GitHub-hosted runner identity, SLSA provenance predicate, and one shared
-   two-subject statement;
-5. runs the strict source/package audit, rebuilds the deterministic ZIP twice,
-   and byte-compares both rebuilds with the downloaded ZIP; and
+   three-subject statement;
+5. runs the strict source/package audit, rebuilds both deterministic formats twice,
+   and byte-compares every rebuild with its downloaded ZIP or MCPB; and
 6. proves the signed helper manifest's source and trusted workflow commits are
    ancestors of both the tag and current main, then independently verifies the
    helper manifest attestation and its closed three-subject inventory; and
@@ -60,7 +61,9 @@ rebuild, and EventKit/Native/Python provenance. See the
 [publication evidence](release-evidence/public-beta-0.7.0.md) and
 [signoff record](release-evidence/release-candidate-signoff.md). Public beta
 publication does not establish clean-user or universal capability acceptance.
-Older releases with no Native pair remain verifiable. A partial or invalid pair
+Use the verifier from the exact tag checkout for older release formats;
+pre-0.8.0 releases have no MCPB. Older releases with no Native pair remain
+verifiable using their own tag checkout. A partial or invalid pair
 fails release verification, even though runtime Native unavailability leaves
 healthy Core usable. The signing archive and checksum are authenticated sibling
 subjects; future verification relies on the embedded manifest/app and enduring
@@ -113,7 +116,7 @@ The tag workflow keeps four permission domains separate:
   and attestation access;
 - a no-checkout job receives OIDC and attestation write permission, rehashes the
   exact two-file payload, re-resolves the tag and workflow identity, and emits
-  one SLSA statement for the ZIP and checksum file;
+  one SLSA statement for the ZIP, MCPB, and checksum file;
 - only the publication job has `contents: write`; it downloads the immutable
   run artifact again, verifies both SLSA lookups and their shared statement,
   and rechecks tag object, peeled commit, inventory, and digests immediately

@@ -37,6 +37,8 @@ from reminders_service import (  # noqa: E402
     ReferenceRejected,
     mutation_state_after_unverified_projection,
     unverified_mutation_projection,
+    STABLE_USER_FIELDS,
+    reminder_matches_fields,
 )
 from receipt_contract import validated_receipt_mutation_state  # noqa: E402
 if __package__:  # Package import in tests; script-local import in the stdio server.
@@ -759,12 +761,12 @@ class NativeFacade:
             include = arguments["include"]
             if (
                 not isinstance(include, list)
-                or not 1 <= len(include) <= 4
+                or not 1 <= len(include) <= 5
                 or len(set(include)) != len(include)
-                or any(item not in {"section", "tags", "attachments", "sync"} for item in include)
+                or any(item not in {"section", "tags", "attachments", "sync", "early_reminder"} for item in include)
             ):
                 raise FacadeError(
-                    "invalid_input", "invalid_include", "include must contain 1-4 unique native fields."
+                    "invalid_input", "invalid_include", "include must contain 1-5 unique native fields."
                 )
             attachment_type = arguments.get("attachment_type")
             if attachment_type not in {None, "image", "url"}:
@@ -842,6 +844,26 @@ class NativeFacade:
                 "returned": min(original_count, limit),
                 "truncated": original_count > limit or raw.get("truncated") is True,
             }
+            if "early_reminder" in include:
+                values = raw.get("early_reminders")
+                count = raw.get("early_reminder_count")
+                if (not isinstance(values, list) or type(count) is not int
+                        or count != len(values) or not 0 <= count <= 200
+                        or raw.get("early_reminder") != (values[0] if count == 1 else None)):
+                    raise FacadeError("schema_mismatch", "early_reminder_read_incomplete", "The Early Reminder read was incomplete.")
+                for value in values:
+                    if isinstance(value, dict) and value.get("read_only") is True:
+                        if set(value) != {"read_only", "unit_code", "count"} or type(value["unit_code"]) is not int or type(value["count"]) is not int:
+                            raise FacadeError("schema_mismatch", "invalid_early_reminder_read", "Unsupported Early Reminder metadata was invalid.")
+                    else:
+                        self._native_action("organize_reminder", {"kind": "set_early_reminder", "early_reminder": value})
+                        if value is None:
+                            raise FacadeError("schema_mismatch", "invalid_early_reminder_read", "An Early Reminder interval was missing.")
+                data["returned"] = max(data["returned"], count)
+                for field in ("early_reminder", "early_reminder_count", "early_reminders"):
+                    if field not in raw:
+                        raise FacadeError("schema_mismatch", "early_reminder_read_incomplete", "The Early Reminder read was incomplete.")
+                    data[field] = copy.deepcopy(raw[field])
             return self._read_success("inspect_reminder_native", data)
 
         if kind == "sections":
@@ -1167,6 +1189,13 @@ class NativeFacade:
                         receipt,
                         after,
                     )
+                    if command == "set_early_reminder":
+                        proof = receipt.get("_early_core_final")
+                        final_state_matches = (final_state_matches and isinstance(proof, dict)
+                            and proof.get("last_modified") == exact.reminder.get("last_modified")
+                            and reminder_matches_fields(exact.reminder, {
+                                key: proof[key] for key in STABLE_USER_FIELDS if key in proof
+                            }))
                 except Exception:
                     after = None
                     final_state_matches = False
@@ -1404,6 +1433,17 @@ class NativeFacade:
     def _native_action(tool_name: str, action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         kind = action.get("kind")
         if tool_name == "organize_reminder":
+            if kind == "set_early_reminder":
+                _closed(action, {"kind", "early_reminder"}, {"kind", "early_reminder"})
+                value = action["early_reminder"]
+                if value is not None:
+                    if not isinstance(value, dict):
+                        raise FacadeError("invalid_input", "invalid_early_reminder", "early_reminder must be a calendar interval or null.")
+                    _closed(value, {"unit", "value"}, {"unit", "value"})
+                    if (value["unit"] not in ("minute", "hour", "day", "week", "month")
+                            or type(value["value"]) is not int or not 1 <= value["value"] <= 200):
+                        raise FacadeError("invalid_input", "invalid_early_reminder", "Use a calendar unit and an integer value from 1 through 200.")
+                return "set_early_reminder", {"early_reminder": copy.deepcopy(value)}
             cases = {
                 "move_to_section": ({"kind", "section_id"}, "section_id", 2048),
                 "add_tag": ({"kind", "tag"}, "tag", 512),
@@ -1633,6 +1673,12 @@ class NativeFacade:
         if reference is not None:
             result["reference"] = reference
         if tool_name == "organize_reminder":
+            if "early_reminder" in raw:
+                NativeFacade._native_action("organize_reminder", {"kind": "set_early_reminder", "early_reminder": raw["early_reminder"]})
+                if type(raw.get("early_reminder_count")) is not int:
+                    raise FacadeError("schema_mismatch", "invalid_early_reminder_read", "Early Reminder count was invalid.")
+                result["early_reminder"] = copy.deepcopy(raw["early_reminder"])
+                result["early_reminder_count"] = raw.get("early_reminder_count")
             result["section"] = _section_from_container(raw)
             raw_tags = raw.get("tags")
             tags: list[dict[str, Any]] = []
@@ -1690,6 +1736,10 @@ class NativeFacade:
     ) -> bool:
         if not isinstance(after, Mapping):
             return False
+        if command == "set_early_reminder":
+            desired = arguments["early_reminder"]
+            return ("early_reminder" in after and after["early_reminder"] == desired
+                    and after.get("early_reminder_count") == (0 if desired is None else 1))
         if command == "move_to_section":
             section = after.get("section")
             expected_section = NativeFacade._canonical_identifier(

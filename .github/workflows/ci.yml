@@ -105,7 +105,7 @@ jobs:
           PY
 
       - name: Exercise packaged launcher and content-free MCP calls
-        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging
+        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging --check-clients
 
       - name: Check EventKit helper syntax without linking
         run: >-
@@ -182,7 +182,7 @@ jobs:
             -m unittest discover -s tests -p 'test_*.py' -v
       - name: Exercise installed package on its native CPU
         if: steps.runtime.outputs.present == 'true'
-        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging
+        run: python3 scripts/smoke_installed_package.py --core-count 9 --check-packaging --check-clients
       - name: Verify the tested runtime remains pristine
         if: ${{ !cancelled() && steps.runtime.outputs.present == 'true' }}
         run: |

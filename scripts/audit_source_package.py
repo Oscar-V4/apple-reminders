@@ -37,7 +37,9 @@ MIRRORED_ROOT_DOCUMENTS = {
 }
 PACKAGE_ROOT_FILES = {
     Path(".codex-plugin/plugin.json"),
+    Path(".claude-plugin/plugin.json"),
     Path(".mcp.json"),
+    Path("manifest.json"),
     Path("CHANGELOG.md"),
     Path("LICENSE"),
     Path("PRIVACY.md"),
@@ -738,7 +740,8 @@ def validate_document_mirrors(
 def _validate_python_runtime(root: Path) -> list[str]:
     runtime = root / "runtime"
     try:
-        config = json.loads((root / ".mcp.json").read_text())
+        plugin = json.loads((root / ".codex-plugin/plugin.json").read_text())
+        config = json.loads((root / plugin["mcpServers"]).read_text())
         uses_bundled = any(
             "./scripts/launch_bundled_mcp.sh" in server.get("args", [])
             for server in config.get("mcpServers", {}).values()
@@ -839,7 +842,10 @@ def audit_archive(root: Path, archive: Path) -> list[str]:
         return errors
     manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     package_name = manifest["name"]
-    expected_archive_name = f"{package_name}-{manifest['version']}.zip"
+    if archive.suffix not in {".zip", ".mcpb"}:
+        return ["archive must be a plugin ZIP or Desktop MCPB"]
+    prefix = "" if archive.suffix == ".mcpb" else f"{package_name}/"
+    expected_archive_name = f"{package_name}-{manifest['version']}{archive.suffix}"
     if archive.name != expected_archive_name:
         errors.append(
             f"archive filename/version drift: expected {expected_archive_name}, got {archive.name}"
@@ -848,19 +854,19 @@ def audit_archive(root: Path, archive: Path) -> list[str]:
     errors.extend(name_errors)
     if errors:
         return errors
-    expected = {f"{package_name}/{relative.as_posix()}" for relative in source.files}
+    expected = {f"{prefix}{relative.as_posix()}" for relative in source.files}
     actual = {info.filename for info in infos}
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
     if missing or extra:
         errors.append(f"archive allowlist mismatch: missing={missing}, extra={extra}")
         return errors
-    expected_order = [f"{package_name}/{relative.as_posix()}" for relative in source.files]
+    expected_order = [f"{prefix}{relative.as_posix()}" for relative in source.files]
     actual_order = [info.filename for info in infos]
     if actual_order != expected_order:
         errors.append("archive members are not in canonical sorted order")
     for info in infos:
-        relative = Path(*PurePosixPath(info.filename).parts[1:])
+        relative = Path(info.filename.removeprefix(prefix))
         reason = forbidden_path_reason(relative)
         if reason:
             errors.append(f"forbidden archive member {info.filename}: {reason}")
@@ -880,7 +886,7 @@ def audit_archive(root: Path, archive: Path) -> list[str]:
     # All names are now proven to be allowlisted source. It is safe to compare bytes.
     with zipfile.ZipFile(archive) as handle:
         for relative in source.files:
-            member = f"{package_name}/{relative.as_posix()}"
+            member = f"{prefix}{relative.as_posix()}"
             if handle.read(member) != (root / relative).read_bytes():
                 errors.append(f"archive/source content drift: {member}")
     return errors

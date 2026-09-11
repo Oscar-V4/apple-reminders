@@ -76,6 +76,7 @@ OPERATION_FAMILIES = {
             "organize_reminder.move_to_section",
             "organize_reminder.add_tag",
             "organize_reminder.remove_tag",
+            "organize_reminder.set_early_reminder",
         }
     ),
     "change_reminder_attachment": frozenset(

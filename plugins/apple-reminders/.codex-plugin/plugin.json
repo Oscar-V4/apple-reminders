@@ -1,7 +1,7 @@
 {
   "name": "apple-reminders",
-  "version": "0.7.1",
-  "description": "Read, add, update, and complete Apple Reminders from Codex on your Mac.",
+  "version": "0.8.0",
+  "description": "Read, add, update, and complete Apple Reminders from Codex or Claude on your Mac.",
   "author": {
     "name": "Sungsoo Kim (Oscar-V4)",
     "url": "https://github.com/Oscar-V4"
@@ -17,13 +17,17 @@
     "attachments",
     "local-mcp",
     "macos",
-    "codex"
+    "codex",
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "mcpb"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Apple Reminders for Codex",
-    "shortDescription": "Manage Apple Reminders naturally from Codex",
+    "displayName": "Apple Reminders",
+    "shortDescription": "Manage Apple Reminders from Codex or Claude",
     "longDescription": "Read what is due, turn notes into reminders, and update or complete items in exact lists. Core runs locally on macOS 14+ without Xcode or a separate Python installation, with a bundled signed runtime and exact read-backs for successful writes. Native tools are discoverable by default; sections, native tags, attachments, and recovery have exact OS/app/schema admission. Native helper operations use a verified prebuilt signed universal bundle, with no user compiler required. Healthy Core remains available when a Native capability is unavailable. Changes may sync through Apple accounts and shared lists; there is no plugin-owned remote backend.",
     "developerName": "Sungsoo Kim (Oscar-V4)",
     "category": "Productivity",

@@ -14,6 +14,7 @@ from reminders_contracts import runtime_boundary_metadata
 
 HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DIAGNOSIS_CHECKS = {
+    "early_reminder": frozenset({"helper_toolchain", "private_frameworks", "command_schema", "store_access"}),
     "core": frozenset({"platform", "reminders_app", "store_access", "command_schema"}),
     "access": frozenset({"permissions", "account_visibility", "store_access"}),
     "native_extension": frozenset(
@@ -35,12 +36,15 @@ DIAGNOSIS_CHECKS = {
 }
 EXECUTION_MODES = frozenset({"metadata_only", "experimental_toolchain"})
 EXPERIMENTAL_TOOLCHAIN_SCOPES = frozenset(
-    {"native_extension", "sections", "attachments", "recovery"}
+    {"native_extension", "sections", "attachments", "recovery", "early_reminder"}
 )
 DIAGNOSIS_CAPABILITIES = {
+    "early_reminder": ("early_reminder_inspection", "early_reminder_mutation"),
     "core": ("stable_core",),
     "access": ("stable_core",),
     "native_extension": (
+        "early_reminder_inspection",
+        "early_reminder_mutation",
         "section_create_mutation",
         "section_move_mutation",
         "tag_assignment_mutation",

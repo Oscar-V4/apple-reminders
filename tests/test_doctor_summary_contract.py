@@ -209,7 +209,8 @@ class DoctorSummaryMcpContractTests(unittest.TestCase):
         )
 
         instructions = response["result"]["instructions"]
-        self.assertLessEqual(len(instructions), 220)
+        # Desktop receives this guidance without the Code plugin's skills.
+        self.assertLessEqual(len(instructions), 320)
         self.assertNotIn("diagnose_reminders first", instructions)
 
 

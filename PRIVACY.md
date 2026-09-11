@@ -1,11 +1,11 @@
 # Privacy
 
-Apple Reminders is an experimental local macOS Codex plugin. Its bundled MCP
+Apple Reminders is an experimental local macOS plugin for Codex and Claude. Its bundled MCP
 server uses stdio and has no plugin-owned remote endpoint, but tool results are
-returned to the Codex host process. How Codex processes or transmits that
-context is governed by the host product, account configuration, and applicable
+returned to the assistant host process (Codex, Claude Code, or Claude Desktop).
+How that host processes or transmits the context is governed by the host product, account configuration, and applicable
 privacy terms; “local MCP” does not mean reminder content necessarily remains
-outside the Codex service boundary.
+outside the OpenAI or Anthropic service boundary.
 
 ## Data the Plugin Can Access
 
@@ -28,7 +28,7 @@ through Apple services and can affect other devices or shared-list participants.
 
 ## Execution and Network Boundaries
 
-- `.mcp.json` launches a local shell shim that verifies the packaged Python
+- Each client configuration launches a local shell shim that verifies the packaged Python
   capsule and signed runtime, then starts `mcp/server.py` as a local stdio
   subprocess. It does not search for an external Python, download runtime code,
   or source user shell startup files. The bundled launcher removes inherited
@@ -57,6 +57,9 @@ Depending on the commands used, operational files may be created under:
     image-attachment changes, and exact Recently Deleted inspection or
     recovery, plus their build locks;
   - legacy or explicit contributor EventKit builds.
+
+These legacy folder names are shared by Codex and Claude installations on the
+same Mac. Stop every client before removing cache or support files.
 
 The current runtime does not create a reminder metadata cache or backup archive.
 Earlier development versions may have left either artifact in these folders or

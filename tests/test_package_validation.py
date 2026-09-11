@@ -139,7 +139,7 @@ class PluginValidationTests(unittest.TestCase):
         )
         interface = manifest["interface"]
 
-        self.assertEqual(interface["displayName"], "Apple Reminders for Codex")
+        self.assertEqual(interface["displayName"], "Apple Reminders")
         self.assertIn("Apple Reminders", interface["shortDescription"])
         self.assertIn("meeting notes", interface["defaultPrompt"][0])
         self.assertIn("owners and deadlines", interface["defaultPrompt"][0])
