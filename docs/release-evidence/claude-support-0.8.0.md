@@ -56,8 +56,19 @@ Tested plugin ZIP: `apple-reminders-0.8.0.zip`, 55,082,080 bytes, SHA-256
 Tested Desktop bundle: `apple-reminders-0.8.0.mcpb`, 55,079,616 bytes, SHA-256
 `6de24afb05283a2ef8292969b0899a620dbb9b164c7b91cf36e730fb36709e59`.
 
-These hashes identify tested candidate payloads. They become release evidence
-only after independent verification of the published assets.
+These hashes identify the candidate used for the live task below. A final
+attachment-skill edit replaces its remaining Codex-only invocation with a
+relative link to the shared organization skill. No runtime or signed component
+changed. Skill/link validation and 27 focused workflow tests passed; all three
+packaged launch profiles were checked again, and a clean Claude Code reinstall
+picked up the final files.
+
+Final reviewed ZIP SHA-256:
+`97fca639436ec183643ed74f7a8a8bd0fbae458eeedd27690d628ef1bf34a4c8`.
+Final reviewed MCPB SHA-256:
+`c8c6dc08e07f0b3f58d1ee3d980a87230e0a8da3c43df7c5ba466e4373b1b396`.
+These become publication evidence only after independently checking the
+released assets.
 
 ## Composed user task
 
