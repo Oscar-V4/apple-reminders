@@ -1,8 +1,8 @@
 # v0.8.0 — Codex and Claude compatibility
 
-Status: signed candidate, deterministic packages, client installation, and
-maintainer-host MCP acceptance verified. Published-release verification is
-pending; candidate checks alone do not establish publication.
+Status: **v0.8.0 published and independently verified** on 2026-09-11.
+The immutable [public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.8.0)
+contains the reviewed ZIP, Desktop MCPB, and checksum file.
 
 ## Scope and source
 
@@ -67,8 +67,7 @@ Final reviewed ZIP SHA-256:
 `97fca639436ec183643ed74f7a8a8bd0fbae458eeedd27690d628ef1bf34a4c8`.
 Final reviewed MCPB SHA-256:
 `c8c6dc08e07f0b3f58d1ee3d980a87230e0a8da3c43df7c5ba466e4373b1b396`.
-These become publication evidence only after independently checking the
-released assets.
+Independent redownload and verification confirmed these exact final hashes.
 
 ## Composed user task
 
@@ -111,3 +110,29 @@ These results do not establish fresh-user permission flows, minimum-macOS
 end-to-end coverage, direct iPhone display, every Claude client version, or
 additional Native operation admission. See the separate
 [Early Reminder evidence](early-reminder-0.8.0.md) for that retained feature.
+
+## Published release and installation
+
+- [Release workflow 34590606309](https://github.com/Oscar-V4/apple-reminders/actions/runs/34590606309)
+  passed source/component verification, deterministic builds, a shared
+  three-subject attestation, immutable publication, and independent redownload.
+- Tag commit: `6b11b3c6c87b4d8e540905a8df54145cb20d19d9`.
+- Annotated tag object: `b58fe9df2f464a3da7bd18b78fe619acd3f0fbf1`.
+- A separate local `verify_release_assets.py v0.8.0` run passed immutable
+  release and SLSA checks, all asset digests, byte-identical rebuilds, source
+  audit, EventKit/Native provenance, and both signed Python capsule histories.
+- Published assets: ZIP 55,082,113 bytes; MCPB 55,079,649 bytes;
+  `SHA256SUMS` 185 bytes with SHA-256
+  `e5c68117511e19df0cc174d03c6835c5e8efe1256535bbe90b17a0ff6a19a072`.
+- The documented Claude Code command cloned the public GitHub repository at
+  `v0.8.0` and installed successfully in an isolated configuration. All 77
+  installed files matched the release; 15-tool discovery and packaging-only
+  diagnosis passed from the remote installation.
+- The maintainer's existing Codex installation was reinstalled from the public
+  `v0.8.0` tag through the documented CLI commands. Its 77 cached files matched
+  the release, and 15-tool discovery plus packaging-only diagnosis passed.
+  A new Codex task is required to load the refreshed tools and skills.
+
+PR #67 passed all four Python/CPU CI jobs before merging, and preserved the
+signed-source ancestry of PR #66. Publication does not broaden the acceptance
+limits listed above.
