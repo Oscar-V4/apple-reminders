@@ -45,7 +45,7 @@ class PluginValidationTests(unittest.TestCase):
 
     def test_readme_keeps_bundled_installation_short_and_versioned(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        setup = readme.split("## Get started in three steps", 1)[1].split("## Everyday use", 1)[0]
+        setup = readme.split("## Install", 1)[1].split("## Try it", 1)[0]
         version = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text())["version"]
         self.assertNotIn("https://www.python.org/downloads/macos/", setup)
         self.assertIn(f"codex plugin marketplace add Oscar-V4/apple-reminders --ref v{version}", setup)
@@ -55,17 +55,13 @@ class PluginValidationTests(unittest.TestCase):
         self.assertNotIn("xcode-select", setup)
         self.assertNotIn("diagnose_reminders", setup)
         self.assertIn("bundled", readme.lower())
-        self.assertIn("separate Python installation", " ".join(readme.split()))
-        self.assertIn("15 tools", readme)
-        self.assertIn("--core-only", readme)
-        self.assertIn(f"This guide describes **v{version}**", readme)
-        self.assertIn("Before installing, verify", readme)
-        self.assertNotIn("Unreleased patch candidate", readme)
         self.assertNotIn("latest published", readme.casefold())
-        self.assertIn("## Upgrade", readme)
-        self.assertIn("## Uninstall", readme)
-        self.assertIn("vX.Y.Z", readme)
-        self.assertIn("PRIVACY.md#user-control", readme)
+        self.assertIn("docs/installation.md", readme)
+        installation = (REPO_ROOT / "docs/installation.md").read_text()
+        self.assertIn("## Upgrade", installation)
+        self.assertIn("## Uninstall", installation)
+        self.assertIn("vX.Y.Z", installation)
+        self.assertIn("PRIVACY.md#user-control", installation)
         self.assertEqual(readme, (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_public_release_version_is_coherent(self) -> None:

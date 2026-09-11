@@ -103,8 +103,8 @@ class PublicBetaClaimTests(unittest.TestCase):
             (
                 "readme",
                 (Path("README.md"), Path("plugins/apple-reminders/README.md")),
-                "You do not\nneed Xcode",
-                "You need Xcode",
+                "macOS 14+",
+                "macOS 12+",
             ),
             (
                 "installation",
@@ -171,8 +171,8 @@ class PublicBetaClaimTests(unittest.TestCase):
                 # Exercise harmless wording changes without binding the test
                 # to the surrounding release paragraph or Markdown wrapping.
                 for old, new in (
-                    (r"You do not\s+need Xcode", "You do not require Xcode"),
-                    (r"Ordinary reminder work", "Ordinary Core reminder work"),
+                    (r"Everything needed", "Everything required"),
+                    (r"macOS 14\+", "macOS 14 or newer"),
                 ):
                     text, replacements = re.subn(old, new, text, count=1)
                     self.assertEqual(replacements, 1)
@@ -185,7 +185,7 @@ class PublicBetaClaimTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_readme_requires_a_positive_bundled_runtime_statement(self) -> None:
+    def test_readme_requires_a_positive_bundled_setup_statement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self.copy_claim_tree(root)
@@ -193,14 +193,14 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.replace(
                     root,
                     relative,
-                    "The plugin includes a signed Python runtime",
+                    "Everything needed to run the plugin is bundled",
                     "The plugin uses a Python supplied by your machine",
                 )
 
             completed = self.run_checker(root)
 
         self.assertEqual(completed.returncode, 1)
-        self.assertIn("explicit bundled Python runtime", completed.stderr)
+        self.assertIn("bundled setup statement", completed.stderr)
 
     def test_source_candidate_does_not_advance_the_published_launch_packet(self) -> None:
         source_version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
@@ -218,13 +218,11 @@ class PublicBetaClaimTests(unittest.TestCase):
     def test_versioned_runtime_contracts_cannot_be_conflated(self) -> None:
         version = json.loads((REPO_ROOT / "plugins/apple-reminders/.codex-plugin/plugin.json").read_text())["version"]
         cases = (
-            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+            ((Path("docs/installation.md"),),
              f"This guide describes **v{version}**", "This guide describes **v0.0.1**", "version identity boundary"),
-            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-             "15 tools", "9 tools", "default tool inventory"),
-            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+            ((Path("docs/installation.md"),),
              "legacy hybrid URL opt-in", "Native enabling flag", "legacy URL opt-in boundary"),
-            ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
+            ((Path("docs/installation.md"),),
              "EventKit URL metadata only", "EventKit storage plus native URL attachment work", "default URL behavior"),
             ((Path("docs/installation.md"),),
              "15 tools", "9 tools", "default tool inventory"),
@@ -293,9 +291,8 @@ class PublicBetaClaimTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1)
                 self.assertIn("fresh Native", completed.stderr)
 
-    def test_version_neutral_guides_keep_the_release_verification_prerequisite(self) -> None:
-        for paths in ((Path("README.md"), Path("plugins/apple-reminders/README.md")),
-                      (Path("docs/installation.md"),)):
+    def test_detailed_guide_keeps_the_release_verification_prerequisite(self) -> None:
+        for paths in ((Path("docs/installation.md"),),):
             with self.subTest(surface=paths[0]), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 self.copy_claim_tree(root)

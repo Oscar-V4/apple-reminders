@@ -1,6 +1,6 @@
 # Installation and advanced troubleshooting
 
-For ordinary first use, follow the [README's three steps](../README.md#get-started-in-three-steps).
+For ordinary first use, follow the [quick setup](../README.md#install).
 This guide describes **v0.8.0**. Before installing, verify the
 [v0.8.0 public beta release](https://github.com/Oscar-V4/apple-reminders/releases/tag/v0.8.0)
 and its versioned verification results, then use the README's exact commands.
@@ -11,7 +11,7 @@ only to that earlier version.
 
 ## Choose a client
 
-Use the [client-specific installation steps](../README.md#1-install-for-your-assistant).
+Use the [client-specific installation steps](../README.md#install).
 Codex and Claude Code install the same five skills alongside MCP tools.
 Claude Desktop installs the local tools through an MCPB extension and receives
 MCP server guidance; it does not load the Code plugin's skill files.
@@ -191,9 +191,65 @@ or compile a replacement automatically. Maintainers can inspect the
 [release verification procedure](release-verification.md) and
 [signed-helper design](decisions/0019-prebuilt-signed-eventkit-core-helper.md).
 
+## Upgrade
+
+Installations are pinned to a release. Read [CHANGELOG.md](../CHANGELOG.md), then
+replace `vX.Y.Z` below with the exact published release you want.
+
+**Codex:**
+
+```bash
+codex plugin remove apple-reminders@oscar-v4-reminders
+codex plugin marketplace remove oscar-v4-reminders
+codex plugin marketplace add Oscar-V4/apple-reminders --ref vX.Y.Z
+codex plugin add apple-reminders@oscar-v4-reminders
+```
+
+**Claude Code:**
+
+```text
+/plugin uninstall apple-reminders@oscar-v4-reminders
+/plugin marketplace remove oscar-v4-reminders
+/plugin marketplace add https://github.com/Oscar-V4/apple-reminders.git#vX.Y.Z
+/plugin install apple-reminders@oscar-v4-reminders
+```
+
+**Claude Desktop:** download the new version's `.mcpb` from its release and
+install it through the same Extensions screen. Custom release files need a
+manual upgrade; they are not an automatically updated directory listing.
+
+Start a fresh conversation/session afterward. These operations change the
+plugin installation and leave Apple Reminders data intact. Using Codex and
+Claude on the same Mac shares the plugin's existing local runtime cache and
+operation records, including the legacy `apple-reminders-codex` folder names.
+
+## Uninstall
+
+**Codex:**
+
+```bash
+codex plugin remove apple-reminders@oscar-v4-reminders
+codex plugin marketplace remove oscar-v4-reminders
+```
+
+**Claude Code:**
+
+```text
+/plugin uninstall apple-reminders@oscar-v4-reminders
+/plugin marketplace remove oscar-v4-reminders
+```
+
+**Claude Desktop:** remove the extension in **Settings → Extensions**.
+
+Start a fresh conversation/session. Removal leaves reminders intact and does
+not erase shared local support data or revoke macOS permissions. For optional
+cleanup, see [Privacy: user control](../PRIVACY.md#user-control) and the
+[full removal guide](#full-removal).
+Stop every client using the plugin before removing shared support data.
+
 ## Full removal
 
-First follow [Uninstall](../README.md#uninstall). Plugin removal does not delete
+First follow [Uninstall](#uninstall). Plugin removal does not delete
 reminders, undo iCloud changes, revoke macOS permission, or erase support data.
 
 If you also want to remove local support data, stop the plugin in every
