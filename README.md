@@ -20,9 +20,11 @@ and its versioned verification results in the
 Installation commands select that exact version.
 
 This release adds Claude Code and Claude Desktop installation using the same
-local MCP server and signed macOS components as Codex. The plugin includes a bundled Python runtime, signed for both Mac architectures: **no separate Python installation**, Node.js, npm,
-Homebrew, Xcode, or Command Line Tools is needed for ordinary use.
-Ordinary reminder work does not require Xcode.
+local MCP server and signed macOS components as Codex.
+
+The plugin includes a signed Python runtime, so there is **no separate Python
+installation**. Ordinary reminder work uses bundled components. You do not
+need Xcode, Command Line Tools, Node.js, npm, or Homebrew.
 
 ## Get started in three steps
 
@@ -98,7 +100,7 @@ then checks the saved result.
 The server exposes **15 tools** by default: eight Core tools, diagnosis, and
 six Native/Recovery tools. An explicit `--core-only` startup exposes **9 Core
 and diagnostic tools** and rejects Native dispatch. `--experimental` is only
-a legacy hybrid URL opt-in. Default URL fields store EventKit metadata only;
+a legacy hybrid URL opt-in. Default URL fields store EventKit URL metadata only;
 an explicit attachment action adds or changes a native URL card.
 
 Ordinary reminder fields use Apple's public EventKit API. Sections, native

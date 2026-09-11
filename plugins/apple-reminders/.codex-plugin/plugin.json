@@ -24,7 +24,7 @@
     "mcpb"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.codex-plugin/mcp.json",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Apple Reminders",
     "shortDescription": "Manage Apple Reminders from Codex or Claude",

@@ -10,6 +10,8 @@ Notable user-visible changes to Apple Reminders are recorded here. The project f
   verified through the deterministic release pipeline alongside the plugin ZIP.
 - Resolve each client's installation paths explicitly, including paths with
   spaces and Claude startup from a different working directory.
+- Keep all 15 tools visible in Claude by adapting root schema composition for
+  discovery while preserving full server-side branch validation.
 - Carry essential read-before-write and uncertain-result guidance in MCP
   initialization for clients that do not load plugin skills.
 - Update English and Korean installation, upgrade, removal, privacy, support,

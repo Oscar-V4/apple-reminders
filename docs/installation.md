@@ -152,8 +152,8 @@ They are plugin defects, not a reason to reinstall Xcode.
 
 These commands run an MCP server from a complete checkout and expect protocol
 messages on standard input. All three client configurations use the default command.
-Codex reads `.codex-plugin/mcp.json`, Claude Code reads `.mcp.json` with
-`${CLAUDE_PLUGIN_ROOT}`, and Desktop reads `manifest.json` with `${__dirname}`.
+Codex reads `.mcp.json`; Claude Code uses the inline `mcpServers` entry in
+`.claude-plugin/plugin.json` with `${CLAUDE_PLUGIN_ROOT}`, and Desktop reads `manifest.json` with `${__dirname}`.
 The launcher resolves its own directory and does not depend on Claude's working directory.
 
 ```bash

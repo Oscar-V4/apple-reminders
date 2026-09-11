@@ -294,7 +294,7 @@ exact admission and cross-backend preservation checks.
 
 Codex and Claude Code load one plugin subtree, `plugins/apple-reminders`,
 through separate marketplace catalogs. The Codex manifest selects its own
-`.codex-plugin/mcp.json`; Claude Code discovers `.mcp.json` and resolves
+`.mcp.json`; Claude Code uses its inline `mcpServers` override and resolves
 `${CLAUDE_PLUGIN_ROOT}`. Both load the same five skills.
 
 Claude Desktop installs a root-layout MCPB archive from the same allowlisted
@@ -308,3 +308,9 @@ Client configuration is a distribution concern. Exact references, bounded
 queries, idempotency, permissions, capability admission, and receipts remain
 owned by the shared server and backend modules. Legacy cache/support directory
 names stay shared across local clients to preserve operation records.
+
+MCP discovery presents object-shaped schemas without root `oneOf`, which
+Anthropic clients reject. Canonical schemas keep their branch constraints
+and remain authoritative for every tool call before backend dispatch. The
+discovery copy retains the complete closed property set, nested action schemas,
+and field bounds; tool descriptions explain branch-specific required inputs.

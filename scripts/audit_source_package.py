@@ -37,7 +37,6 @@ MIRRORED_ROOT_DOCUMENTS = {
 }
 PACKAGE_ROOT_FILES = {
     Path(".codex-plugin/plugin.json"),
-    Path(".codex-plugin/mcp.json"),
     Path(".claude-plugin/plugin.json"),
     Path(".mcp.json"),
     Path("manifest.json"),

@@ -88,7 +88,7 @@ its bundled adapter, EventKit bridge, and Doctor.
 
 - Keep `plugins/apple-reminders/.codex-plugin/plugin.json` name aligned with the plugin directory and
   use strict semantic versioning.
-- Declare Codex `mcpServers` only when `plugins/apple-reminders/.codex-plugin/mcp.json` is substantive and all referenced
+- Declare Codex `mcpServers` only when `plugins/apple-reminders/.mcp.json` is substantive and all referenced
   server/schema files are packaged. If the MCP is removed, remove the manifest
   declaration, config, runtime files, documentation, and tests together.
 - Keep the complete schema catalog at 15 tools: eight Core, four Native
@@ -332,8 +332,8 @@ for the reduced public command surface.
 ## Client compatibility and release formats
 
 Keep Codex, Claude Code, and MCPB manifest identities aligned. Codex selects
-`.codex-plugin/mcp.json`; Claude Code auto-discovers `.mcp.json` and resolves
-`${CLAUDE_PLUGIN_ROOT}`. Desktop resolves `${__dirname}` in `manifest.json`.
+`.mcp.json`; Claude Code overrides that server by name through inline
+`mcpServers` in `.claude-plugin/plugin.json` and resolves `${CLAUDE_PLUGIN_ROOT}`. Desktop resolves `${__dirname}` in `manifest.json`.
 Only the client configuration differs; all paths launch the same bundled server.
 Skills use relative links so either plugin host can load the same guidance.
 Desktop receives server instructions and tool descriptions, not Code skill loading.

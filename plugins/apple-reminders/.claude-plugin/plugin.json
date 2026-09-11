@@ -22,5 +22,13 @@
     "claude-code",
     "claude-desktop",
     "mcpb"
-  ]
+  ],
+  "mcpServers": {
+    "apple-reminders-local": {
+      "command": "/bin/sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/launch_bundled_mcp.sh"
+      ]
+    }
+  }
 }

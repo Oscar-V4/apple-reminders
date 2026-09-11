@@ -32,7 +32,28 @@ body:
     attributes:
       label: Plugin version or commit
       description: Use the installed version, tag, or exact commit SHA.
-      placeholder: "0.4.0 or abc1234"
+      placeholder: "0.8.0 or abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Assistant and installation type
+      options:
+        - Codex app plugin
+        - Codex CLI plugin
+        - Claude Code plugin
+        - Claude Desktop MCPB extension
+        - Another local MCP client
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Assistant version
+      description: Use the app's About screen or the CLI version command.
     validations:
       required: true
 
@@ -73,8 +94,8 @@ body:
     id: python-version
     attributes:
       label: Bundled runtime status
-      description: For v0.6.0, report whether the bundled runtime starts or the stable reinstall error. Do not install another Python to collect this field. For older releases, include the interpreter version and source when known.
-      placeholder: "v0.6.0 bundled Python 3.13.15 starts; or bundled runtime missing/invalid"
+      description: For v0.6.0 and newer, report whether the bundled runtime starts or the stable reinstall error. Do not install another Python to collect this field. For older releases, include the interpreter version and source when known.
+      placeholder: "v0.8.0 bundled Python 3.13.15 starts; or bundled runtime missing/invalid"
     validations:
       required: true
 
@@ -85,8 +106,8 @@ body:
       description: Use a disposable list and synthetic Reminder content where possible.
       placeholder: |
         1. Install from ...
-        2. Start a new Codex task.
-        3. Ask Codex to ... using synthetic data.
+        2. Start a fresh conversation/session.
+        3. Ask the assistant to ... using synthetic data.
         4. Observe ...
     validations:
       required: true
@@ -110,7 +131,7 @@ body:
     id: additional-context
     attributes:
       label: Additional sanitized context
-      description: Optional. Describe whether retrying, a fresh exact read, or restarting Codex changed the result.
+      description: Optional. Describe whether retrying, a fresh exact read, or restarting your assistant changed the result.
 
   - type: checkboxes
     id: privacy

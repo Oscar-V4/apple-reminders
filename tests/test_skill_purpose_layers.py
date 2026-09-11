@@ -636,7 +636,8 @@ class PurposeSkillLayerTests(unittest.TestCase):
             encoding="utf-8"
         )
         for name in SKILL_NAMES:
-            self.assertIn(f"${name}", skill_text)
+            self.assertIn(f"../{name}/SKILL.md", skill_text)
+            self.assertTrue((PLUGIN_ROOT / "skills" / name / "SKILL.md").is_file())
 
     def test_primary_skill_starts_core_without_doctor_and_checks_native_availability(self) -> None:
         skill_text = (PLUGIN_ROOT / "skills/apple-reminders/SKILL.md").read_text(

@@ -6,10 +6,12 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'tests'))
+sys.path.insert(0, str(ROOT / 'plugins/apple-reminders'))
 
 from audit_source_package import audit_archive
 from build_source_package import build_package, sha256
@@ -17,6 +19,40 @@ from smoke_installed_package import client_command, extract_audited_archive
 from test_package_source import copy_worktree_plugin_snapshot
 from validate_plugin import validate_clients
 from verify_release_assets import verify_release_payload, VerificationError
+from mcp import server
+
+
+class ClientSchemaTests(unittest.TestCase):
+    def test_all_tools_are_visible_to_clients_that_reject_root_composition(self):
+        runtime = server.McpRuntime()
+        runtime.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
+            'protocolVersion': '2025-11-25', 'capabilities': {},
+            'clientInfo': {'name': 'client-compatibility-test', 'version': '1'},
+        }})
+        tools = runtime.handle({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'})['result']['tools']
+        self.assertEqual({tool['name'] for tool in tools}, set(server.TOOLS_BY_NAME))
+        self.assertEqual(len(tools), 15)
+        for tool in tools:
+            schema = tool['inputSchema']
+            self.assertEqual(schema['type'], 'object')
+            self.assertFalse(schema['additionalProperties'])
+            self.assertFalse({'oneOf', 'anyOf', 'allOf'} & schema.keys())
+            self.assertEqual(schema['properties'], server.TOOLS_BY_NAME[tool['name']]['inputSchema']['properties'])
+        # Discovery must not mutate the authoritative validation contract.
+        self.assertIn('oneOf', server.TOOLS_BY_NAME['fetch_reminders']['inputSchema'])
+
+    def test_branch_constraints_still_reject_before_backend_dispatch(self):
+        for name, arguments in (
+            ('fetch_reminders', {'list_ids': ['list'], 'status': 'completed'}),
+            ('inspect_recently_deleted', {'kind': 'list', 'reminder_id': 'item'}),
+            ('inspect_reminder_native', {'kind': 'sections', 'list_id': 'list', 'query': 'label'}),
+        ):
+            with self.subTest(tool=name):
+                dispatch = Mock(side_effect=AssertionError('invalid branch must not dispatch'))
+                result = server._call_tool(name, arguments, dispatch=dispatch, rate_limit_allows_call=lambda: True)
+                dispatch.assert_not_called()
+                self.assertTrue(result['isError'])
+                self.assertEqual(result['structuredContent']['status'], 'failed_no_mutation')
 
 
 class ClientDistributionTests(unittest.TestCase):
@@ -50,7 +86,7 @@ class ClientDistributionTests(unittest.TestCase):
                 target.write_bytes((self.plugin / name).read_bytes())
             for name, change in (
                 ('.claude-plugin/plugin.json', lambda p: p.update(version='99.0.0')),
-                ('.mcp.json', lambda p: p['mcpServers']['apple-reminders-local'].update(args=['./scripts/launch_bundled_mcp.sh'])),
+                ('.claude-plugin/plugin.json', lambda p: p['mcpServers']['apple-reminders-local'].update(args=['./scripts/launch_bundled_mcp.sh'])),
                 ('manifest.json', lambda p: p['server']['mcp_config'].update(command='python3')),
                 ('manifest.json', lambda p: p.update(compatibility={'platforms': ['darwin', 'linux']})),
             ):

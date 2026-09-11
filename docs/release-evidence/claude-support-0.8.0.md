@@ -10,11 +10,15 @@ extension, integrated with the existing calendar Early Reminder candidate
 MCP instructions and the tool catalog. Client integration adds no private
 capability admission beyond the separately recorded Early Reminder change.
 
-The packaging source for signed helper preparation is
-`9b78b30d9fad96ba08a59710184178f993173ad3`. Existing Python runtime capsules are
-reused unchanged. The EventKit helper is prepared by the existing protected, main-owned signing
-workflow for the new manifest. The Early Reminder candidate's signed 0.8.0
-Native helper is retained with its original source ancestry and verification.
+The Native helper and its signed source ancestry are retained from PR #66.
+Existing Python runtime capsules are reused unchanged. The EventKit helper
+requires a new protected signing run for the final Codex manifest. Accepted
+component identities are recorded in their bundled provenance manifests.
+
+An initial preparation attempt against an intermediate version commit failed
+its full documentation/packaging checks and is not accepted release evidence.
+The corrected source must complete the existing main-owned signing workflow,
+including assembled-source tests and the final exact artifact attestation.
 
 ## Acceptance scenario
 
@@ -33,8 +37,20 @@ Python or requesting developer tools. Use an isolated extracted copy.
 
 ## Evidence
 
-Pending final deterministic tests, client installation checks, live synthetic
-journey, exact fixture cleanup, and independent published-asset verification.
+- Codex scaffold validation, Claude plugin/marketplace validation, and MCPB
+  manifest schema validation passed.
+- Claude Code 2.1.195 loaded five skills and connected to the actual bundled
+  stdio server. The initial probe exposed three tools hidden by Anthropic's
+  root `oneOf` restriction. The discovery projection removes that restriction;
+  subsequent client logs have no skipped tools. Full branch validation remains
+  server-side and rejects mismatched inputs before dispatch.
+- 149 focused transport, contract, profile, and client compatibility tests passed.
+- Full final assembly, installed-package validation, live synthetic journey,
+  cleanup, and published-asset verification remain pending.
+
+The maintainer's Claude Code CLI is not logged in. Its plugin loading and MCP
+handshake can be tested, but an end-to-end Claude model conversation cannot be
+claimed from these checks.
 
 ## Limits
 

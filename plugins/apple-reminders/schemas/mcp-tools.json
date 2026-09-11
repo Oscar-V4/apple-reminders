@@ -1318,7 +1318,7 @@
     {
       "name": "inspect_recently_deleted",
       "title": "Inspect recently deleted reminders",
-      "description": "Native operation with capability-specific compatibility checks. List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window.",
+      "description": "Native operation with capability-specific compatibility checks. List a bounded page of Reminders retained in Recently Deleted, or inspect one exact deleted Reminder and issue an opaque del1 recovery Reference. Deleted content is read locally and remains subject to Apple's 30-day retention window. kind=list accepts account_id, limit, cursor. kind=item requires reminder_id and accepts attachment_limit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1469,7 +1469,7 @@
     {
       "name": "inspect_reminder_native",
       "title": "Inspect reminder details",
-      "description": "Native operation with capability-specific compatibility checks. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference. Include early_reminder to read the separate native calendar interval; EventKit alarms do not project this setting.",
+      "description": "Native operation with capability-specific compatibility checks. Inspect bounded Native Extension state for one exact Reminder, one exact Reminder List's sections, or tag labels. Reminder inspection returns one refreshed opaque Reference. Include early_reminder to read the separate native calendar interval; EventKit alarms do not project this setting. kind=reminder requires reference and include; kind=sections requires list_id; kind=tags accepts account_id and query.",
       "inputSchema": {
         "type": "object",
         "properties": {

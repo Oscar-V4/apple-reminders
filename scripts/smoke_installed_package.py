@@ -137,7 +137,7 @@ def client_command(plugin: Path, client: str) -> list[str]:
         config = json.loads((plugin / manifest["mcpServers"]).read_text())
         server = config["mcpServers"]["apple-reminders-local"]
     elif client == "claude-code":
-        config = json.loads((plugin / ".mcp.json").read_text())
+        config = json.loads((plugin / ".claude-plugin/plugin.json").read_text())
         server = config["mcpServers"]["apple-reminders-local"]
     elif client == "claude-desktop":
         server = json.loads((plugin / "manifest.json").read_text())["server"]["mcp_config"]

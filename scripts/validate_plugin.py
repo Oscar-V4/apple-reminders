@@ -368,7 +368,7 @@ def _semver_core(version: str) -> str:
 def validate_mcp(root: Path, manifest: dict[str, Any], errors: list[str]) -> None:
     root = root.resolve()
     declaration = manifest.get("mcpServers")
-    if not isinstance(declaration, str) or declaration not in {"./.mcp.json", "./.codex-plugin/mcp.json"}:
+    if not isinstance(declaration, str) or declaration != "./.mcp.json":
         errors.append("plugin.json must declare mcpServers as a supported local MCP config")
         return
     config_path = _resolve_plugin_path(root, declaration, "plugin.json mcpServers", errors)
@@ -618,15 +618,13 @@ def validate_clients(root: Path, codex: dict[str, Any], errors: list[str]) -> No
         for key in ("name", "version", "author", "license"):
             if manifest.get(key) != codex.get(key):
                 errors.append(f"{label} manifest {key} must match the Codex manifest")
-    config = _load_json(root / ".mcp.json", errors)
-    expected = {"mcpServers": {"apple-reminders-local": {
+    config = claude.get("mcpServers") if isinstance(claude, dict) else None
+    expected = {"apple-reminders-local": {
         "command": "/bin/sh",
         "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch_bundled_mcp.sh"],
-    }}}
+    }}
     if config != expected:
         errors.append("Claude Code MCP must launch the bundled runtime from CLAUDE_PLUGIN_ROOT")
-    if isinstance(claude, dict) and "mcpServers" in claude:
-        errors.append("Claude Code must discover only the default .mcp.json configuration")
     if not isinstance(desktop, dict):
         return
     if desktop.get("manifest_version") != "0.3":
@@ -642,8 +640,8 @@ def validate_clients(root: Path, codex: dict[str, Any], errors: list[str]) -> No
     }
     if desktop.get("server") != expected_server:
         errors.append("Claude Desktop must launch the bundled runtime from __dirname")
-    if codex.get("mcpServers") != "./.codex-plugin/mcp.json":
-        errors.append("Codex must use its own .codex-plugin/mcp.json configuration")
+    if codex.get("mcpServers") != "./.mcp.json":
+        errors.append("Codex must use the default .mcp.json configuration")
 
 
 def main(argv: list[str] | None = None) -> int:
